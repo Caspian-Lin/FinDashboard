@@ -2,7 +2,7 @@
 
 覆盖验收:「对 list_date 全 null 的发布入队 min_listing_days>0 策略,秒级
 失败且错误指向 list_date」—— 通过真实 REST 入队端点 ``POST /api/research/runs``
-(与 MCP ``_build_queued_manifest`` 共用同一预检)验证:
+(与 MCP ``finboard_run_queue`` 共用同一提交服务与同一预检)验证:
 
 * 发布 instruments 的 list_date 全 null 时,入队立即 422,错误信息含
   ``list_date`` 与 ``listing_age_below_minimum`` 排除统计,不产生 queued 行;

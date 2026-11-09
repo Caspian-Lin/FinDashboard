@@ -76,6 +76,7 @@ from finboard_backtest.research_run import (
     REPLAYABLE_SOURCE_STATUSES,
     FrozenArtifactRef,
     ResearchActorType,
+    ResearchRunConflictError,
     ResearchRunManifest,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
@@ -817,6 +818,11 @@ class ResearchRunSubmissionService:
                 job_row = await self._enqueue_research_run_job(manifest)
                 row.job_id = job_row.job_id
         except (
+            # ``SqlAlchemyResearchRunStore.create_or_get`` 把仓储层的
+            # ``ResearchRunPersistenceConflictError`` 包装成领域错误
+            # ``ResearchRunConflictError``(#513 复核对齐):两条都要收口,
+            # 否则业务层会漏出非 ``ResearchOperationError`` 异常。
+            ResearchRunConflictError,
             ResearchRunPersistenceConflictError,
             BackgroundJobPersistenceConflictError,
             IntegrityError,
@@ -872,6 +878,11 @@ class ResearchRunSubmissionService:
                 job_row = await self._enqueue_research_run_job(manifest)
                 row.job_id = job_row.job_id
         except (
+            # ``SqlAlchemyResearchRunStore.create_or_get`` 把仓储层的
+            # ``ResearchRunPersistenceConflictError`` 包装成领域错误
+            # ``ResearchRunConflictError``(#513 复核对齐):两条都要收口,
+            # 否则业务层会漏出非 ``ResearchOperationError`` 异常。
+            ResearchRunConflictError,
             ResearchRunPersistenceConflictError,
             BackgroundJobPersistenceConflictError,
             IntegrityError,

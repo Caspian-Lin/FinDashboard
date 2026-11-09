@@ -2,7 +2,13 @@
 
 issue #513:入队 / 重放输入 DTO 下沉到 ``finboard_app.research_run_submission``
 (REST 与 MCP 共用同一份字段、默认值与校验器,消除 MCP 对 ``finboard_api`` 的
-懒加载依赖);本模块保留同名 re-export,既有 import 路径与构造方式不破。
+懒加载依赖);本模块保留同名 wire schema,既有 import 路径、构造方式与 **OpenAPI
+组件名**都不破。
+
+wire schema 用同名子类而非别名:FastAPI/pydantic 的 components key 取类名,
+若直接 re-export 基类,组件名会变成 ``ResearchRunSubmitInput`` /
+``ResearchRunReplayInput``,按 dev 生成 stub 的客户端会断。子类零新增字段 /
+校验器,只承载对外组件名。
 """
 
 from __future__ import annotations
@@ -13,11 +19,17 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from finboard_app.research_run_submission import (
-    ResearchRunReplayInput as ResearchRunReplayIn,
+    ResearchRunReplayInput,
+    ResearchRunSubmitInput,
 )
-from finboard_app.research_run_submission import (
-    ResearchRunSubmitInput as ResearchRunQueueIn,
-)
+
+
+class ResearchRunQueueIn(ResearchRunSubmitInput):
+    """``POST /api/research/runs`` 请求体(OpenAPI 组件名保持 #513 之前的值)。"""
+
+
+class ResearchRunReplayIn(ResearchRunReplayInput):
+    """``POST /api/research/runs/{run_id}/replay`` 请求体(组件名同上)。"""
 
 
 class ResearchRunOut(BaseModel):

@@ -66,9 +66,13 @@ from finboard_shared.types import (
 pytestmark = pytest.mark.asyncio
 
 BARS_RELEASE = "integration-equiv-bars-v1"
+#: 研究数据发布(daily_metrics):只提供因子观测,宇宙比 bars 主发布窄(1 只)。
+DAILY_RELEASE = "integration-equiv-daily-v1"
 STRATEGY_ID = "integration_equiv_strategy"
 EMPTY_STRATEGY_ID = "integration_equiv_empty"
 DRAFT_STRATEGY_ID = "integration_equiv_draft"
+#: 联合发布规格:同时冻结 bars 主发布 + daily_metrics 研究数据发布。
+SHARED_STRATEGY_ID = "integration_equiv_shared"
 SYMBOLS = ("600001.SH", "600002.SH", "600003.SH")
 CODE_VERSION = "abcdef0123456789"
 
@@ -213,11 +217,48 @@ async def _publish_bars(engine: AsyncEngine) -> None:
         await session.commit()
 
 
-def _spec(strategy_id: str, **universe_updates: Any) -> ResearchStrategySpec:
+async def _publish_daily(engine: AsyncEngine) -> None:
+    """研究数据发布(daily_metrics):宇宙只有 1 只,用来暴露「用错主发布」。"""
+
+    from finboard_data.releases import DAILY_METRICS_FIELDS, ReleaseDatasetKind
+
+    release = ResearchDatasetRelease(
+        release_id=DAILY_RELEASE,
+        dataset_name="integration_equiv_daily",
+        source="integration-equiv",
+        version="v1",
+        schema_version="v1",
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        period=BarPeriod.D1,
+        adjustment="none",
+        fields=DAILY_METRICS_FIELDS,
+        availability_rules=(("daily_metrics", "available_at <= decision_at"),),
+        code_version=CODE_VERSION,
+        published_at=datetime(2024, 1, 1, tzinfo=UTC),
+        instruments=(_instrument(SYMBOLS[0]),),
+        capabilities=(),
+        quality_status=DatasetQualityStatus.PASSED,
+        quality_report={"release_coverage": "1.0"},
+        dataset_kind=ReleaseDatasetKind.DAILY_METRICS,
+        storage_uri=DAILY_RELEASE,
+        release_checksum="c" * 64,
+    )
+    async with session_factory(engine)() as session:
+        await ResearchDatasetReleaseRepository(session).publish(release)
+        await session.commit()
+
+
+def _spec(
+    strategy_id: str,
+    *,
+    release_ids: tuple[str, ...] = (BARS_RELEASE,),
+    **universe_updates: Any,
+) -> ResearchStrategySpec:
     spec = build_strategy_template(
         "ma_cross",
         strategy_id=strategy_id,
-        dataset_release_ids=(BARS_RELEASE,),
+        dataset_release_ids=release_ids,
     )
     updates: dict[str, Any] = {
         "min_average_amount": None,
@@ -283,8 +324,13 @@ def _payload(key: str, **overrides: Any) -> dict[str, Any]:
 async def _seed(engine: AsyncEngine) -> None:
     await _seed_calendar_and_instruments(engine)
     await _publish_bars(engine)
+    await _publish_daily(engine)
     await _publish_spec(engine, _spec(STRATEGY_ID))
     await _publish_spec(engine, _spec(EMPTY_STRATEGY_ID, min_listing_days=10_000))
+    await _publish_spec(
+        engine,
+        _spec(SHARED_STRATEGY_ID, release_ids=(BARS_RELEASE, DAILY_RELEASE)),
+    )
     await _create_draft_spec(engine, _spec(DRAFT_STRATEGY_ID))
 
 
@@ -400,6 +446,47 @@ async def test_success_rest_and_mcp_are_byte_equivalent(
     assert cross.data["run_id"] == rest_body["run_id"]
     assert cross.data["checksum"] == rest_body["manifest_checksum"]
     assert await _counts(engine) == (2, 2)
+
+
+async def test_split_release_uses_bars_primary_pool(
+    engine: AsyncEngine, client: httpx.AsyncClient, mcp_app: McpAppContext
+) -> None:
+    """联合发布顺序无关:REST/MCP 都用 bars 主发布评估候选池(#513 收敛)。
+
+    旧 MCP 用 ``releases[0]`` 做候选池 / 组合门;当 ``dataset_release_ids`` 把
+    daily_metrics 研究发布排在前面时,它拿研究发布的窄宇宙(1 只)去算
+    ``ceil(1/0.35)=3`` 的可行性,误报 422。新实现与 REST 一致按 bars 主发布
+    判定 —— 本用例在旧实现下会失败,是这次行为收敛的回归护栏。
+    """
+
+    await _seed(engine)
+    payload = _payload(
+        "equiv-split-release-key",
+        strategy_id=SHARED_STRATEGY_ID,
+        dataset_release_ids=[DAILY_RELEASE, BARS_RELEASE],
+    )
+
+    rest = await client.post("/api/research/runs", json=payload)
+    assert rest.status_code == 201, rest.text
+    rest_body = rest.json()
+
+    envelope = await run_tools.queue_run(
+        mcp_app,
+        payload={**payload, "idempotency_key": "equiv-split-release-mcp-key"},
+    )
+    assert envelope.status == "ok", envelope.error
+    mcp_ack = envelope.data
+
+    rest_row = await _run_row(engine, rest_body["run_id"])
+    mcp_row = await _run_row(engine, mcp_ack["run_id"])
+    assert rest_row is not None
+    assert mcp_row is not None
+    assert manifest_from_json(rest_row.manifest).input_checksum == (
+        manifest_from_json(mcp_row.manifest).input_checksum
+    )
+    # 两份发布都进冻结清单,且保持提交顺序(不只冻结 bars)。
+    frozen_ids = [item["artifact_id"] for item in rest_row.manifest["dataset_releases"]]
+    assert frozen_ids == [DAILY_RELEASE, BARS_RELEASE]
 
 
 # --------------------------------------------------------------------------- #

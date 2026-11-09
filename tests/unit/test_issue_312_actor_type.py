@@ -7,8 +7,8 @@
 * 契约层:``ResearchActorType`` 扩 ``agent``;llm 仍被 fail-closed 拒绝
   (红线不变);manifest 序列化 / ``manifest_from_json`` 对新枚举值往返一致,
   历史 ``"human"`` 载荷不受影响;
-* MCP 通道:queue(``_build_queued_manifest``)与 replay 的 run 归属
-  ``agent``;
+* MCP 通道:queue(``ResearchRunSubmissionService.preflight``)与 replay 的 run
+  归属 ``agent``;
 * REST 通道:schema 默认 human 不变、放开 human|agent 二选一,llm 在
   schema 层即 422;replay 缺省(不带 actor_type)保持 human。
 """
@@ -207,7 +207,7 @@ class TestRestSchemaActorType:
 
 
 # ---------------------------------------------------------------------------
-# MCP queue:_build_queued_manifest → actor_type=agent
+# MCP queue:ResearchRunSubmissionService.preflight → actor_type=agent
 # ---------------------------------------------------------------------------
 
 

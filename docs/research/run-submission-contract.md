@@ -56,10 +56,11 @@ finboard-app  background_jobs.py         enqueue_job_core → (job_row, created)
 
 ## 3. 冻结与字节稳定
 
-服务内的门控顺序与函数调用是既有实现的原样搬移（策略版本 → 发布可用性 → 能力 →
-data_scope → 快照/序列 → 预置因子 → screen 绑定 → single_shot 快照 → 决策日历 →
-用户因子 → 序列覆盖 → 多期特征 → user_code → 换发布/锚定 → screen 证据 → 候选池 →
-组合可行性 → 政策覆盖 → manifest）。
+服务内的门控顺序与函数调用以 **REST 路由为基准**原样搬移（策略版本 → 发布可用性 →
+能力 → data_scope → 快照/序列 → 预置因子 → screen 绑定 → single_shot 快照 →
+决策日历 → 用户因子 → 序列覆盖 → 多期特征 → user_code → 换发布/锚定 → screen 证据 →
+候选池 → 组合可行性 → 政策覆盖 → manifest）。MCP 旧顺序有两处不同，已按 REST 对齐，
+差异见 §7.2（只影响错误文案/`code` 优先级）。
 
 `ResearchRunManifest` 的字段顺序、取值与 None 省略规则**不得改动**：
 
@@ -104,12 +105,31 @@ data_scope → 快照/序列 → 预置因子 → screen 绑定 → single_shot 
 
 - REST：`HTTPException(status_code=exc.http_status, detail=exc.to_detail())`，
   `detail = {"code", "message", **details}`（`details` 保留
-  `actual_release_ids` 等结构化字段，旧客户端按字符串读取仍可用）；
+  `actual_release_ids` 等结构化字段）；
 - MCP：`McpToolError(exc.mcp_kind, f"{message}({code})")` —— MCP 信封的
   `error` 只有 kind / message / retryable，没有 details 字段。
 
 `ValueError → invalid_argument` 兜底仍保留给尚未迁移的老路径，新代码不得依赖它
 区分冲突。
+
+### 5.1 对外行为变更：REST `detail` 从字符串变为结构化体
+
+#513 之前 `POST /api/research/runs` 与 `/replay` 的 4xx `detail` 多数是**纯字符串**
+（只有 #510 的 scope 错误已是 `{code, message, …}`）。收敛后所有研究运行提交错误
+统一为对象：
+
+```json
+{"detail": {"code": "universe_empty", "message": "运行数据发布候选池为空,拒绝入队: …"}}
+```
+
+- **这是对外契约变更**，不做字符串兼容：把 `detail` 当字符串用的客户端会拿到对象。
+  典型症状是界面显示 `[object Object]` 或断言 `"xxx" in detail` 抛 `TypeError`。
+- 迁移建议：读 `detail.message` 展示；按 `detail.code`（而不是文本）分支；
+  `detail` 其余键是结构化补充（`actual_release_ids` / `expected_release_ids` 等），
+  可能为空，不要假定存在。
+- Web 端 `web/src/lib/api.ts` 的 `errorMessage()` 已优先取 `detail.message`，
+  `ResearchRuns.tsx` 无需改动；自建客户端 / 脚本 / 外部 harness 需要自查。
+- MCP 侧无对应破坏：`error.kind` 一直是枚举，细码只是追加在 `message` 尾部。
 
 ## 6. 事务所有权
 
@@ -127,7 +147,49 @@ async with app.session_maker() as session:
 故障注入护栏：`tests/integration/test_research_run_submission_equivalence.py` 在
 run 行写入后让 job 入队抛错，断言 `research_runs` / `background_jobs` 两表零残留。
 
-## 7. 适配层等值测试
+## 7. REST 与 MCP 收敛后的行为差异
+
+收敛前 REST 与 MCP 是两份编排，以下差异随 #513 一并消除。它们是**对外行为变化**，
+按影响面从大到小列出（REST 行为始终是基准，MCP 向 REST 对齐）。
+
+### 7.1 bars 主发布（修 bug，影响 MCP 成功/失败）
+
+- **旧 MCP**：候选池与组合可行性预检用 `releases[0].instruments`（`dataset_release_ids`
+  的第一项）。
+- **新实现（与 REST 一致）**：先用 `_bars_release()` 选出唯一的 bars 主发布，再用
+  `primary.instruments` / `primary.end_date` 评估。
+- **可见差异**：联合发布（bars + daily_metrics / financial_indicators）且**研究数据
+  发布排在前面**时，旧 MCP 会用研究发布的窄宇宙做评估。典型症状：研究发布只覆盖
+  少量标的 → 旧 MCP 误报 `422 invalid_argument`（`universe_empty`，或
+  `portfolio_infeasible`：静态候选池 < `ceil(1/0.35)=3`），而 REST 同一 payload 成功。
+  修复后两条通道一致。
+- 回归护栏：`tests/integration/test_research_run_submission_equivalence.py::
+  test_split_release_uses_bars_primary_pool`（`dataset_release_ids=[daily, bars]`，
+  daily 宇宙更窄，两通道都必须成功且冻结清单顺序不变）。
+
+### 7.2 错误优先级（只影响 message/code，status/kind 不变）
+
+同一 payload 同时命中两个门控时，先报哪一个取决于门控顺序。收敛后以 REST 顺序为准，
+MCP 的**错误文案 / `code`** 可能变化；HTTP 状态码与 MCP `error.kind` 不变（都是
+`invalid_input` → 422 / `invalid_argument`）：
+
+- **single_shot 缺快照 vs screen 绑定错配**：旧 MCP 先报缺快照
+  （`snapshot_required`），新实现先做 screen 绑定实绑校验（`screen_binding_invalid`）。
+- **bars 主发布基数 vs 用户因子（`u_`）门控**：旧 MCP 先算用户因子名单
+  （`user_factor_not_active`），新实现先校验「恰好一个 bars 主发布」
+  （`bars_release_ambiguous`）。
+
+只按 `kind` + `code` 分支的客户端不受影响；依赖错误文本做断言的脚本需要复核。
+
+### 7.3 MCP replay 的入参校验（新增拒绝路径）
+
+- **旧 MCP** `finboard_run_replay` 直接接受 `idempotency_key` / `requested_by`
+  原始字符串，无长度/非空校验（空串也能进 manifest）。
+- **新实现**复用 `ResearchRunReplayInput`：`idempotency_key` 必须 8–128 字符、
+  `requested_by` 非空，否则 `invalid_argument`（422 语义）。与 REST
+  `/runs/{id}/replay` 完全同规。
+
+## 8. 适配层等值测试
 
 `tests/integration/test_research_run_submission_equivalence.py`（真实 PostgreSQL）：
 
@@ -137,9 +199,11 @@ run 行写入后让 job 入队抛错，断言 `research_runs` / `background_jobs
   `(status_code, detail.code)` 与 `error.kind` 同源且零写入；
 - 幂等：同键两次 → 1 run + 1 job；
 - 并发：`asyncio.gather` 两路同键 → 单行（撞唯一索引后重读既有行）；
-- 重放：REST 与 MCP 对同一源 run 产出同一 manifest 与同一血缘字段。
+- 重放：REST 与 MCP 对同一源 run 产出同一 manifest 与同一血缘字段；
+- 联合发布顺序：`dataset_release_ids` 把研究数据发布排在 bars 前面时，两通道都按
+  bars 主发布评估（§7.1）。
 
-## 8. 边界
+## 9. 边界
 
 - 只写 `research_runs` / `background_jobs`（研究域），不触实盘
   `orders` / `fills` / `positions` / `audit_logs`；

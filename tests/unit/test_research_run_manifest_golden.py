@@ -49,6 +49,7 @@ from finboard_backtest.strategy_spec import (
 )
 from finboard_backtest.strategy_spec.contracts import StrategyCodeArtifactRef
 from finboard_data import AssetCapability, CapabilityStatus, ResearchDatasetRelease
+from finboard_data.factor_lab import FeatureObservation, FeatureSnapshot
 from finboard_data.releases import (
     RELEASE_FIELDS,
     ReleasedInstrument,
@@ -201,6 +202,40 @@ def _series_record() -> FactorSeriesRecord:
     )
 
 
+def _snapshot() -> FeatureSnapshot:
+    """最小可入队特征快照:锚定本次 bars 发布,单标的单因子观测。
+
+    ``factor_snapshots`` 的 ``FrozenArtifactRef`` 分支(snapshot_id /
+    framework_version / checksum / 排序后的 ``factor:`` 能力集)由此锁定。
+    """
+
+    decision_at = datetime(2024, 12, 31, tzinfo=UTC)
+    return FeatureSnapshot(
+        snapshot_id=SNAPSHOT_ID,
+        dataset_release_id=RELEASE_ID,
+        dataset_release_checksum=RELEASE_CHECKSUM,
+        decision_at=decision_at,
+        published_at=datetime(2024, 12, 31, tzinfo=UTC),
+        framework_version="factor-framework-v1",
+        calculation_windows={},
+        transformations={},
+        neutralization={},
+        code_version=USER_CODE_COMMIT,
+        observations=(
+            FeatureObservation(
+                symbol="600001.SH",
+                feature_name="u_golden_factor",
+                value=0.25,
+                observed_at=decision_at,
+                available_at=datetime(2024, 12, 30, tzinfo=UTC),
+                source="golden-test",
+                source_version="v1",
+            ),
+        ),
+        checksum="e" * 64,
+    )
+
+
 def _payload(key: str, **overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "idempotency_key": key,
@@ -244,6 +279,8 @@ class _FakeFeatureRepo:
         del session
 
     async def get(self, snapshot_id: str) -> object:
+        if snapshot_id == SNAPSHOT_ID:
+            return _snapshot()
         raise AssertionError(f"未声明的快照: {snapshot_id}")
 
 
@@ -362,6 +399,7 @@ GOLDEN_RUN_IDS = {
     "user_code": "RR-c1c755cf79c12ffeca1d92b6",
     "factor_series": "RR-9a000460c864a398895f23e2",
     "replay": "RR-53f852dbc36aae42d0ad1450",
+    "factor_snapshot": "RR-dc172d85b11fc902ad401e95",
 }
 
 GOLDEN_CHECKSUMS = {
@@ -371,6 +409,7 @@ GOLDEN_CHECKSUMS = {
     "user_code": "aa0437ee20b261dfafd5ea83ab0a5e33e87fe6a08383c635857f1265187c5fcd",
     "factor_series": "f411dc5ba3bb5368a44c891fc72bf09cd685379f8d3709e7171b4df6bb9b95ad",
     "replay": "6b347b5528c2111bebcae5a0341bc85c72f30b36a0db638c2c10c569a085f8cf",
+    "factor_snapshot": "670702fae456394902d92d05c5fb308802baeea2b8d2b3a95cfd4fc9a9933041",
 }
 
 
@@ -510,6 +549,73 @@ async def test_golden_factor_series(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(report.manifest.factor_series) == 1
     assert report.manifest.factor_series[0].artifact_id == record.series_id
     assert report.manifest.factor_series[0].checksum == record.content_checksum
+
+
+@pytest.mark.asyncio
+async def test_golden_factor_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``factor_snapshots`` 的 FrozenArtifactRef 分支(其余 6 组均为空)。"""
+
+    service = _service(monkeypatch, _ma_cross_spec())
+    body = ResearchRunSubmitInput.model_validate(
+        _payload("golden-snapshot-key", factor_snapshot_ids=[SNAPSHOT_ID])
+    )
+    report = await service.preflight(body, REST_AGENT)
+    assert report.run_id == GOLDEN_RUN_IDS["factor_snapshot"]
+    assert report.manifest_checksum == GOLDEN_CHECKSUMS["factor_snapshot"]
+    assert len(report.manifest.factor_snapshots) == 1
+    ref = report.manifest.factor_snapshots[0]
+    assert ref.artifact_id == SNAPSHOT_ID
+    assert ref.version == "factor-framework-v1"
+    assert ref.checksum == "e" * 64
+    # 能力集由 observations 的因子名排序去重派生(单因子 → 单元素)。
+    assert ref.capabilities == ("factor:u_golden_factor",)
+
+
+@pytest.mark.asyncio
+async def test_replay_domain_conflict_is_mapped_to_operation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``store.create_or_get`` 抛领域冲突时业务层只漏 ``ResearchOperationError``。
+
+    ``SqlAlchemyResearchRunStore`` 会把仓储层的持久化冲突包装成
+    ``ResearchRunConflictError``(#513 复核对齐),若不显式收口就会绕过统一错误
+    分类,让 REST/MCP 适配层拿到未映射异常。
+    """
+
+    from finboard_app.research_operation import ResearchOperationError
+    from finboard_backtest.research_run import ResearchRunConflictError
+
+    service = _service(monkeypatch, _ma_cross_spec())
+    source = await service.preflight(
+        ResearchRunSubmitInput.model_validate(_payload("golden-replay-source-key")),
+        REST_AGENT,
+    )
+
+    class _ConflictStore(_FakeStore):
+        async def get(self, run_id: str) -> ResearchRunRecord | None:
+            del run_id
+            return ResearchRunRecord(
+                manifest=source.manifest, status=ResearchRunStatus.COMPLETED
+            )
+
+        async def create_or_get(self, manifest: Any) -> Any:
+            del manifest
+            raise ResearchRunConflictError("相同 idempotency_key 对应不同 manifest")
+
+    monkeypatch.setattr(submission, "SqlAlchemyResearchRunStore", _ConflictStore)
+
+    with pytest.raises(ResearchOperationError) as excinfo:
+        await service.replay(
+            "RR-replay-source",
+            ResearchRunReplayInput(
+                idempotency_key="golden-replay-conflict", requested_by="user:513"
+            ),
+            MCP,
+        )
+    assert excinfo.value.category == "conflict"
+    assert excinfo.value.http_status == 409
+    assert excinfo.value.mcp_kind == "conflict"
+    assert excinfo.value.code == "run_conflict"
 
 
 @pytest.mark.asyncio
