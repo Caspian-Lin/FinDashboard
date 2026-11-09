@@ -45,12 +45,12 @@ FinDashboard 是**模块化单体**。研究、模拟和实盘共享一个可部
 ```mermaid
 flowchart TB
     HUMAN["人类操作员"] --> WEB["React 控制台"]
-    AGENT["OpenCode 研究 agent<br/>外置隔离运行时"] -->|"脱敏并审计的 MCP 调用"| MCP
+    AGENT["外部 Agent Harness<br/>Codex · OpenCode · ZCode · DeepSeek Harness"] -->|"脱敏并审计的 MCP 调用"| MCP
 
     subgraph APP["FinDashboard 模块化单体"]
         WEB --> API["FastAPI + WebSocket 控制面"]
         HUMAN --> CLI["finboard CLI / 组装根"]
-        MCP["内嵌 MCP Server<br/>仅研究工具"] --> RESEARCH
+        MCP["独立 MCP Server<br/>仅研究工具"] --> RESEARCH
         API --> RESEARCH["研究与数据域<br/>同步 · 冻结发布 · 因子 · 回测 · OOS · ResearchRun"]
         CLI --> RESEARCH
         RESEARCH --> PORTFOLIO["组合流水线<br/>硬约束 · 资金可行性 · 研究订单"]
@@ -117,6 +117,12 @@ MCP 注册表不存在下单、撤单、改持仓、连接券商、探测凭证�
 - 带 import 与文件系统限制的版本化 Python 提交
 - 无网络、只读根、drop capabilities、非 root、资源受限的一次性 Docker 执行
 - 从 draft、screen、OOS 到 active 产物的晋级生命周期
+- 外部 Harness（Codex / DeepSeek Harness / ZCode / 外部 OpenCode）经 loopback MCP +
+  可撤销的按客户端 Bearer 凭据与作用域预设接入；客户端无关 Skill 位于
+  `.agents/skills/finboard-research/`，逐客户端接入见
+  [docs/agent-integration.md](docs/agent-integration.md)。Web 入口
+  `/research/agent-connect`；内置 OpenCode 托管、iframe 工作台与 `/api/opencode`
+  网关已于 #520 退役。
 
 ## 快速开始
 
@@ -155,7 +161,6 @@ packages/
   finboard-backtest/      因子研究、回放、验证、ResearchRun 执行
   finboard-simulation/    独立纸面交易账本
   finboard-mcp/           最小权限、可审计的研究工具面
-  finboard-opencode/      隔离 OpenCode 运行时控制面
   finboard-research-kit/  提交代码沙箱内可用的 SDK
   finboard-core/          交易内核、事件总线、订单、持仓、账户
   finboard-risk/          下单前检查与 Kill Switch

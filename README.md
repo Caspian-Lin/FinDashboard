@@ -45,12 +45,12 @@ FinDashboard is a **modular monolith**. Research, simulation, and live trading s
 ```mermaid
 flowchart TB
     HUMAN["Human operator"] --> WEB["React console"]
-    AGENT["OpenCode research agent<br/>external isolated runtime"] -->|"sanitized and audited MCP calls"| MCP
+    AGENT["External agent harness<br/>Codex · OpenCode · ZCode · DeepSeek Harness"] -->|"sanitized and audited MCP calls"| MCP
 
     subgraph APP["FinDashboard modular monolith"]
         WEB --> API["FastAPI + WebSocket control plane"]
         HUMAN --> CLI["finboard CLI / composition root"]
-        MCP["Embedded MCP server<br/>research tools only"] --> RESEARCH
+        MCP["Standalone MCP server<br/>research tools only"] --> RESEARCH
         API --> RESEARCH["Research and data domain<br/>sync · frozen releases · factors · backtest · OOS · ResearchRun"]
         CLI --> RESEARCH
         RESEARCH --> PORTFOLIO["Portfolio pipeline<br/>hard constraints · capital feasibility · research orders"]
@@ -121,7 +121,9 @@ The MCP registry has no order placement, cancellation, position mutation, broker
   credential and a scope preset; **tested end to end with Codex CLI and external OpenCode**,
   while DeepSeek Harness and ZCode remain pending (no verified config path yet). The
   client-agnostic Skill lives in `.agents/skills/finboard-research/`; per-client setup and
-  the tested/pending table are in [docs/agent-integration.md](docs/agent-integration.md)
+  the tested/pending table are in [docs/agent-integration.md](docs/agent-integration.md).
+  The Web entry is `/research/agent-connect`; built-in OpenCode hosting, the iframe
+  workbench and the `/api/opencode` gateway were retired in #520.
 
 ## Quick start
 
@@ -160,7 +162,6 @@ packages/
   finboard-backtest/      factor research, replay, validation, ResearchRun execution
   finboard-simulation/    independent paper-trading ledger
   finboard-mcp/           least-privilege, audited research tool surface
-  finboard-opencode/      isolated OpenCode runtime control plane
   finboard-research-kit/  SDK available inside submitted-code sandboxes
   finboard-core/          trading kernel, event bus, orders, positions, accounts
   finboard-risk/          pre-trade checks and Kill Switch
@@ -186,6 +187,8 @@ The current phase prioritizes research data releases, factor experiments, Resear
 ## Documentation
 
 - [Development guide](./docs/dev-guide.md)
+- [External agent integration](./docs/agent-integration.md) — per-client MCP setup, tested / pending matrix, and migration from the retired built-in workbench (#520).
+- [MCP client credentials and scopes](./docs/mcp-client-auth.md)
 - [Research data operations](./docs/research/data-ops.md) — the shared data base Web entry point is `/data` (overview / datasets / sync & publish / tech detail).
 - [Research roadmap and findings](./docs/research/)
 - [Demo plan and verification](./docs/demo/README.md)

@@ -69,6 +69,31 @@ sha256 摘要。**不要把 token 写进仓库 / 客户端配置文件 / 日志*
 | 精确证据分页 | `finboard_topic_read(view="refs")` / `finboard_memory_page` / `finboard_decision_projection`(SQL 白名单投影分页) |
 | 收尾 | `finboard_topic_write(operation="append", …)` 追加轮次 + `finboard_memory_remember(tags=["research-round"])`;`docs/research/` 是 canonical,工作记录不是结论 |
 
+### 1.4 从内置工作台迁移(#520)
+
+内置 OpenCode 托管(`opencode web` 容器、iframe 工作台、`/api/opencode` 网关、
+provider 模型同步)已于 #520 删除;Web 入口改为 `/research/agent-connect`,
+旧 `/research/workbench?topic=RT-…` 永久跳转并保留参数。
+
+- **旧配置键**:`FINBOARD_OPENCODE_*` 不再生效。API 启动会打印一行
+  `api.opencode_settings_retired`,列出仍存在的键名(不阻断启动);从 `.env` /
+  环境变量删除即可。
+- **命名卷**:`opencode-data`(会话 + `auth.json`)与 `opencode-config` **不会**
+  被 FinDashboard 删除(升级 / 回退都不删)。不再使用时先只读备份:
+
+  ```bash
+  docker run --rm -v opencode-data:/d:ro -v "$PWD:/out" alpine \
+    sh -c 'cp -a /d /out/opencode-data-backup'
+  docker run --rm -v opencode-config:/d:ro -v "$PWD:/out" alpine \
+    sh -c 'cp -a /d /out/opencode-config-backup'
+  ```
+
+- **回退**:回退到 #520 之前的版本会按旧配置重新创建容器,卷内会话仍在;本版本
+  不会自动启动或删除容器/卷。
+- **仓库级 OpenCode 配置**:`.opencode/opencode.json` 的 `finboard` URL 已从
+  `host.docker.internal:8765` 改为 `127.0.0.1:8765`(外部 OpenCode 从仓库根启动
+  即可用;token 仍经 `{env:FINBOARD_MCP_TOKEN}` 注入)。
+
 ## 2. 客户端矩阵(实测 / 待验)
 
 | 客户端 | 状态 | 实测日期 | 证据 |

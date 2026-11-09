@@ -16,7 +16,7 @@ product。面向用户复核外置agent的量化研究；沿用现有双主题�
 ├── 研究运行      /research/runs       — 冻结输入、血缘追踪、运行重放
 ├── 组合与风险    /research/portfolio  — 目标权重分配、离散交易、资金可行性
 ├── 模拟盘        /research/simulation — 纸面撮合、目标仓位决策、绩效报告
-├── 研究工作台    /research/workbench  — OpenCode Web 研究交互（iframe 直连，AI 能力由 OpenCode 承担）
+├── Agent 接入    /research/agent-connect — 外部 Harness 经 MCP 接入（端点 / 凭据 / RT-BJ-RR 交接 / 迁移）
 ├── 研究记录      /research/docs       — 仓库 docs/research/ 的只读展示（canonical 在仓库，经 PR 维护）
 └── 研究报告      /research/reports     — 聚合展示运行结果与绩效归因、CSV/Markdown 导出
 
@@ -55,20 +55,21 @@ product。面向用户复核外置agent的量化研究；沿用现有双主题�
 顶栏「研究流程」帮助弹层在 8 步主流程之外单列探索工具，避免把探索动作误读为晋级步骤：
 
 - **回测** `/backtest`：快速探索，单次运行看结果，不产生可晋级的验证结论
-- **研究工作台** `/research/workbench`：OpenCode 研究交互入口
+- **Agent 接入** `/research/agent-connect`：外部 Harness 经 MCP 接入研究域（旧 `/research/workbench` 永久跳转至此并保留 `?topic=`）
 - **研究记录** `/research/docs`：仓库 `docs/research/`（ROADMAP / FINDINGS / rounds）的只读展示，canonical 在仓库、经 PR 维护
 
 ### AI 辅助流程
 
 ```
-OpenCode Agent 研究交互（工作台 iframe 直连）
+外部 Harness（Codex / 外部 OpenCode / ZCode / DeepSeek Harness）经 MCP 接入
 研究写操作（ResearchRun/回测/模拟盘）由 agent 经 MCP 自主执行（#122）
-Agent（OpenCode）分析 → 创建验证实验 / 因子实验 → 机器验证
+Agent 分析 → 创建验证实验 / 因子实验 → 机器验证
 ```
 
-「研究工作台」页面顶部 banner 展示 OpenCode Web 与 FinBoard MCP 运行状态;
-`opencode_web_enabled=false` 时工作台显示降级提示。
-Agent 行为审计可查 `GET /api/mcp/audit`（`mcp_audit_persist` 开启时持久化）。
+「Agent 接入」页展示 MCP 端点、按客户端凭据预设、`RT-` 深链交接、续等 `BJ-`、
+引用 `RR-` 与收尾协议；内置 OpenCode 工作台（iframe）与 `/api/opencode` 网关已于
+#520 退役，旧深链自动跳转且不丢 `?topic=`。Agent 行为审计可查
+`GET /api/mcp/audit`（`mcp_audit_persist` 开启时持久化）。
 
 ## 三区边界
 
