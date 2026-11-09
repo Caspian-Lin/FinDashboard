@@ -1009,7 +1009,11 @@ export default function ResearchTopics() {
           <Link to="/research/docs">正式研究资料</Link>
         </Button>
         <Button variant="outline" asChild>
-          <Link to="/research/workbench">继续与 agent 研究</Link>
+          <Link
+            to={`/research/agent-connect${topicId ? `?topic=${encodeURIComponent(topicId)}` : ""}`}
+          >
+            继续与 agent 研究
+          </Link>
         </Button>
       </div>
       {params.get("source_kind") && params.get("source_id") && (

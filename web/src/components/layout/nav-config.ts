@@ -9,7 +9,7 @@ import {
   GitBranch,
   Scale,
   PlayCircle,
-  MonitorSmartphone,
+  Plug,
   BookOpen,
   FileText,
   LayoutDashboard,
@@ -68,9 +68,9 @@ export const navGroups: NavGroup[] = [
         icon: Scale,
       },
       {
-        to: "/research/workbench",
-        label: { zh: "研究工作台", en: "Research Workbench" },
-        icon: MonitorSmartphone,
+        to: "/research/agent-connect",
+        label: { zh: "Agent 接入", en: "Agent Connect" },
+        icon: Plug,
       },
       {
         to: "/research/reports",
