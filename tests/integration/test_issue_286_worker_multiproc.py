@@ -198,9 +198,7 @@ def _worker_env(test_db_url: str) -> dict[str, str]:
     env = os.environ.copy()
     env["FINBOARD_DB_URL"] = test_db_url
     env["FINBOARD_TEST_DB_URL"] = test_db_url
-    # 子 worker 关闭与研究运行时 / MCP 相关入口(worktree 隔离约定一致)
-    env["FINBOARD_OPENCODE_ENABLED"] = "false"
-    env["FINBOARD_OPENCODE_WEB_ENABLED"] = "false"
+    # 子 worker 关闭研究 MCP 入口(worktree 隔离约定一致;#520 起无 OpenCode 键)
     env["FINBOARD_MCP_ENABLED"] = "false"
     env["FINBOARD_WORKER_PROCESSES"] = "1"
     env["PYTHONPATH"] = os.getcwd()

@@ -1,10 +1,10 @@
-"""研究 Skill 结构 / 协议契约(issue #110 → #519 重定向)。
+"""研究 Skill 结构 / 协议契约(issue #110 → #519 重定向 → #520 收尾)。
 
 #519 把 OpenCode 专用 Skill 改成通用 `finboard-research`:
 
 * 新目录是 canonical:``SKILL.md`` + ``references/`` + ``presets/``;
-* 旧目录 ``finboard-opencode-research`` 只保留**弃用 shim**(迁移映射表,
-  #520 删除),不再维护 references;
+* 旧目录 ``finboard-opencode-research`` 的弃用 shim 已由 #520 删除(本文件
+  锁定它不会被重新引入);
 * 工具名必须是**真实注册名** ``finboard_<family>_<operation>``,且工具契约文档
   不能写死工具总数 —— 清单唯一事实源是 ``TOOL_SCOPES``(与注册表集合相等,
   由 ``test_mcp_server_contract.py`` 锁定)。#516 等后续 issue 新增工具不应让
@@ -51,6 +51,12 @@ def _section_headings(text: str) -> list[str]:
 
 
 class TestCanonicalSkill:
+    def test_legacy_skill_dir_is_gone(self) -> None:
+        """#520 删除旧名 shim;不要再引入第二份 Skill 目录。"""
+        assert not _LEGACY_DIR.exists(), (
+            "旧 Skill 目录已由 #520 删除;迁移已完成,不要再建弃用 shim"
+        )
+
     def test_skill_md_exists_with_frontmatter(self) -> None:
         content = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         assert content.startswith("---")
@@ -148,20 +154,6 @@ class TestCanonicalSkill:
         content = (_SKILL_DIR / "references" / "memory.md").read_text(encoding="utf-8")
         for keyword in ["active", "forgotten", "archived", "supersedes", "source_refs"]:
             assert keyword in content, f"记忆规则缺失: {keyword}"
-
-
-class TestLegacyShim:
-    def test_legacy_dir_is_a_shim_pointing_at_new_name(self) -> None:
-        shim = (_LEGACY_DIR / "SKILL.md").read_text(encoding="utf-8")
-        assert "finboard-research" in shim
-        assert "已更名" in shim
-        assert "迁移映射表" in shim
-        assert "#520" in shim
-        # shim 不是第二份 Skill:不再带启动协议与 references 副本。
-        assert "会话启动协议" not in shim
-        assert not (_LEGACY_DIR / "references").exists(), (
-            "旧 references/ 必须删除,避免两份文档漂移"
-        )
 
 
 #: 工具调用表达式:``finboard_xxx(...)``;参数名 ``key=``。

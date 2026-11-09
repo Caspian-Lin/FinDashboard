@@ -7,9 +7,8 @@
 .PHONY: help install sync lint format typecheck test test-unit test-integration \
         db-up db-down db-logs migrate migrate-new run serve \
         web-install web-dev web-build web-lint \
-        opencode-serve opencode-web mcp-serve mcp-serve-http mcp-serve-http-remote \
+        mcp-serve mcp-serve-http mcp-serve-http-remote \
         mcp-client-create mcp-client-list mcp-client-revoke \
-        opencode-agent-image opencode-agent-smoke \
         worker dev clean
 
 PYTHON ?= python3.12
@@ -100,22 +99,12 @@ web-build: ## 构建前端生产包到 web/dist
 web-lint: ## 前端 ESLint
 	cd $(WEB_DIR) && $(NPM) run lint
 
-# --------------------------------------------------------------------------- OpenCode 研究运行时(#108/#109/#118)
-OPENCODE_PORT ?= 4097
-OPENCODE_SERVE_PORT ?= 4096
-# iframe 跨源嵌入必须允许 FinBoard 前端源
-OPENCODE_CORS ?= http://localhost:5173
+# --------------------------------------------------------------------------- MCP 研究工具服务(#108/#517)
 # HTTP 传输必须有服务端凭据(#517):推荐用 `make mcp-client-create` 签发
 # 按客户端凭据;旧共享 token 仅在兼容期通过 MCP_AUTH_TOKEN 显式传入(默认空)。
 MCP_AUTH_TOKEN ?=
 MCP_CLIENT_NAME ?= codex
 MCP_CLIENT_PRESET ?= readonly
-
-opencode-serve: ## 启动 opencode serve(headless HTTP API,端口 $(OPENCODE_SERVE_PORT))
-	opencode serve --port $(OPENCODE_SERVE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
-
-opencode-web: ## 启动 opencode web(带 Web UI,端口 $(OPENCODE_PORT));FinBoard 托管时无需手动启动
-	opencode web --port $(OPENCODE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
 
 mcp-client-create: ## 签发 MCP 客户端凭据(NAME=$(MCP_CLIENT_NAME) PRESET=$(MCP_CLIENT_PRESET);明文 token 只打印一次)
 	$(UV) run finboard mcp client create --name $(MCP_CLIENT_NAME) --preset $(MCP_CLIENT_PRESET)
@@ -134,17 +123,6 @@ mcp-serve-http: ## 启动 finboard-mcp(本机 loopback HTTP;凭据来自 mcp_cli
 
 mcp-serve-http-remote: ## 非 loopback HTTP(容器/远程;须 TLS 反向代理 + 凭据;显式 ALLOW_REMOTE)
 	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_ALLOW_REMOTE=true FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN="$(MCP_AUTH_TOKEN)" $(UV) run python -m finboard_mcp
-
-# 衍生镜像 tag:与 Dockerfile ARG BASE_IMAGE 的 opencode 版本同步 bump(#313)。
-OPENCODE_AGENT_IMAGE ?= finboard-opencode-agent:1.18.15
-
-opencode-agent-image: ## 构建 OpenCode 容器衍生镜像($(OPENCODE_AGENT_IMAGE);官方镜像 + jq/python3,见 docs/opencode-agent-image.md)
-	docker build -f docker/opencode-agent/Dockerfile \
-		-t $(OPENCODE_AGENT_IMAGE) docker/opencode-agent/
-
-opencode-agent-smoke: ## 衍生镜像 smoke:jq/python3 可用 + ENTRYPOINT 完好
-	docker run --rm $(OPENCODE_AGENT_IMAGE) --version
-	docker run --rm --entrypoint /bin/sh $(OPENCODE_AGENT_IMAGE) -c 'jq --version && python3 --version'
 
 # --------------------------------------------------------------------------- 后台任务队列
 worker: ## 启动后台任务 worker(消费研究/数据 job 队列;make dev 已默认附带)

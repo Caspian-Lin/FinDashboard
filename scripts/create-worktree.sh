@@ -83,8 +83,7 @@ else
     -e "s#^\(FINBOARD_DB_URL=.*\)findashboard\$#\1findashboard_wt${N}#" \
     -e "s#^\(FINBOARD_TEST_DB_URL=.*\)findashboard_test\$#\1findashboard_wt${N}_test#" \
     -e "s#^FINBOARD_MCP_PORT=.*#FINBOARD_MCP_PORT=$((8763 + N))#" \
-    -e "s#^FINBOARD_OPENCODE_ENABLED=.*#FINBOARD_OPENCODE_ENABLED=false#" \
-    -e "s#^FINBOARD_OPENCODE_WEB_ENABLED=.*#FINBOARD_OPENCODE_WEB_ENABLED=false#" \
+    -e "/^FINBOARD_OPENCODE_/d" \
     -e "s#^FINBOARD_MCP_ENABLED=.*#FINBOARD_MCP_ENABLED=false#" \
     .env
   echo "[3/7] .env 已写入独立库/端口配置"

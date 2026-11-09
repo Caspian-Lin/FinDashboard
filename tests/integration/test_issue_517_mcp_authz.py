@@ -67,11 +67,11 @@ _WRITE_TOOL = "finboard.run.queue"
 
 
 def _mcp_env(**overrides: str) -> dict[str, str]:
-    """无 .env / 无 OpenCode 环境的 MCP 子进程环境。"""
+    """无 .env / 无外部 Harness 配置的 MCP 子进程环境(#520 起无 opencode 键)。"""
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("FINBOARD_MCP_", "FINBOARD_OPENCODE_"))
+        if not key.startswith("FINBOARD_MCP_")
     }
     env.update(overrides)
     return env
