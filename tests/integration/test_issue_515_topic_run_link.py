@@ -9,6 +9,7 @@ no live trading table is written anywhere in this module.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,7 +17,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from finboard_app.research_audit import (
@@ -103,19 +104,19 @@ async def engine(_engine: AsyncEngine) -> AsyncEngine:
 
 async def _clean_business(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
-        for table in (
-            ResearchTopicLinkModel.__table__,
-            ResearchTopicEntryModel.__table__,
-            ResearchTopicModel.__table__,
-            ResearchAuditEventModel.__table__,
-            BackgroundJobModel.__table__,
-            ResearchRunModel.__table__,
+        for model in (
+            ResearchTopicLinkModel,
+            ResearchTopicEntryModel,
+            ResearchTopicModel,
+            ResearchAuditEventModel,
+            BackgroundJobModel,
+            ResearchRunModel,
         ):
-            await conn.execute(table.delete())
+            await conn.execute(delete(model))
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _isolate(engine: AsyncEngine) -> None:
+async def _isolate(engine: AsyncEngine) -> AsyncIterator[None]:
     await _ensure_seed(engine)
     await _clean_business(engine)
     yield
@@ -131,7 +132,9 @@ async def audit(engine: AsyncEngine) -> ResearchAuditRecorder:
 
 
 @pytest_asyncio.fixture
-async def client(engine: AsyncEngine, audit: ResearchAuditRecorder) -> httpx.AsyncClient:
+async def client(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> AsyncIterator[httpx.AsyncClient]:
     from finboard_api.deps import get_db_session
     from finboard_api.routes.research_runs import router as research_runs_router
     from finboard_api.routes.research_topic_runs import (
@@ -176,7 +179,7 @@ async def _create_topic(
     # Topic.create itself is audited (#518); start from a clean audit slate so
     # each test asserts only the topic-run events it produces.
     async with engine.begin() as conn:
-        await conn.execute(ResearchAuditEventModel.__table__.delete())
+        await conn.execute(delete(ResearchAuditEventModel))
     return record
 
 

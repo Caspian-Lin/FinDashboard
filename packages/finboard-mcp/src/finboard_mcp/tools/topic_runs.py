@@ -8,7 +8,7 @@ retry and immutable late link behave identically on both channels.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
@@ -58,7 +58,7 @@ async def topic_run_start(
             except ResearchOperationError as exc:
                 await session.rollback()
                 raise _mcp_error(exc) from exc
-            return to_jsonable(result)
+            return cast(dict[str, Any], to_jsonable(result))
 
     return await run_tool(
         audit=app.audit,
@@ -83,8 +83,11 @@ async def topic_run_list(
 ) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         async with app.session_maker() as session:
-            return to_jsonable(
-                await list_topic_runs(session, topic_id, limit=limit, cursor=cursor)
+            return cast(
+                dict[str, Any],
+                to_jsonable(
+                    await list_topic_runs(session, topic_id, limit=limit, cursor=cursor)
+                ),
             )
 
     return await run_tool(
@@ -100,7 +103,10 @@ async def topic_run_get(
 ) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         async with app.session_maker() as session:
-            return to_jsonable(await get_topic_run(session, topic_id, run_id))
+            return cast(
+                dict[str, Any],
+                to_jsonable(await get_topic_run(session, topic_id, run_id)),
+            )
 
     return await run_tool(
         audit=app.audit,
@@ -133,7 +139,7 @@ async def topic_run_retry(
             except ResearchOperationError as exc:
                 await session.rollback()
                 raise _mcp_error(exc) from exc
-            return to_jsonable(result)
+            return cast(dict[str, Any], to_jsonable(result))
 
     return await run_tool(
         audit=app.audit,
@@ -164,7 +170,7 @@ async def topic_run_cancel(
             except ResearchOperationError as exc:
                 await session.rollback()
                 raise _mcp_error(exc) from exc
-            return to_jsonable(result)
+            return cast(dict[str, Any], to_jsonable(result))
 
     return await run_tool(
         audit=app.audit,
@@ -177,7 +183,9 @@ async def topic_run_cancel(
 async def run_topics(app: McpAppContext, *, run_id: str) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         async with app.session_maker() as session:
-            return to_jsonable(await list_run_topics(session, run_id))
+            return cast(
+                dict[str, Any], to_jsonable(await list_run_topics(session, run_id))
+            )
 
     return await run_tool(
         audit=app.audit,
