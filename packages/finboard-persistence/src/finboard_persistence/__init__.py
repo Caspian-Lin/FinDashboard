@@ -48,6 +48,10 @@ from finboard_persistence.lifecycle_sync import (
     persist_tushare_lifecycle_events,
 )
 from finboard_persistence.mcp_audit_repo import McpAuditRepository
+from finboard_persistence.mcp_client_repo import (
+    McpClientConflictError,
+    McpClientRepository,
+)
 from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
@@ -73,6 +77,7 @@ from finboard_persistence.models import (
     InstrumentModel,
     InstrumentNameModel,
     McpAuditEventModel,
+    McpClientModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
@@ -225,6 +230,9 @@ __all__ = [
     "InstrumentSyncResult",
     "McpAuditEventModel",
     "McpAuditRepository",
+    "McpClientConflictError",
+    "McpClientModel",
+    "McpClientRepository",
     "OrderModel",
     "OrderRepository",
     "PgTradingCalendarStore",

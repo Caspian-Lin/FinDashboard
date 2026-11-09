@@ -1,7 +1,18 @@
 """MCP 工具统一执行器。
 
 每个工具函数的函数体只关心「做什么」(返回 data 或抛异常),横切关注点 ——
-计时、审计、脱敏摘要、异常到信封的映射 —— 统一由 :func:`run_tool` 处理。
+作用域强制(#517)、计时、审计、脱敏摘要、异常到信封的映射 —— 统一由
+:func:`run_tool` 处理。
+
+作用域强制(issue #517):
+
+* 身份来自显式 ``identity`` 参数 → ``contextvars``(工具入口
+  ``app_context(ctx)`` 写入)→ 进程级 stdio 默认身份;
+* ``TOOL_SCOPES`` 查不到工具条目 = 契约错误 = **拒绝**(fail-closed),不会
+  「未声明即放行」;``"*"`` 仅由旧 ``FINBOARD_MCP_AUTH_TOKEN`` 合成;
+* ``FINBOARD_MCP_READONLY_ONLY`` 兼容期:任何需要写作用域的工具一律拒绝;
+* 只有 server lifespan / ``__main__`` 装配了策略后才强制;直接调用 helper 的
+  单元测试保持旧行为(策略未装配)。
 
 异常映射策略:
 
@@ -15,6 +26,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
@@ -29,8 +41,16 @@ from finboard_mcp.envelope import (
     new_operation_id,
     ok,
 )
+from finboard_mcp.identity import McpClientIdentity, current_identity
+from finboard_mcp.scopes import (
+    identity_has_scopes,
+    required_scopes_for,
+    scope_policy,
+)
 
 Handler = Callable[[], Awaitable[Any]]
+
+_logger = logging.getLogger("finboard.mcp.execution")
 
 
 class McpToolError(Exception):
@@ -58,10 +78,65 @@ async def run_tool(
     sensitive: tuple[str, ...] = (),
     caller: str | None = None,
     idempotency_key: str | None = None,
+    identity: McpClientIdentity | None = None,
 ) -> ToolEnvelope:
-    """执行一个工具,统一审计与异常映射,返回 :class:`ToolEnvelope`。"""
+    """执行一个工具,统一作用域强制 / 审计与异常映射,返回 :class:`ToolEnvelope`。"""
     operation_id = new_operation_id()
     summary = summarize_arguments(arguments, sensitive=sensitive)
+    policy = scope_policy()
+    effective_identity = identity or current_identity() or policy.default_identity
+    audit_caller = caller or (
+        effective_identity.client_id if effective_identity is not None else None
+    )
+
+    if policy.enforce:
+        required = required_scopes_for(tool_name)
+        if required is None:
+            # 新增工具未登记 TOOL_SCOPES:契约错误,拒绝而不是放行。
+            _logger.error(
+                "mcp.scope_contract_missing tool_name=%s detail=%s",
+                tool_name,
+                "tool 未在 finboard_mcp.scopes.TOOL_SCOPES 登记,按拒绝处理",
+            )
+            await _record_denied(
+                audit,
+                operation_id=operation_id,
+                tool_name=tool_name,
+                summary=summary,
+                caller=audit_caller,
+                message="工具未登记作用域,已按默认拒绝处理(契约错误)",
+            )
+            return denied(
+                "permission_denied",
+                "工具未登记作用域,已按默认拒绝处理(契约错误)",
+                operation_id=operation_id,
+            )
+        if policy.readonly_only:
+            # 兼容期开关:无论身份是否全权,写作用域工具一律拒绝。
+            permitted = required <= frozenset({"research.read"})
+        else:
+            permitted = identity_has_scopes(effective_identity, required)
+        if not permitted:
+            if policy.readonly_only:
+                message = (
+                    "MCP 处于只读兼容模式(FINBOARD_MCP_READONLY_ONLY),写作用域工具被拒绝"
+                )
+            else:
+                granted = sorted(effective_identity.scopes) if effective_identity else []
+                message = (
+                    f"客户端缺少所需作用域:{', '.join(sorted(required))}"
+                    f"(已授予:{', '.join(granted) or '无'})"
+                )
+            await _record_denied(
+                audit,
+                operation_id=operation_id,
+                tool_name=tool_name,
+                summary=summary,
+                caller=audit_caller,
+                message=message,
+            )
+            return denied("permission_denied", message, operation_id=operation_id)
+
     started = time.monotonic()
     try:
         result = await handler()
@@ -76,7 +151,7 @@ async def run_tool(
                 status=status,
                 latency_ms=latency_ms,
                 error_kind=kind,
-                caller=caller,
+                caller=audit_caller,
                 recorded_at=now_iso(),
             )
         )
@@ -100,7 +175,7 @@ async def run_tool(
             status="ok",
             latency_ms=latency_ms,
             error_kind=None,
-            caller=caller,
+            caller=audit_caller,
             recorded_at=now_iso(),
         )
     )
@@ -109,6 +184,33 @@ async def run_tool(
         operation_id=operation_id,
         idempotency_key=idempotency_key,
         provenance=provenance,
+    )
+
+
+async def _record_denied(
+    audit: AuditRecorder,
+    *,
+    operation_id: str,
+    tool_name: str,
+    summary: dict[str, Any],
+    caller: str | None,
+    message: str,
+) -> None:
+    """作用域拒绝也进审计(与 handler 内 permission_denied 同一信封语义)。"""
+    await audit.record(
+        AuditRecord(
+            operation_id=operation_id,
+            tool_name=tool_name,
+            arguments_summary=summary,
+            status="denied",
+            latency_ms=0,
+            error_kind="permission_denied",
+            caller=caller,
+            recorded_at=now_iso(),
+        )
+    )
+    _logger.warning(
+        "mcp.scope_denied tool_name=%s caller=%s detail=%s", tool_name, caller, message
     )
 
 

@@ -78,26 +78,50 @@ async def _start_embedded_mcp_server(
 
     容器内 opencode 通过 ``host.docker.internal:{mcp_port}`` 访问该 server。
     复用 ``build_mcp_server()``(研究域独立 lifespan + 独立 AsyncEngine,与
-    TradingKernel 无 session 冲突)+ Bearer 鉴权(``mcp_auth_token``)。
+    TradingKernel 无 session 冲突)+ Bearer 鉴权(#517:``mcp_clients`` 表按
+    客户端凭据 + 旧 ``mcp_auth_token`` 兼容)。
 
     ``host`` 显式覆盖 ``settings.mcp_host``(#157):web 容器模式下容器经
     host.docker.internal 访问宿主机,服务绑 127.0.0.1 时不可达,调用方会在
     默认值时自动改绑 0.0.0.0(Bearer token 保护)。
 
-    失败降级:无 ``mcp_auth_token`` → 跳过(HTTP 传输强制鉴权,空 token 拒绝启动);
-    端口已被占用(上次进程残留)→ 后台任务捕获 ``SystemExit``/异常,记 warning,
-    不炸 API(容器内 opencode 连不上 MCP 会降级为内置工具)。
+    失败降级:无 ``mcp_auth_token`` 且无有效客户端 → 跳过(HTTP 传输强制鉴权,
+    无凭据拒绝启动);端口已被占用(上次进程残留)→ 后台任务捕获
+    ``SystemExit``/异常,记 warning,不炸 API(容器内 opencode 连不上 MCP 会
+    降级为内置工具)。
     """
     bind_host = host if host is not None else settings.mcp_host
-    if not settings.mcp_auth_token:
-        logger.warning("api.opencode_mcp_skipped", reason="no_mcp_auth_token")
-        return
-    from finboard_mcp.auth import wrap_with_bearer_auth
+    from finboard_mcp.auth import (
+        DatabaseIdentityResolver,
+        warn_legacy_auth_token,
+        wrap_with_bearer_auth,
+    )
     from finboard_mcp.server import build_mcp_server
+    from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    components = getattr(app.state, "components", None)
+    smaker = getattr(components, "session_maker", None)
+    resolver = DatabaseIdentityResolver(smaker) if smaker is not None else None
+    legacy_token = settings.mcp_auth_token
+    if not legacy_token:
+        if smaker is None or resolver is None:
+            logger.warning("api.opencode_mcp_skipped", reason="no_mcp_auth_token")
+            return
+        async with smaker() as session:
+            active = await McpClientRepository(session).count_active()
+        if active == 0:
+            logger.warning(
+                "api.opencode_mcp_skipped", reason="no_active_mcp_clients"
+            )
+            return
+    else:
+        warn_legacy_auth_token()
 
     mcp = build_mcp_server()
     starlette_app = mcp.streamable_http_app(host=bind_host)
-    wrapped = wrap_with_bearer_auth(starlette_app, token=settings.mcp_auth_token)
+    wrapped = wrap_with_bearer_auth(
+        starlette_app, token=legacy_token, resolver=resolver
+    )
     config = uvicorn.Config(
         wrapped,
         host=bind_host,

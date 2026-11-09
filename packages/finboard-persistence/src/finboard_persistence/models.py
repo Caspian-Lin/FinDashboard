@@ -2367,6 +2367,41 @@ class McpAuditEventModel(Base, IdMixin):
     )
 
 
+class McpClientModel(Base, IdMixin):
+    """MCP 按客户端凭据(issue #517)。
+
+    服务端签发的可撤销 Bearer 凭据。只存 ``sha256(token)`` 十六进制摘要,
+    不存明文;``token_prefix`` 仅用于人工辨认(secret 前 16 字符),不能用于
+    认证。``revoked_at`` / ``expires_at`` 非空即拒绝;``last_used_at`` 供运营
+    审计,已吊销的凭据不再更新。
+
+    ``scopes`` 是 JSON 数组,取值 ``research.read`` / ``research.write`` /
+    ``research.run`` / ``data.write`` / ``audit.read``。``FINBOARD_MCP_AUTH_TOKEN``
+    旧共享 token 不落库(启动时合成 ``MC-legacy``,下一版本移除)。
+    """
+
+    __tablename__ = "mcp_clients"
+
+    client_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), index=True)
+    token_prefix: Mapped[str] = mapped_column(String(16))
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class ResearchTopicModel(Base, IdMixin):
     """Research metadata only; never owns or deletes evidence (#500/#514)."""
 

@@ -197,18 +197,28 @@ class Settings(BaseSettings):
     research_promotion_max_abs_correlation: float = Field(default=0.80, ge=0.0, le=1.0)
     research_promotion_min_periods: int = Field(default=2, ge=1)
 
-    # ---- FinBoard MCP Server(issue #108)----
-    # 向外置研究 Agent(OpenCode)暴露受控研究工具的 MCP 服务。默认关闭,显式启用。
-    # 不连接实盘账户 / 订单 / 持仓;实盘能力永久不注册为工具。
-    mcp_enabled: bool = False
+    # ---- FinBoard MCP Server(issue #108;#517 独立入口 + 按客户端授权)----
+    # 向外置研究 Agent 暴露受控研究工具的 MCP 服务。**未设置时默认启用**
+    # (#517):显式 FINBOARD_MCP_ENABLED=false 时 `python -m finboard_mcp`
+    # 打印具名原因并以退出码 2 结束。不连接实盘账户 / 订单 / 持仓;
+    # 实盘能力永久不注册为工具。
+    mcp_enabled: bool = True
     mcp_transport: Literal["stdio", "streamable-http", "sse"] = "stdio"
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8765
-    # HTTP 传输(``streamable-http``/``sse``)的 Bearer token 鉴权。
-    # stdio 模式忽略(本机子进程接入无需鉴权);HTTP 模式必须设置,空值拒绝启动(防裸奔)。
-    # 敏感字段:不进入日志 / 审计 / Provenance(AGENTS.md 红线)。
+    # 旧共享 Bearer token(弃用期兼容,#517):设置时合成 MC-legacy / scopes=["*"],
+    # 启动打印一行 deprecation warning,下一版本移除。stdio 模式忽略。
+    # 外部客户端应改用 `finboard mcp client create` 签发的可撤销凭据
+    # (mcp_clients 表,只存 sha256 摘要)。敏感字段:不进入日志 / 审计 / Provenance。
     mcp_auth_token: str = ""
-    # 只读模式:禁用所有写工具(审批门也不开放),只暴露查询与 AI 问答。
+    # 非 loopback 绑定必须显式放行(#517):外部访问须置于 TLS 反向代理之后。
+    mcp_allow_remote: bool = False
+    # stdio 本机子进程的默认作用域(逗号分隔,#517)。默认只读 —— 需要写操作
+    # 必须显式配置(收紧行为变更)。合法值:research.read / research.write /
+    # research.run / data.write / audit.read。
+    mcp_stdio_scopes: str = "research.read"
+    # 只读模式(弃用期兼容):等价于所有客户端只保留 research.read 作用域,
+    # 启动打印 deprecation warning;下一版本移除,改用 readonly 预设客户端。
     mcp_readonly_only: bool = False
     # 审计是否额外持久化到研究审计表(默认仅结构化日志 + 内存副本)。
     mcp_audit_persist: bool = False

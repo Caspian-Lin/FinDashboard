@@ -2383,6 +2383,217 @@ def job_replay_exec(
         raise typer.Exit(code=exit_code)
 
 
+# ---------------------------------------------------------------------------
+# mcp 子命令(issue #517:MCP 按客户端凭据管理)
+# ---------------------------------------------------------------------------
+mcp_app = typer.Typer(
+    name="mcp",
+    help="FinBoard MCP server 凭据管理(按客户端授权,#517)。",
+    no_args_is_help=True,
+)
+mcp_client_app = typer.Typer(
+    name="client",
+    help="签发 / 列出 / 吊销 MCP 客户端凭据(明文 token 只在 create 时打印一次)。",
+    no_args_is_help=True,
+)
+
+
+@mcp_client_app.command(name="create")
+def mcp_client_create(
+    ctx: typer.Context,
+    name: Annotated[
+        str,
+        typer.Option("--name", help="客户端名(唯一,如 codex / harness)"),
+    ],
+    preset: Annotated[
+        str | None,
+        typer.Option(
+            "--preset",
+            help="作用域预设:readonly | topic-writer | data-operator",
+        ),
+    ] = None,
+    scopes: Annotated[
+        str | None,
+        typer.Option(
+            "--scopes",
+            help="逗号分隔作用域(research.read,research.write,research.run,data.write,audit.read)",
+        ),
+    ] = None,
+    expires_in_days: Annotated[
+        int | None,
+        typer.Option("--expires-in-days", help="凭据有效天数(省略=长期有效)"),
+    ] = None,
+    created_by: Annotated[
+        str,
+        typer.Option("--created-by", help="创建者标识(写入 mcp_clients.created_by)"),
+    ] = "cli",
+) -> None:
+    """签发一个 MCP 客户端凭据,并**只打印一次**明文 token。"""
+    settings: Settings = ctx.obj
+    from finboard_mcp.identity import generate_client_id, generate_client_token
+    from finboard_mcp.scopes import parse_scopes, preset_scopes
+
+    if preset is not None and scopes is not None:
+        typer.echo("--preset 与 --scopes 只能二选一", err=True)
+        raise typer.Exit(code=1)
+    if preset is None and scopes is None:
+        typer.echo("必须指定 --preset 或 --scopes", err=True)
+        raise typer.Exit(code=1)
+    try:
+        granted = preset_scopes(preset) if preset is not None else parse_scopes(scopes or "")
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    from datetime import UTC, datetime, timedelta
+
+    expires_at = (
+        datetime.now(UTC) + timedelta(days=expires_in_days)
+        if expires_in_days is not None
+        else None
+    )
+    client_id = generate_client_id()
+    material = generate_client_token(client_id)
+    try:
+        asyncio.run(
+            _mcp_client_create_async(
+                settings,
+                client_id=client_id,
+                name=name,
+                token_hash=material.token_hash,
+                token_prefix=material.token_prefix,
+                scopes=sorted(granted),
+                created_by=created_by,
+                expires_at=expires_at,
+            )
+        )
+    except Exception as exc:  # 具名冲突 / DB 不可达都给出可读错误
+        typer.echo(f"创建 MCP 客户端失败: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"已创建 MCP 客户端: {client_id}  name={name}")
+    typer.echo(f"作用域: {', '.join(sorted(granted))}")
+    if expires_at is not None:
+        typer.echo(f"过期时间: {expires_at.isoformat()}")
+    typer.echo("")
+    typer.echo("明文 token(仅显示一次,请立即保存到客户端密钥配置):")
+    typer.echo(material.token)
+
+
+async def _mcp_client_create_async(
+    settings: Settings,
+    *,
+    client_id: str,
+    name: str,
+    token_hash: str,
+    token_prefix: str,
+    scopes: list[str],
+    created_by: str,
+    expires_at: Any,
+) -> None:
+    from finboard_persistence import create_async_engine, session_factory
+    from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    engine = create_async_engine(settings.db_url, pool_size=1, max_overflow=0)
+    try:
+        async with session_factory(engine)() as session:
+            await McpClientRepository(session).append(
+                client_id=client_id,
+                name=name,
+                token_hash=token_hash,
+                token_prefix=token_prefix,
+                scopes=scopes,
+                created_by=created_by,
+                expires_at=expires_at,
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@mcp_client_app.command(name="list")
+def mcp_client_list(ctx: typer.Context) -> None:
+    """列出 MCP 客户端(不显示任何 secret / 摘要)。"""
+    settings: Settings = ctx.obj
+    rows = asyncio.run(_mcp_client_list_async(settings))
+    if not rows:
+        typer.echo("尚无 MCP 客户端。用 `finboard mcp client create` 签发。")
+        return
+    typer.echo(
+        f"{'CLIENT_ID':<20} {'NAME':<20} {'SCOPES':<45} "
+        f"{'CREATED_BY':<12} {'STATE'}"
+    )
+    for row in rows:
+        state = "revoked" if row.revoked_at is not None else (
+            "expired" if row.expires_at is not None and row.expires_at <= _utcnow() else "active"
+        )
+        typer.echo(
+            f"{row.client_id:<20} {row.name:<20} {','.join(row.scopes):<45} "
+            f"{row.created_by:<12} {state}"
+        )
+        typer.echo(
+            f"  created_at={_iso(row.created_at)} last_used_at={_iso(row.last_used_at)} "
+            f"expires_at={_iso(row.expires_at)} revoked_at={_iso(row.revoked_at)}"
+        )
+
+
+async def _mcp_client_list_async(settings: Settings) -> list[Any]:
+    from finboard_persistence import create_async_engine, session_factory
+    from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    engine = create_async_engine(settings.db_url, pool_size=1, max_overflow=0)
+    try:
+        async with session_factory(engine)() as session:
+            return await McpClientRepository(session).list_all()
+    finally:
+        await engine.dispose()
+
+
+@mcp_client_app.command(name="revoke")
+def mcp_client_revoke(
+    ctx: typer.Context,
+    client_id: Annotated[str, typer.Argument(help="客户端 ID(MC-<12hex>)")],
+) -> None:
+    """吊销一个 MCP 客户端(幂等;已吊销保留首次吊销时间)。"""
+    settings: Settings = ctx.obj
+    row = asyncio.run(_mcp_client_revoke_async(settings, client_id))
+    if row is None:
+        typer.echo(f"未找到 MCP 客户端: {client_id}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"已吊销 {row.client_id}(name={row.name}) revoked_at={_iso(row.revoked_at)}"
+    )
+
+
+async def _mcp_client_revoke_async(settings: Settings, client_id: str) -> Any:
+    from finboard_persistence import create_async_engine, session_factory
+    from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    engine = create_async_engine(settings.db_url, pool_size=1, max_overflow=0)
+    try:
+        async with session_factory(engine)() as session:
+            repo = McpClientRepository(session)
+            row = await repo.revoke(client_id)
+            await session.commit()
+            return row
+    finally:
+        await engine.dispose()
+
+
+def _utcnow() -> Any:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC)
+
+
+def _iso(value: Any) -> str:
+    return value.isoformat() if value is not None else "-"
+
+
+mcp_app.add_typer(mcp_client_app, name="client")
+app.add_typer(mcp_app, name="mcp")
+
+
 def main() -> None:
     app()
 

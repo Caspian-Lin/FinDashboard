@@ -113,6 +113,16 @@ FinBoard 研究 MCP —— 量化研究工具集
 模块化单体架构(非微服务)的可实盘交易量化系统,技术栈 Python + PostgreSQL,
 研究 / 回测 / 模拟 / 实盘严格隔离。你只接入【研究】域,不接入实盘。
 
+== 身份与作用域 ==
+调用身份由服务端 Bearer 凭据解析(HTTP 按客户端签发、可吊销;旧共享 token 处于
+兼容弃用期)。作用域:research.read(研究只读)/ research.write(课题、记忆、策略
+规格等结构化写入)/ research.run(启动、取消、重放运行 / 回测 / 模拟盘 / 沙箱)/
+data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读取,运维专用)。
+越权调用返回 status=denied、error.kind=permission_denied,不产生任何业务写入;
+工具清单与作用域一一登记,未登记工具默认拒绝。readonly 客户端只能读;stdio 本机
+子进程默认 research.read,写操作需显式配置 FINBOARD_MCP_STDIO_SCOPES。
+完整创建 / 吊销 / 预设 / TLS 边界见 docs/mcp-client-auth.md。
+
 == 研究流程全景 ==
 数据获取(akshare/tushare)→ 因子分析(因子实验室)→ 策略规格(无代码版本化)→
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
