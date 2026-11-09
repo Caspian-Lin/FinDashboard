@@ -737,3 +737,28 @@ agent,补上「数据在哪、覆盖如何、谁在引用」的入口:
 - 回滚:整体 revert 本 issue 的提交即可(纯文档 + 测试 + Skill,无迁移、无工具
   变更);若要单独回退 Skill 名,把 `.agents/skills/finboard-research/` 改名回旧名
   并恢复旧 references。
+
+### ✅ #520 退役内置 OpenCode 托管与 iframe
+
+研究 Agent 接入收敛为**外部 Harness**;内置 `opencode web` 容器托管、iframe
+工作台、`/api/opencode` 网关与 provider 模型同步删除。**无新增 / 变更 MCP 工具**,
+`TOOL_SCOPES` 与注册表不变。
+
+- **删除**:`packages/finboard-opencode`、`docker/opencode-agent/`、CI
+  `opencode-agent-image` job、`opencode_*` settings、Makefile `opencode-*` 目标与
+  镜像变量、`web/src/lib/opencode*.ts` + `ResearchWorkbench` 页面/测试、旧 Skill
+  名 shim `.agents/skills/finboard-opencode-research/`。
+- **Web**:`/research/workbench` → `/research/agent-connect`(永久跳转,保留
+  `?topic=`);新页覆盖 MCP 端点、凭据预设、`RT-` / `BJ-` / `RR-` 交接与命名卷
+  只读备份。
+- **保留**:`docker/research-sandbox/`(研究代码执行安全边界)+ CI `sandbox-image`
+  job;`mcp-serve*` / `mcp-client-*`(#517 独立入口)不变。
+- **迁移**:旧 `FINBOARD_OPENCODE_*` 启动打印一行 `api.opencode_settings_retired`
+  警告(列出键名,不阻断);命名卷 `opencode-data` / `opencode-config` 代码**永不
+  删除**,升级/回退都不删。
+- **测试**:`tests/unit/test_issue_520_opencode_retirement.py`(残留 / 卷删除守卫)、
+  `tests/integration/test_issue_520_opencode_retirement.py`(无 opencode 配置且无
+  Docker 启动 + 研究端点、旧键告警、网关 404)、Web `AgentConnect.test.tsx`
+  (渲染 + 旧路由跳转保参)。
+- **回滚**:回退本 issue 提交;命名卷仍在,旧版本可重新托管容器,本版本不会自动
+  启动或删除任何容器/卷。

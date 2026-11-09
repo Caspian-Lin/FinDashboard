@@ -350,7 +350,7 @@ def test_app_context_http_without_identity_does_not_fall_back_to_default() -> No
 async def test_lifespan_warns_legacy_token_even_when_transport_is_stdio(
     monkeypatch,
 ) -> None:
-    """#517:内嵌 MCP 的 settings 可能仍是默认 stdio;legacy 告警不能按 transport 抑制。"""
+    """#517:独立 MCP 的 settings 可能仍是默认 stdio;legacy 告警不能按 transport 抑制。"""
     from unittest.mock import MagicMock, patch
 
     from finboard_app.config import Settings

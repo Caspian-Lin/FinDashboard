@@ -65,9 +65,9 @@ const EXPLORE_TOOLS: { path: string; label: LocalizedText; description: Localize
     },
   },
   {
-    path: "/research/workbench",
-    label: { zh: "研究工作台", en: "Research Workbench" },
-    description: { zh: "OpenCode 研究交互入口", en: "OpenCode research interaction entry" },
+    path: "/research/agent-connect",
+    label: { zh: "Agent 接入", en: "Agent Connect" },
+    description: { zh: "外部 Harness 经 MCP 接入与课题交接", en: "External Harness MCP access and topic handoff" },
   },
   {
     path: "/research/docs",
@@ -209,8 +209,8 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
           </p>
           <p className="mt-0.5 px-2 text-xs text-muted-foreground">
             {tl({
-              zh: "按问题选择工具：回测用于快速探索，工作台用于交互，正式资料用于查结论。",
-              en: "Choose tools for the question: explore with backtests, interact in the workbench, and consult accepted findings in research docs.",
+              zh: "按问题选择工具：回测用于快速探索，Agent 接入用于外部研究，正式资料用于查结论。",
+              en: "Choose tools for the question: explore with backtests, connect an external agent, and consult accepted findings in research docs.",
             })}
           </p>
           <div className="mt-1 space-y-0.5">

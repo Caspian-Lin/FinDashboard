@@ -48,7 +48,7 @@ Agent 运行时。FinDashboard 仍是业务工具 / 权限 / 任务 / 数据 / �
 所有工具返回统一信封 `ToolEnvelope`(`operation_id` / `status` / `data` / `error` /
 `provenance` / `idempotency_key`)。
 
-## 运行(独立于 OpenCode 与交易内核)
+## 运行(独立于 Agent 运行时与交易内核)
 
 ```bash
 # 默认 stdio 传输(本机 host 以子进程接入;默认作用域 research.read)
@@ -66,7 +66,7 @@ FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=127.0.0.1 FINBOARD_MCP_
   未吊销 / 未过期的客户端;都没有 → 具名拒绝启动;
 - `FINBOARD_MCP_HOST` 非 loopback → 必须 `FINBOARD_MCP_ALLOW_REMOTE=true`,
   否则具名拒绝;放行后启动日志打印 TLS / 反向代理要求(本服务不终结 TLS);
-- 独立启动不读取任何 `FINBOARD_OPENCODE_*` 变量;仅需 `FINBOARD_DB_URL`(工具执行用)。
+- 独立启动不读取任何 `FINBOARD_OPENCODE_*` 变量(该前缀已于 #520 退役);仅需 `FINBOARD_DB_URL`(工具执行用)。
 
 配置项(`FINBOARD_` 前缀):`mcp_enabled` / `mcp_transport` / `mcp_host` /
 `mcp_port` / `mcp_allow_remote` / `mcp_stdio_scopes` / `mcp_auth_token`(弃用) /

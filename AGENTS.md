@@ -85,17 +85,16 @@
 ### LLM / Agent 边界
 LLM（包括本 agent 自身）**不允许**：直接连接实盘账户、直接发送订单、修改账户持仓、绕过风控、在实盘运行时动态生成代码并立即执行。LLM 的产出必须经过完整流程才可上实盘：`研究 → 回测 → 样本外 → 行情回放 → 模拟交易 → 影子交易 → 小资金实盘 → 扩大资金`。
 
-**#160 起 FinBoard 不再内置任何 LLM 调用**：`ResearchAssistant`/`OpenAICompatibleLLMProvider`/`llm_*` 配置与 `finboard.ai.*` MCP 工具已整体移除，AI 问答、假设与策略草案由 OpenCode 运行时的外层 LLM 直接承担。FinBoard 侧的安全控制收敛为：MCP 工具入参统一 `sanitize_prompt` 脱敏 + 审计（`mcp_audit_events`），研究写操作由 agent 自主执行（#122），实盘能力永久不注册为工具。`factor_research` 包仅保留 `sanitizer.py`。
+**#160 起 FinBoard 不再内置任何 LLM 调用**：`ResearchAssistant`/`OpenAICompatibleLLMProvider`/`llm_*` 配置与 `finboard.ai.*` MCP 工具已整体移除，AI 问答、假设与策略草案由外部 Harness（Codex / DeepSeek Harness / ZCode / 外部 OpenCode 等）的 LLM 直接承担。FinBoard 侧的安全控制收敛为：MCP 工具入参统一 `sanitize_prompt` 脱敏 + 审计（`mcp_audit_events`），研究写操作由 agent 自主执行（#122），实盘能力永久不注册为工具。`factor_research` 包仅保留 `sanitizer.py`。
 
-### FinBoard MCP Server 与 OpenCode 运行时边界
+### FinBoard MCP Server 与外部 Agent 边界
 - **MCP Server（#108）**：研究能力以受控 MCP 工具暴露给外置 Agent，FinDashboard 仍是唯一事实来源；研究写操作（创建快照/策略/运行/发布/启动模拟盘）agent 可自主执行（#122）；实盘能力（下单/撤单/改持仓/Kill Switch/连接 broker/凭证探测）**永久不注册为工具**；工具返回统一信封 `ToolEnvelope`；入参 `sanitize_prompt` 脱敏 + 审计（structlog + `mcp_audit_events` 表，REST `GET /api/mcp/audit` 可查），不记录凭证与未脱敏内容。
 - **MCP 按客户端授权（#517）**：外部接入使用 `mcp_clients` 表签发的可撤销 Bearer 凭据（只存 `sha256` 摘要，`finboard mcp client create/list/revoke` 管理），作用域 `research.read` / `research.write` / `research.run` / `data.write` / `audit.read` 在唯一漏斗 `run_tool` 强制；`TOOL_SCOPES` 必须覆盖全部注册工具，未登记即拒绝（fail-closed）；stdio 默认仅 `research.read`（收紧行为变更），非 loopback HTTP 必须 `FINBOARD_MCP_ALLOW_REMOTE=true` 且置于 TLS 反向代理后；旧 `FINBOARD_MCP_AUTH_TOKEN` 与 `FINBOARD_MCP_READONLY_ONLY` 处于弃用兼容期。详见 `docs/mcp-client-auth.md`。
 - **任务队列 MCP（#136）**：`finboard_job_*` 只覆盖研究/数据/回测类 kind（`background_jobs`，`BJ-` ID）；`job_cancel` 是研究域协作式取消，非实盘撤单。
 - **能力同步规范（#123，硬性）**：新增/修改研究功能必须同步 ①`finboard-mcp` 注册/更新工具 ②`server.py` 的 `_INSTRUCTIONS` ③Skill `.agents/skills/finboard-research/references/tools.md` ④（涉及新阶段时）`packages/finboard-mcp/ROADMAP.md`——否则外置 agent 认知与研究现实脱节。**工具清单唯一事实源 = `finboard_mcp.scopes.TOOL_SCOPES`（与注册表集合相等）**；文档不要写死工具总数（#519 起 `_INSTRUCTIONS` / Skill 都不再声明「共 N 个」）。
-- **外部 Harness 接入（#519）**：研究 Agent 一律是外部 Harness（Codex / DeepSeek Harness / ZCode / 外部 OpenCode），经 loopback MCP + 按客户端 Bearer 凭据接入，FinDashboard 不内置 LLM。通用 Skill = `.agents/skills/finboard-research/`（`SKILL.md` + `references/` + `presets/{read-only,research-write,data-operator}.md`），旧名 `.agents/skills/finboard-opencode-research/` 自 #519 只是弃用 shim（#520 删除）；逐客户端安装 / 配置 / 已验与待验见 `docs/agent-integration.md`。交接语义：`RT-` 课题 + 深链 `/research/topics?topic=RT-…`、续等原 `BJ-`、引用原 `RR-`，收尾追加轮次 + `research-round` 记忆。
-- **OpenCode 运行时（#109/#118）**：`opencode web` 容器级隔离（独立命名卷持久化会话与 auth、版本锁定镜像、环境变量白名单，**绝不**继承 FinBoard 的 DB 密码/broker 凭证/API Key）；FinBoard 网关只是控制面（status/health/access），不透传流量；单用户模型下宿主机 127.0.0.1 绑定是唯一网络边界（无 basic auth，多用户需恢复网关鉴权）。容器经 `host.docker.internal:8765` 访问内嵌 `finboard_mcp`（streamable-http + Bearer）；**lifespan 必须先起内嵌 MCP、后建容器**（opencode 首连失败即 `failed` 且不再重试）；`HOME=/workspace` 与 XDG 目录注入语义不可变（决定文件选择器与数据落点）。
-- **agent 权限 allowlist（仅内置 OpenCode 托管）**：`read`/`glob`/`grep`/`skill`/`bash`（仅只读轮询/状态检查）/`finboard_*`/`exa_*` 放行；`edit`/`write`/`webfetch` 拒绝；`.opencode`/`.agents`/docs 挂载一律 `:ro`。**agent 定义唯一权威 = `.opencode/agent/*.md`**（opencode.json 的 agent 块是死配置）——这条**只管内置托管容器**；外部 Harness 的 agent / 权限配置由各客户端自己决定，与 FinBoard 无关（服务端只看凭据作用域）。官方容器无 JS 运行时、local MCP 不可行，搜索走 remote exa 端点（#313 派生镜像补 jq+python3；切换镜像须 `docker rm -f finboard-opencode-web` 重建）。
-- **研究记忆与知识沉淀（#110/#268）**：研究长期记忆持久化在 `research_memories` 表（`finboard.memory.*` 工具），只引用产物不修改，`created_by` 不可伪造；跨会话研究知识 canonical = `docs/research/`（ROADMAP / FINDINGS / rounds，PR 维护、容器只读挂载），**文档与记忆冲突以文档为准**；会话启动/收尾协议与「未查结论索引禁止重测已证伪假设」禁令见 Skill `references/workflow.md` 与 `references/memory.md`。
+- **外部 Harness 接入（#519）**：研究 Agent 一律是外部 Harness（Codex / DeepSeek Harness / ZCode / 外部 OpenCode），经 loopback MCP + 按客户端 Bearer 凭据接入，FinDashboard 不内置 LLM。通用 Skill = `.agents/skills/finboard-research/`（`SKILL.md` + `references/` + `presets/{read-only,research-write,data-operator}.md`），旧名 `.agents/skills/finboard-opencode-research/` 已由 #520 删除；逐客户端安装 / 配置 / 已验与待验见 `docs/agent-integration.md`，Web 入口 `/research/agent-connect`。交接语义：`RT-` 课题 + 深链 `/research/topics?topic=RT-…`、续等原 `BJ-`、引用原 `RR-`，收尾追加轮次 + `research-round` 记忆。
+- **内置 OpenCode 托管已退役（#520）**：`packages/finboard-opencode`、`/api/opencode` 网关、iframe 工作台、`opencode web` 容器托管、provider 模型同步与 `opencode-agent-image` 均已删除，不再有 `opencode_*` 配置项。旧 `/research/workbench` 永久跳转 `/research/agent-connect`（保留 `?topic=` 交接上下文）；旧 `FINBOARD_OPENCODE_*` 键启动时打一行弃用警告列出键名（不阻断启动）。命名卷 `opencode-data` / `opencode-config` **代码永不删除**，只提供只读导出备份说明（升级不删卷）。`.opencode/agent/*.md` 仅作为外部 OpenCode 的项目级客户端配置保留；其他 Harness 的 agent / 权限配置由客户端自己决定，服务端只按凭据作用域强制。
+- **研究记忆与知识沉淀（#110/#268）**：研究长期记忆持久化在 `research_memories` 表（`finboard.memory.*` 工具），只引用产物不修改，`created_by` 不可伪造；跨会话研究知识 canonical = `docs/research/`（ROADMAP / FINDINGS / rounds，PR 维护；外部客户端只读或按其配置），**文档与记忆冲突以文档为准**；会话启动/收尾协议与「未查结论索引禁止重测已证伪假设」禁令见 Skill `references/workflow.md` 与 `references/memory.md`。
 
 ## Git 工作流
 
@@ -131,7 +130,7 @@ scripts/create-worktree.sh <N> <feat分支名> [base=origin/m/<里程碑>]
 
 脚本依次完成：worktree add（主目录同级 `FinDashboard-wtN`）→ junction 共享
 `data_cache` / `data_releases` → 复制并改写 `.env`（独立库 + 端口 + 关闭
-OpenCode/MCP）→ 建库 `findashboard_wtN` / `findashboard_wtN_test` →
+MCP + 清理退役的 `FINBOARD_OPENCODE_*` 键）→ 建库 `findashboard_wtN` / `findashboard_wtN_test` →
 `uv sync`（复用主目录 `.uv-cache`）→ `alembic upgrade head` → `web npm install`。
 
 **手工等价步骤与硬性规则**：
@@ -142,9 +141,9 @@ OpenCode/MCP）→ 建库 `findashboard_wtN` / `findashboard_wtN_test` →
   删除链接只能 `cmd //c rmdir <名字>`。
 - **隔离配置**：pydantic 按 CWD 读 `.env`，每 worktree 一份——`FINBOARD_DB_URL` /
   `FINBOARD_TEST_DB_URL` 指向 `findashboard_wtN` / `findashboard_wtN_test`；
-  `FINBOARD_OPENCODE_ENABLED` / `FINBOARD_OPENCODE_WEB_ENABLED` /
-  `FINBOARD_MCP_ENABLED` 置 false——OpenCode / MCP / 研究运行时全局锚定主目录
-  （容器名与端口全局唯一，第二个实例会撞名）。
+  `FINBOARD_MCP_ENABLED` 置 false——MCP / 研究运行时全局锚定主目录
+  （端口全局唯一，第二个实例会撞名）；旧 `FINBOARD_OPENCODE_*` 键已退役，
+  脚本复制 `.env` 时直接删除。
 - **端口分配（wtN，N≥2）**：API `8000+N`、前端 `5172+N`、MCP（如启用）`8763+N`；
   启动用 `make dev API_PORT=8002 WEB_PORT=5174`（vite 端口 / API 代理目标支持
   `FINBOARD_WEB_PORT` / `FINBOARD_WEB_API_PORT` 覆盖；显式指定端口被占用即报错，
@@ -253,6 +252,5 @@ packages/
   finboard-scheduler/   — asyncio 定时任务调度（盘前检查 / 收盘撤单 / 日终核对 / 连接心跳）
   finboard-app/         — 组装根 / CLI / 配置
   finboard-api/         — FastAPI REST + WebSocket API（人工交易控制台后端）
-  finboard-mcp/         — FinBoard MCP Server（向 OpenCode 等外置 Agent 暴露受控研究工具，issue #108）
-  finboard-opencode/    — OpenCode 研究运行时集成（会话关联/SSE 事件/中断恢复，issue #109）
+  finboard-mcp/         — FinBoard MCP Server（向外部 Agent 暴露受控研究工具，issue #108）
 ```

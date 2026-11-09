@@ -1,14 +1,14 @@
 # 研究知识沉淀(docs/research,#268)
 
 本目录是跨会话研究知识的 **canonical 事实源**,供三方共享:用户、主 coding
-agent、OpenCode 研究 agent(容器内只读挂载在 `/workspace/docs/research/`)。
+agent、外部研究 Agent(经 MCP 接入,按自身配置只读引用)。
 
 ## 为什么存在
 
 2026-09-01 盘点(#268 背景):研究会话每开一轮都重新读取、重复造轮子——
 证据矩阵每轮重拼、已证伪假设可能被重测。根因是知识只存在于三个不共享的
-载体(`research_memories` 自由文本、run/experiment 机器结果、OpenCode 会话
-卷聊天记录),没有结构化的「计划 / 结论」层。本目录补上这一层。
+载体(`research_memories` 自由文本、run/experiment 机器结果、外部 Harness 会话
+记录),没有结构化的「计划 / 结论」层。本目录补上这一层。
 
 ## 三件套职责
 
@@ -23,7 +23,7 @@ agent、OpenCode 研究 agent(容器内只读挂载在 `/workspace/docs/research
 ## 更新流程(canonical 文档走 PR)
 
 - **文档是 canonical**:修改本目录一律走 PR(版本化、人类可审)。
-- **记忆是指针**:研究 Agent 对本目录**只读**(容器 / 客户端工作目录都只读,
+- **记忆是指针**:研究 Agent 对本目录**只读**(外部客户端按客户端配置只读引用,
   目录缺失时跳过)。agent 每轮收尾按固定模板写 `research_memories`
   (tag `research-round`)、追加课题轮次,并在回答附「轮次摘要」,由用户 / 主
   coding agent 转录进 `rounds/`。**文档与记忆冲突时,以文档为准。**
@@ -31,7 +31,7 @@ agent、OpenCode 研究 agent(容器内只读挂载在 `/workspace/docs/research
   `.agents/skills/finboard-research/SKILL.md`(启动先 `finboard_topic_read`
   接课题 + `finboard_source_check` 核证据,再读 ROADMAP + FINDINGS + 记忆索引;
   未查结论索引禁止重测已证伪假设)。旧名
-  `.agents/skills/finboard-opencode-research/` 自 #519 起只是弃用 shim。
+  `.agents/skills/finboard-opencode-research/` 已由 #520 删除。
 
 ## 保留记忆 tags(指针层)
 
@@ -45,4 +45,4 @@ agent、OpenCode 研究 agent(容器内只读挂载在 `/workspace/docs/research
 - [研究课题与冻结说明书](workspace-contract.md)：版本目标、轮次、来源核验与状态语义。
 - [课题组织与已有证据归档](topic-organization.md)：持续更新的研究锚点、非排他引用与 agent 完整调用示例。
 
-课题及追加轮次存在 FinDashboard 的独立研究元数据表，不依赖抓取 OpenCode 对话。工作摘要与 agent 解释不自动成为正式结论；经复核接受的结论仍经PR进入本目录。文档与记忆冲突保留双方来源，以文档为canonical。
+课题及追加轮次存在 FinDashboard 的独立研究元数据表，不依赖抓取外部 Harness 对话。工作摘要与 agent 解释不自动成为正式结论；经复核接受的结论仍经PR进入本目录。文档与记忆冲突保留双方来源，以文档为canonical。

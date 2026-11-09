@@ -27,7 +27,9 @@ spec+fee合并后的四项费用进入资金可行性、手数与成交；免税
 旧manifest仍保持资产元数据优先；不能从旧spec覆盖回显推断账本已按该费率执行。
 旧基线压力须先执行cost_x1控制，再比较新版同费率口径的成本/滑点/资金档。
 walk-forward最差窗口不等于参数邻域；新验证请求邻域但无参数扫描时unsupported。
-`finboard-researcher` 唯一权威权限在 `.opencode/agent/finboard-researcher.md`。
+研究 Agent 权限由客户端配置 + 服务端凭据作用域共同决定;外部 OpenCode 的项目级
+agent 定义在 `.opencode/agent/finboard-researcher.md`(#520 后 FinDashboard 不再
+托管运行时,其他 Harness 自管 agent 配置)。
 网页只接收无代码规格；MCP `research_code_submit` 可提交符合白名单的策略/因子 Python，
 `compute_series` 经一次性 Docker 沙箱及 PIT 审计执行。禁止宿主文件编辑、模块路径注入、
 任意表达式、凭证探测、网络/软件配置变更；bash 仍仅只读状态检查。

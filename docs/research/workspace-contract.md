@@ -32,7 +32,7 @@ ResearchRun 是冻结输入后执行的离线研究回放，不等同所有研�
 
 `GET /api/research/topics` 和 `/{topic_id}/entries` 默认20最多50、offset分页；详情 `/{topic_id}`。POST创建、PUT更新、POST `/{topic_id}/entries` 追加。`/memories` SQL截取每条1200字摘录，显示来源、确认、状态与 supersedes_id；选定记忆详情复用既有记忆API。旧故障描述不自动成为当前事实，空/unknown引用提示无法验证。
 
-FinDashboard 保存研究结构，OpenCode 保存原对话；不恢复对话流量代理、不读取凭证、不自动推送文档PR。
+FinDashboard 保存研究结构，外部 Harness 保存原对话（#520 后 FinDashboard 不再托管 OpenCode 运行时）；不恢复对话流量代理、不读取凭证、不自动推送文档PR。
 
 记忆列表和完整详情共用有界阅读区及 Markdown 排版；列表只读1200字摘录，关联证据展开时才核查，详情按选定ID读取正文。创建/更新/确认及轮次时间显示人类可读的北京时间，原ISO保留于time.dateTime/title；历史时间缺偏移时明确“时区未记录”，不猜绝对时刻。
 

@@ -15,8 +15,8 @@
 - wt2 数据库 `findashboard_wt2` / `findashboard_wt2_test`(同一 PostgreSQL 实例;
   账号已有 CREATEDB);测试库表由 conftest `ensure_test_db` + `create_all` 自动建,
   无需 alembic,开发库需 `alembic upgrade head`。
-- 端口:API 8002 / web 5174 / MCP 8766(已禁用);OpenCode 相关全关(容器名
-  `finboard-opencode-web` 全局唯一,研究运行时锚定主目录)。
+- 端口:API 8002 / web 5174 / MCP 8766(已禁用);旧 `FINBOARD_OPENCODE_*` 键由
+  创建脚本删除(#520 已退役,不再有容器/workbench;研究 MCP 锚定主目录端口)。
 
 ## Why
 

@@ -78,7 +78,7 @@ export const zh = {
     researchRuns: "研究运行",
     researchPortfolio: "组合与风险",
     researchSimulation: "模拟盘",
-    researchWorkbench: "研究工作台",
+    researchWorkbench: "Agent 接入",
     researchReports: "研究报告",
     groupLive: "实盘交易",
     dashboard: "仪表盘",

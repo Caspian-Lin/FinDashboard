@@ -1,7 +1,7 @@
 [project]
 name = "finboard-mcp"
 version = "0.1.0"
-description = "FinBoard MCP Server — 向外置 Agent(OpenCode)暴露受控研究工具的 MCP 服务。"
+description = "FinBoard MCP Server — 向外置 Harness 暴露受控研究工具的独立 MCP 服务。"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }

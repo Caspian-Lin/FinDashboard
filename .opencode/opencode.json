@@ -35,7 +35,7 @@
   "mcp": {
     "finboard": {
       "type": "remote",
-      "url": "http://host.docker.internal:8765/mcp",
+      "url": "http://127.0.0.1:8765/mcp",
       "enabled": true,
       "oauth": false,
       "headers": {

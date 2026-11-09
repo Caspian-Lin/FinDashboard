@@ -4,7 +4,9 @@ FinDashboard 的独立研究 MCP(`packages/finboard-mcp`)通过服务端签发�
 **按客户端 Bearer 凭据**授权外部 Agent。本文覆盖创建 / 吊销 / 预设 / 身份如何
 到达工具 / TLS 与网络边界。工具清单与逐工具作用域见
 `packages/finboard-mcp/src/finboard_mcp/scopes.py` 与
-`packages/finboard-mcp/README.md`。
+`packages/finboard-mcp/README.md`。逐客户端安装 / 配置 / 排障见
+`docs/agent-integration.md`;内置 OpenCode 托管已于 #520 退役,Web 入口为
+`/research/agent-connect`。
 
 ## 1. 身份模型
 
@@ -103,7 +105,7 @@ uv run finboard mcp client revoke MC-0123456789ab
 - HTTP 启动时会校验凭据:无 `FINBOARD_MCP_AUTH_TOKEN` 且 `mcp_clients` 无
   有效客户端 → 具名拒绝启动(退出码 2)。
 - `FINBOARD_MCP_ENABLED=false` → 具名拒绝启动(退出码 2);未设置默认启用。
-- 独立启动不读取任何 `FINBOARD_OPENCODE_*` 变量。
+- 独立启动不读取任何 `FINBOARD_OPENCODE_*` 变量(该前缀已于 #520 退役)。
 - Make 目标:`make mcp-serve-http`(本机 loopback,凭据用 `mcp_clients` 或兼容期
   `MCP_AUTH_TOKEN`)、`make mcp-serve-http-remote`(非 loopback,显式
   `ALLOW_REMOTE=true`)、`make mcp-client-create`(签发客户端)。
