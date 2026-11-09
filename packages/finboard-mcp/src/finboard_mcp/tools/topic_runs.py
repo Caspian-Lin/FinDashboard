@@ -180,17 +180,28 @@ async def topic_run_cancel(
     )
 
 
-async def run_topics(app: McpAppContext, *, run_id: str) -> ToolEnvelope:
+async def run_topics(
+    app: McpAppContext,
+    *,
+    run_id: str,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         async with app.session_maker() as session:
             return cast(
-                dict[str, Any], to_jsonable(await list_run_topics(session, run_id))
+                dict[str, Any],
+                to_jsonable(
+                    await list_run_topics(
+                        session, run_id, limit=limit, cursor=cursor
+                    )
+                ),
             )
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.run.topics",
-        arguments={"run_id": run_id},
+        arguments={"run_id": run_id, "limit": limit, "cursor": cursor},
         handler=_do,
     )
 
@@ -266,11 +277,12 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_topic_run_retry",
         description=(
-            "重试课题关联的失败/中断运行(写,不执行)。走既有 replay:生成新 RR-"
-            "(replay_of_run_id 指向旧 run)与新的链接,旧链接与历史保留;"
+            "重放课题关联的 completed/interrupted 运行(写,不执行)。走既有 replay:"
+            "生成新 RR-(replay_of_run_id 指向旧 run)与新的链接,旧链接与历史保留;"
             "goal_version 继承原链接且仍须匹配课题当前目标。必须提供新的 "
             "operation_id(旧键已绑定原链接)与 payload{idempotency_key,"
-            "requested_by}。"
+            "requested_by}。failed/cancelled 不在 REPLAYABLE_SOURCE_STATUSES,"
+            "返回 conflict(run_not_replayable),不能冒充可重试。"
         ),
     )
     async def _retry(
@@ -292,8 +304,8 @@ def register(mcp: MCPServer) -> None:
         name="finboard_topic_run_cancel",
         description=(
             "取消课题关联的研究运行(写;代理既有协作式取消,非实盘撤单)。"
-            "queued/running/interrupted/failed 可取消;completed/cancelled 已终态"
-            "返回 conflict。"
+            "queued/running/interrupted 可取消;completed/failed/cancelled 已终态,"
+            "返回 conflict(run_terminal)。"
         ),
     )
     async def _cancel(
@@ -310,14 +322,19 @@ def register(mcp: MCPServer) -> None:
         description=(
             "反查引用某个 ResearchRun 的全部课题(只读):一个 run 可被多个课题"
             "引用,返回 topic_id/title/topic_status/goal_version/operation_id 等"
-            "链接元数据,不修改 run 或课题。"
+            "链接元数据,不修改 run 或课题。参数:run_id、limit(1-100,默认 50)、"
+            "cursor(上一页 next_cursor);has_more 为 true 时继续分页,不静默截断。"
         ),
     )
     async def _run_topics(
         run_id: str,
+        limit: int = 50,
+        cursor: str | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await run_topics(app_context(ctx), run_id=run_id)
+        return await run_topics(
+            app_context(ctx), run_id=run_id, limit=limit, cursor=cursor
+        )
 
 
 __all__ = [

@@ -252,6 +252,39 @@ def _link_payload(join: TopicRunJoin) -> dict[str, Any]:
     }
 
 
+def _idempotent_params(
+    *,
+    topic_id: str,
+    goal_version: str,
+    run_id: str,
+    job_id: str | None,
+    operation_id: str | None,
+    run: Any = None,
+) -> dict[str, Any]:
+    """Audit summary for a lost-receipt replay: never describe unfrozen input.
+
+    The replay returns the original run; reporting the newly submitted payload's
+    strategy/release fields would claim inputs that were never frozen. Only the
+    stable identity is recorded, plus the original run's identity when present.
+    """
+
+    summary: dict[str, Any] = {
+        "topic_id": topic_id,
+        "goal_version": goal_version,
+        "run_id": run_id,
+        "result": "idempotent_hit",
+    }
+    if job_id:
+        summary["job_id"] = job_id
+    if operation_id:
+        summary["operation_id"] = operation_id
+    if run is not None:
+        strategy_id = getattr(run, "strategy_id", None)
+        if strategy_id:
+            summary["strategy_id"] = strategy_id
+    return summary
+
+
 def _params_summary(
     *,
     topic_id: str | None,
@@ -419,11 +452,11 @@ async def start_topic_run(
     try:
         _valid_operation_id(ctx.operation_id)
         topic = await _require_topic(session, topic_id, lock=True)
-        _require_active_with_goal(topic, goal_version)
 
         # Lost receipt: the operation id is the idempotency anchor. The topic
         # lock above serializes same-topic concurrent retries, so this read sees
-        # the first transaction's committed link.
+        # the first transaction's committed link. It is checked **before** the
+        # active/goal gate so a later pause/close does not lose the receipt.
         if ctx.operation_id:
             bound = await link_repo.get_by_operation_id(ctx.operation_id)
             if bound is not None:
@@ -459,7 +492,14 @@ async def start_topic_run(
                     job_id=job_id,
                     goal_version=goal_version,
                     result_code="idempotent_hit",
-                    params=params,
+                    params=_idempotent_params(
+                        topic_id=topic_id,
+                        goal_version=goal_version,
+                        run_id=run_id,
+                        job_id=job_id,
+                        operation_id=ctx.operation_id,
+                        run=join.run,
+                    ),
                     idempotency_key=idempotency_key,
                 )
                 await session.commit()
@@ -476,6 +516,8 @@ async def start_topic_run(
                         join.run.manifest_checksum if join.run is not None else None
                     ),
                 )
+
+        _require_active_with_goal(topic, goal_version)
 
         try:
             body = ResearchRunSubmitInput.from_json_payload(payload)
@@ -601,14 +643,39 @@ async def get_topic_run(
     return _link_payload(join)
 
 
-async def list_run_topics(session: AsyncSession, run_id: str) -> dict[str, Any]:
+async def list_run_topics(
+    session: AsyncSession,
+    run_id: str,
+    *,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    if not 1 <= limit <= 100:
+        raise ResearchInvalidInputError("limit 范围: 1-100", code="invalid_pagination")
+    cursor_id: int | None = None
+    if cursor is not None:
+        try:
+            cursor_id = int(cursor)
+        except ValueError as exc:
+            raise ResearchInvalidInputError(
+                "cursor 必须是链接 id 的十进制字符串", code="invalid_cursor"
+            ) from exc
+        if cursor_id <= 0:
+            raise ResearchInvalidInputError("cursor 必须为正整数", code="invalid_cursor")
     if await ResearchRunRepository(session).get(run_id) is None:
         raise ResearchNotFoundError("研究运行不存在", code="run_not_found")
-    rows = await ResearchTopicLinkRepository(session).list_topics_for_run(run_id)
+    rows = await ResearchTopicLinkRepository(session).list_topics_for_run(
+        run_id, limit=limit, cursor=cursor_id
+    )
+    has_more = len(rows) > limit
+    page = rows[:limit]
     return {
         "run_id": run_id,
-        "items": [_run_topic_payload(row) for row in rows],
-        "count": len(rows),
+        "items": [_run_topic_payload(row) for row in page],
+        "count": len(page),
+        "has_more": has_more,
+        "next_cursor": str(page[-1].link.id) if has_more and page else None,
+        "limit": limit,
     }
 
 
@@ -698,6 +765,15 @@ async def retry_topic_run(
                 raise ResearchNotFoundError(
                     "operation_id 对应的链接不存在", code="link_not_found"
                 )
+            idem_params = _idempotent_params(
+                topic_id=topic_id,
+                goal_version=original.goal_version,
+                run_id=bound.entity_id,
+                job_id=join.link.job_id,
+                operation_id=ctx.operation_id,
+                run=join.run,
+            )
+            idem_params["replay_of_run_id"] = run_id
             await _record_success(
                 session,
                 operation=operation,
@@ -707,7 +783,7 @@ async def retry_topic_run(
                 job_id=join.link.job_id,
                 goal_version=original.goal_version,
                 result_code="idempotent_hit",
-                params=params,
+                params=idem_params,
                 idempotency_key=idempotency_key,
                 extra_correlation={"replay_of_run_id": run_id},
             )
@@ -830,7 +906,7 @@ async def cancel_topic_run(
             )
         store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
         try:
-            record = await ResearchRunCoordinator(store).cancel(run_id)
+            record = await ResearchRunCoordinator(store).cancel(run_id, commit=False)
             if record.job_id:
                 with contextlib.suppress(BackgroundJobPersistenceConflictError):
                     await BackgroundJobRepository(session).request_cancel(
@@ -914,6 +990,23 @@ async def link_run_to_topic(
                         "entity_id": bound.entity_id,
                     },
                 )
+        existing = await link_repo.get(topic_id, RESEARCH_RUN_ENTITY, run_id)
+        if (
+            existing is not None
+            and operation_id is not None
+            and existing.operation_id != operation_id
+        ):
+            # Do not silently drop a new operation id: it would remain reusable
+            # by another topic even though the caller believed it was consumed.
+            raise ResearchConflictError(
+                "该课题/运行已有链接且绑定其他 operation_id;链接不可变,请读取原链接",
+                code="link_operation_id_conflict",
+                details={
+                    "link_id": existing.id,
+                    "linked_operation_id": existing.operation_id,
+                    "declared_operation_id": operation_id,
+                },
+            )
         try:
             link, created = await link_repo.create_or_get(
                 topic_id=topic_id,

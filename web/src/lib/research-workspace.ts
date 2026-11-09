@@ -326,6 +326,14 @@ export interface RunTopicLink {
   created_by: string;
   created_at: string | null;
 }
+export interface RunTopicPage {
+  run_id: string;
+  items: RunTopicLink[];
+  count: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  limit: number;
+}
 export const workspaceApi = {
   topics: (offset = 0, status?: string, sort = "updated") =>
     fetchJSON<Page<Topic>>(
@@ -437,9 +445,11 @@ export const topicRunApi = {
       `/research/runs/${encodeURIComponent(runId)}/link`,
       { method: "POST", body: JSON.stringify(body) },
     ),
-  runTopics: (runId: string) =>
-    fetchJSON<{ run_id: string; items: RunTopicLink[]; count: number }>(
-      `/research/runs/${encodeURIComponent(runId)}/topics`,
+  runTopics: (runId: string, limit = 50, cursor?: string) =>
+    fetchJSON<RunTopicPage>(
+      `/research/runs/${encodeURIComponent(runId)}/topics?limit=${limit}${
+        cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+      }`,
     ),
 };
 

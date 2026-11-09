@@ -241,6 +241,21 @@ class TestToolExposure:
         assert "data.write" not in SCOPE_PRESETS["topic-writer"]
         assert "data.write" in SCOPE_PRESETS["data-operator"]
 
+    async def test_topic_run_descriptions_match_replay_cancel_guards(self) -> None:
+        """#515: MCP descriptions must not promise failed-run retry or cancel."""
+
+        mcp = build_mcp_server()
+        async with Client(mcp) as client:
+            tools = {tool.name: tool.description or "" for tool in (await client.list_tools()).tools}
+        retry = tools["finboard_topic_run_retry"]
+        assert "completed/interrupted" in retry
+        assert "failed/cancelled" in retry
+        assert "run_not_replayable" in retry
+        cancel = tools["finboard_topic_run_cancel"]
+        assert "queued/running/interrupted" in cancel
+        assert "completed/failed/cancelled" in cancel
+        assert "run_terminal" in cancel
+
     async def test_no_live_trading_tools_exposed(self) -> None:
         names = await _tool_names()
         for name in names:

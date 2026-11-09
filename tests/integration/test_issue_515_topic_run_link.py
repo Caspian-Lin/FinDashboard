@@ -28,6 +28,7 @@ from finboard_app.research_audit import (
 )
 from finboard_app.research_operation import (
     ResearchConflictError,
+    ResearchInvalidInputError,
     ResearchOperationContext,
     ResearchPreconditionFailedError,
 )
@@ -363,9 +364,11 @@ async def _detail(engine: AsyncEngine, topic_id: str, run_id: str) -> dict[str, 
         return await get_topic_run(session, topic_id, run_id)
 
 
-async def _reverse(engine: AsyncEngine, run_id: str) -> dict[str, Any]:
+async def _reverse(
+    engine: AsyncEngine, run_id: str, *, limit: int = 50, cursor: str | None = None
+) -> dict[str, Any]:
     async with session_factory(engine)() as session:
-        return await list_run_topics(session, run_id)
+        return await list_run_topics(session, run_id, limit=limit, cursor=cursor)
 
 
 async def test_link_insert_conflict_rolls_back_run_and_job(
@@ -714,6 +717,98 @@ async def test_retry_requires_new_operation_id(
     assert raised.value.code == "operation_id_bound"
 
 
+async def test_cancel_audit_failure_rolls_back_run_and_job(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#518: cancel transition + job request + audit must share one transaction."""
+
+    topic = await _create_topic(engine)
+    started = await _start(
+        engine, topic["topic_id"], key="topic-run-cancel-audit", operation_id="OP-cancel-audit"
+    )
+    run_id, job_id = started["run_id"], started["job_id"]
+
+    class _CancelAuditDown(ResearchAuditRecorder):
+        async def record(
+            self, session: AsyncSession, event: ResearchAuditEvent
+        ) -> None:
+            if event.operation == "topic.run.cancel":
+                raise RuntimeError("取消审计写入失败")
+            await super().record(session, event)
+
+    configure_research_audit_recorder(
+        _CancelAuditDown(session_maker=session_factory(engine))
+    )
+    with pytest.raises(RuntimeError, match="取消审计写入失败"):
+        async with session_factory(engine)() as session:
+            await cancel_topic_run(
+                session,
+                topic_id=topic["topic_id"],
+                run_id=run_id,
+                ctx=_web_ctx(),
+            )
+    # The coordinator checkpoint is deferred: no partial cancelled state leaked.
+    async with session_factory(engine)() as session:
+        run = await session.scalar(
+            select(ResearchRunModel).where(ResearchRunModel.run_id == run_id)
+        )
+        job = await session.scalar(
+            select(BackgroundJobModel).where(BackgroundJobModel.job_id == job_id)
+        )
+    assert run is not None
+    assert run.status == "queued"
+    assert job is not None
+    assert job.status == "queued"
+    cancel_audits = await _audit_rows(engine, "topic.run.cancel")
+    assert all(row.outcome != "succeeded" for row in cancel_audits)
+    assert [row.outcome for row in cancel_audits] == ["failed"]
+
+
+async def test_retry_failed_run_is_rejected_with_replay_guard(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    topic = await _create_topic(engine)
+    started = await _start(
+        engine, topic["topic_id"], key="topic-run-retry-failed", operation_id="OP-retry-failed"
+    )
+    await _set_run_status(engine, started["run_id"], "failed")
+    await _set_job_status(engine, started["job_id"], "failed")
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchConflictError) as raised:
+            await retry_topic_run(
+                session,
+                topic_id=topic["topic_id"],
+                run_id=started["run_id"],
+                payload={
+                    "idempotency_key": "topic-run-retry-failed-new",
+                    "requested_by": "integration-test",
+                },
+                ctx=_web_ctx("OP-retry-failed-new"),
+            )
+    assert raised.value.code == "run_not_replayable"
+    assert await _count(engine, ResearchRunModel) == 1
+    assert await _count(engine, ResearchTopicLinkModel) == 1
+
+
+async def test_cancel_failed_run_is_terminal(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    topic = await _create_topic(engine)
+    started = await _start(
+        engine, topic["topic_id"], key="topic-run-cancel-failed", operation_id="OP-cancel-failed"
+    )
+    await _set_run_status(engine, started["run_id"], "failed")
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchConflictError) as raised:
+            await cancel_topic_run(
+                session,
+                topic_id=topic["topic_id"],
+                run_id=started["run_id"],
+                ctx=_web_ctx(),
+            )
+    assert raised.value.code == "run_terminal"
+
+
 async def test_cancel_terminal_run_returns_conflict(
     engine: AsyncEngine, audit: ResearchAuditRecorder
 ) -> None:
@@ -741,6 +836,28 @@ async def test_cancel_terminal_run_returns_conflict(
     assert raised.value.code == "run_terminal"
     cancel_audits = await _audit_rows(engine, "topic.run.cancel")
     assert [row.outcome for row in cancel_audits] == ["succeeded", "rejected"]
+
+
+async def test_operation_id_receipt_survives_topic_pause(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    topic = await _create_topic(engine)
+    first = await _start(
+        engine, topic["topic_id"], key="topic-run-pause-a", operation_id="OP-pause-replay"
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE research_topics SET status='paused' WHERE topic_id=:id"),
+            {"id": topic["topic_id"]},
+        )
+    second = await _start(
+        engine, topic["topic_id"], key="topic-run-pause-b", operation_id="OP-pause-replay"
+    )
+    assert second["created"] is False
+    assert second["run_id"] == first["run_id"]
+    assert second["job_id"] == first["job_id"]
+    assert await _count(engine, ResearchTopicLinkModel) == 1
+    assert await _count(engine, ResearchRunModel) == 1
 
 
 async def test_late_link_is_idempotent_and_run_can_have_two_topics(
@@ -781,14 +898,28 @@ async def test_late_link_is_idempotent_and_run_can_have_two_topics(
     assert again["link_id"] == first["link_id"]
     assert await _count(engine, ResearchTopicLinkModel) == 1
 
+    # A different, still-unbound operation id on the same (topic, run) must not
+    # be silently dropped; it stays free for another topic after the 409.
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchConflictError) as raised:
+            await link_run_to_topic(
+                session,
+                run_id=run_id,
+                topic_id=first_topic["topic_id"],
+                goal_version="v1",
+                operation_id="OP-late-free",
+                ctx=_web_ctx("OP-late-free"),
+            )
+    assert raised.value.code == "link_operation_id_conflict"
+
     async with session_factory(engine)() as session:
         second = await link_run_to_topic(
             session,
             run_id=run_id,
             topic_id=second_topic["topic_id"],
             goal_version="v1",
-            operation_id="OP-late-link-2",
-            ctx=_web_ctx("OP-late-link-2"),
+            operation_id="OP-late-free",
+            ctx=_web_ctx("OP-late-free"),
         )
     assert second["created"] is True
     reverse = await _reverse(engine, run_id)
@@ -797,6 +928,18 @@ async def test_late_link_is_idempotent_and_run_can_have_two_topics(
         first_topic["topic_id"],
         second_topic["topic_id"],
     }
+    # Reverse lookup is paginated; never silently truncates at 50.
+    first_page = await _reverse(engine, run_id, limit=1)
+    assert len(first_page["items"]) == 1
+    assert first_page["has_more"] is True
+    assert first_page["next_cursor"]
+    second_page = await _reverse(
+        engine, run_id, limit=1, cursor=first_page["next_cursor"]
+    )
+    assert len(second_page["items"]) == 1
+    assert second_page["has_more"] is False
+    assert second_page["next_cursor"] is None
+    assert second_page["items"][0]["topic_id"] != first_page["items"][0]["topic_id"]
     # The standalone run itself is untouched by linking.
     assert await _count(engine, ResearchRunModel) == 1
 
@@ -839,6 +982,23 @@ async def test_inactive_topic_and_goal_mismatch_are_rejected_and_audited(
     assert mismatch.value.code == "goal_version_mismatch"
     assert mismatch.value.details["current"] == "v1"
     assert mismatch.value.details["declared"] == "v2"
+
+
+async def test_invalid_operation_id_is_rejected(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    topic = await _create_topic(engine)
+    for index, operation_id in enumerate(("   ", "x" * 65)):
+        with pytest.raises(ResearchInvalidInputError) as raised:
+            await _start(
+                engine,
+                topic["topic_id"],
+                key=f"topic-run-bad-op-{index}",
+                operation_id=operation_id,
+            )
+        assert raised.value.code == "invalid_operation_id"
+    assert await _count(engine, ResearchTopicLinkModel) == 0
+    assert await _count(engine, ResearchRunModel) == 0
 
 
 async def test_legacy_standalone_rest_submission_is_unchanged(

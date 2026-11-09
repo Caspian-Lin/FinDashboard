@@ -191,7 +191,11 @@ class ResearchTopicLinkRepository:
         return TopicRunJoin(link=link, run=run, job=job)
 
     async def list_topics_for_run(
-        self, run_id: str, *, limit: int = 50
+        self,
+        run_id: str,
+        *,
+        limit: int = 50,
+        cursor: int | None = None,
     ) -> list[RunTopicJoin]:
         stmt = (
             select(ResearchTopicLinkModel, ResearchTopicModel)
@@ -204,8 +208,10 @@ class ResearchTopicLinkRepository:
                 ResearchTopicLinkModel.entity_id == run_id,
             )
             .order_by(ResearchTopicLinkModel.id.desc())
-            .limit(limit)
+            .limit(limit + 1)
         )
+        if cursor is not None:
+            stmt = stmt.where(ResearchTopicLinkModel.id < cursor)
         rows = (await self.session.execute(stmt)).all()
         return [
             RunTopicJoin(link=link, topic=topic)

@@ -235,12 +235,14 @@ async def link_run(
 @run_links_router.get("/{run_id}/topics")
 async def run_topics(
     run_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=32),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Reverse lookup: a run may be referenced by several topics."""
 
     try:
-        return await list_run_topics(session, run_id)
+        return await list_run_topics(session, run_id, limit=limit, cursor=cursor)
     except ResearchOperationError as exc:
         raise _http_error(exc) from exc
 
