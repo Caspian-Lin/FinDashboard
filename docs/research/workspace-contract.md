@@ -22,11 +22,13 @@ ResearchRun 是冻结输入后执行的离线研究回放，不等同所有研�
 
 ## 课题与轮次
 
-课题是跨会话持续更新的研究锚点与逻辑证据目录；当前目录由追加轮次的source_refs组成，`#514` 起可用 `/branches` 看分支聚合、`/refs/check` 逐条核验断链、`/context` 一次取回有界续接上下文；`#515` 起课题经 `research_topic_links` 显式关联研究运行，并可用 `GET /api/research/runs/{run_id}/topics` 反向归属（一个 run 可被多个课题引用）。已有运行、记忆和实验用 `entry_type=evidence` 引用关联，保留原产物和历史状态，一个产物可被多个课题引用。完整操作见 [课题组织与已有证据归档](topic-organization.md)。
+课题是跨会话持续更新的研究锚点与逻辑证据目录；当前目录由追加轮次的source_refs组成，`#514` 起可用 `/branches` 看分支聚合、`/refs/check` 逐条核验断链、`/context` 一次取回有界续接上下文；`#515` 起课题经 `research_topic_links` 显式关联研究运行，并可用 `GET /api/research/runs/{run_id}/topics` 反向归属（一个 run 可被多个课题引用）；`#516` 起同一链接表还承载因子实验 / 沙箱运行 / OOS 验证实验，并以 `entry_type=plan|review` 区分计划与复核结论。已有运行、记忆和实验用 `entry_type=evidence` 引用关联，保留原产物和历史状态，一个产物可被多个课题引用。完整操作见 [课题组织与已有证据归档](topic-organization.md)。
 
 课题稳定ID `RT-`，含 title/question、goal（version/criteria/source）、status（draft/active/paused/closed）、conclusion（工作结论）、summary/open_questions/next_step。`status` 自 #514 起是真实列（`draft|active|paused|closed`，带 CHECK 约束），payload 内同值双写，读取以列为权威。更新需 expected_revision，旧版本冲突返回409；每次更新追加目标快照，历史15%/20%与当次15%/10%门可分别记录，系统不自行决定新门。草稿没有 goal，编辑草稿不会改变生命周期状态。
 
 轮次稳定ID `RE-`，只追加，记录 goal_version/objective/action/rationale/outcome/conclusion/confidence/next_step、source_refs、branch、supersedes_id。同课题幂等键相同且内容相同返回原记录，内容不同拒绝；纠正链仅能引用同课题已有记录。可记录 completed/failed/interrupted/rejected/paused，不抹掉失败与断续过程。引用精确ID，策略版本需补 version；checksum可选，缺失会限制核验强度。用户创建者由REST固定为user:api，agent由MCP固定为agent:mcp，payload不能伪造创建者。
+
+`entry_type` 自 #516 起有四个记录类型：`round`（执行后记录）、`evidence`（组织已有产物）、`plan`（只记录设计，`outcome` 必须 completed，**永不触发执行**）、`review`（复核结论，必须带 `document_ref`：仓库内相对 `.md` 路径 + checksum）。`plan` 与 `review` 的 `evidence_level` 分别为 `research_plan` / `reviewed_conclusion`，与人工记录、agent 解释、机器事实并列而不互相覆盖；`goal`/`draft`/`lifecycle` 快照仍单独展示。
 
 引用只是指针，不级联删除或修改研究产物。`GET /api/research/topics/source` 与 `finboard_source_check` 核验存在性、精确版本、checksum，并展示自动事实。断链/版本缺失/校验不符显式呈现；实验事实复用 `derive_oos_outcome`。引用存在不是假设通过。文档路径只允许研究根目录内 `.md`；文档正文以经PR维护的仓库为准。工作摘要、agent轮次与记忆不能自动覆盖正式文档，冲突保留双方来源。
 
@@ -57,7 +59,7 @@ draft   --discard(reason)--> closed
 - `POST /topics/{id}/activate`：`{goal, expected_revision}`，可附带 summary/open_questions/next_step/conclusion；goal 的 version/criteria/source 必须完整。已 active 且 goal 相同为幂等 200，不增加 revision；goal 不同则 409，不能借激活覆盖目标。
 - `POST /topics/{id}/transitions`：`{action: pause|resume|close|reopen|discard, reason, expected_revision}`；close/reopen/discard 必填原因。
 
-`GET /api/research/topics/{id}/context?rounds=10&refs=10` 返回跨客户端续接载荷：`topic`（含 revision/status/updated_at）、`goal`、`lifecycle`（since + 最近一次转移）、`open_questions`、`next_step`、`recent_rounds`（≤20 条；结论/目标/下一步任一超长都会截到 ≤300 字并置 `excerpted=true`）、`active_links`（#515 起为 join 派生的进行中课题→运行链接，最多 10 条，终态链接走 `/runs` 端点）、`dangling_refs`（对最近轮次引用逐条 `source_fact`，≤10 条/次）与 `dangling_refs_has_more`/`refs_checked`、`evidence_levels`、`next_actions`（服务端派生建议，不代表执行）、`generated_at`、`revision`、`bounds`。总载荷 ≤64 KiB；任何截取都置 `excerpted=true` 并在 `truncated_sections` 具名，绝不静默截断。`rounds` 上限 20，`refs` 上限 10。列表模式的 `excerpted` 只在确实截断（>1200 字或开放问题 >5 项/单项 >300 字）时为 true。
+`GET /api/research/topics/{id}/context?rounds=10&refs=10` 返回跨客户端续接载荷：`topic`（含 revision/status/updated_at）、`goal`、`lifecycle`（since + 最近一次转移）、`open_questions`、`next_step`、`recent_rounds`（≤20 条；带 `entry_type` 与对应 `evidence_level`；结论/目标/下一步任一超长都会截到 ≤300 字并置 `excerpted=true`）、`active_links`（#515 起为 join 派生的进行中课题→运行链接，最多 10 条，终态链接走 `/runs` 端点）、`experiment_links`（#516 起为因子实验 / 沙箱运行 / OOS 实验链接，最多 10 条，OOS 以 `oos_outcome` 为首要事实）、`entry_types`（按类型计数，区分计划/执行/复核）、`dangling_refs`（对最近轮次引用逐条 `source_fact`，≤10 条/次）与 `dangling_refs_has_more`/`refs_checked`、`evidence_levels`、`next_actions`（服务端派生建议，不代表执行）、`generated_at`、`revision`、`bounds`。总载荷 ≤64 KiB；任何截取都置 `excerpted=true` 并在 `truncated_sections` 具名，绝不静默截断。`rounds` 上限 20，`refs` 上限 10。列表模式的 `excerpted` 只在确实截断（>1200 字或开放问题 >5 项/单项 >300 字）时为 true。
 
 精确查询与聚合：
 
@@ -101,6 +103,43 @@ MCP 同步暴露 6 个工具：`finboard_topic_run_start`（research.run）、`f
 Web 课题详情增加“发起研究运行”卡片：只选已发布策略与发布要求、可选快照/因子序列、资金与代码版本；展示关联运行的实时状态/进度/错误/结果 checksum，提供重放与取消，深链到 `/research/runs?run=RR-`。保存课题、发起运行与记录轮次是三件事：运行状态是机器事实，轮次是人类/agent 解释，并排展示而不互相替代。
 
 迁移 `9c4f2a7d1e63` 创建独立 `research_topic_links`（无外键、无级联），down_revision=`0d2c51e14b6a`；回滚前导出该表，downgrade 只删表，不删除任何 run/job/课题/轮次/审计。
+
+## 课题内因子 / 代码 / OOS 动作与引用（#516）
+
+**证据类型**（`EvidenceRef.kind`，无迁移；历史 8 类语义不变）：
+
+| kind | 事实来源 | version | checksum |
+|---|---|---|---|
+| `factor_experiment` | `factor_experiments` | — | `dataset_release_checksum` |
+| `code_artifact` | `research_code_artifacts` | git commit | artifact checksum |
+| `code_run` | `research_code_runs`（`RCR-`） | — | `scores_checksum`（输出） |
+| `validation_experiment` | `research_experiments` + `research_trials` | — | `version_checksum` |
+| `factor_snapshot` | `factor_feature_snapshots` | `framework_version` | 快照 checksum |
+
+`experiment` 继续指向 `research_experiments`，历史引用不迁移。`source_fact` 只做有界投影：`factor_experiment` 仅在 `result` ≤64 KiB 时给 md5 摘要（更大只给字节数与空摘要），`code_run` 只给 checksum/状态不给 artifact 正文，`validation_experiment` 复用 `derive_oos_outcome` 且 trial 超 500 条 / 1 MiB 时返回 `oos_outcome=unknown` + `evidence_gaps=["trial_summary_oversized"]`。`refs/check` 同时核验 review 的 `document_ref`，文档 checksum 漂移即 `checksum_mismatch`。
+
+**白名单动作** `POST /api/research/topics/{id}/actions`（MCP `finboard_topic_action`，工具级 `research.write`）：
+
+| action | 委托 | 所需 scope | 链接 `entity_type` |
+|---|---|---|---|
+| `run.submit` / `run.replay` | #515（`start_topic_run` / `retry_topic_run`） | `research.run` | `research_run` |
+| `factor_experiment.create` | 因子实验登记（只冻结，不执行） | `research.write` | `factor_experiment` |
+| `code_run.execute` | `kind=research_code_run` 入队（只能引用已登记 artifact） | `research.run` | `code_run` |
+| `validation_experiment.create` / `add_trial` | #57 验证实验 | `research.write` | `validation_experiment` |
+| `validation_experiment.unseal` | 既有一次性揭盲执行入队 | `research.run` | `validation_experiment` |
+
+共同不变量：
+
+- 课题必须 `active` 且 `goal_version` 等于当前目标版本；漂移返回 409 `topic_not_active` / `goal_version_mismatch`。
+- 每个动作在**同一事务**写产物/任务 + 不可变链接 + `topic.action.<action>` 研究审计；失败整体回滚，拒绝/失败独立会话补记。
+- `operation_id` 是响应丢失的幂等锚：同键重放返回原链接/产物；跨课题复用返回 409 `operation_id_bound`。
+- `code_run.execute` 的请求模型 `extra="forbid"` 且没有任何代码字段；`code` / `source_code` / `module` / `module_path` / `expression` 等键一律 422 `code_channel_forbidden`。代码提交只在 MCP `finboard_research_code_submit`，Web 只引用已登记 artifact。
+- 重复揭盲返回 409 `already_unsealed`，且不改变 `final_test_unsealed`；揭盲仍是一次性门，重做必须新建实验（`supersedes_id`）。
+- **动作永不自动执行**：保存计划/复核条目不会产生 run/job；只有显式提交动作才入队。
+
+**读取**：`GET /topics/{id}/artifacts?limit≤50`（MCP `finboard_topic_read(view=artifacts)`）返回链接 + 读取时派生的 `state`、`status`、`checksum`、`evidence_gaps`；OOS 链接额外给 `oos_outcome`（首要）、`trial_budget{used,limit}`、`final_test_unsealed`。失败、拒绝、中断与成功同列展示，不折叠；`code_run` 链接在 worker 生成 `RCR-` 前以入队 `job_id` 为 `entity_id`（`job_id` 列同值），读取时按 job 派生运行记录与缺口 `run_not_created`。
+
+**Web**：课题详情新增“因子实验 / 沙箱运行 / OOS 实验”卡片：OOS 卡先显示 `oos_outcome`，再显示流程状态、试验预算与“已揭盲，不可重做”；未揭盲且课题 active 时提供“显式执行一次性揭盲”按钮，重复揭盲显示 409 文案。轮次表单区分“记录新轮次（执行后）/ 只保存计划（不执行）/ 记录复核结论”，复核必须填仓库相对 `.md` 路径与 checksum。Web 源码不调用 `finboard_research_code_submit`（有 grep 守卫测试）。
 
 ## 工具同步、验证与回滚
 

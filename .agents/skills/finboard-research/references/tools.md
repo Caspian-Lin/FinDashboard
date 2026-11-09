@@ -56,6 +56,7 @@ validation_experiment_create 的 selection_config.validation_trial_runner 显式
 | 模拟盘(`finboard_sim_*`,✅ #127+#139) | ✅(读 research.read;会话/决策/行情/评估等运行写 research.run;账户创建 research.write) | |
 | ResearchRun 生命周期(`finboard_run_*` 写,✅ #127) | ✅(读 research.read;queue/cancel/replay research.run) | |
 | 课题发起运行(`finboard_topic_run_*`,✅ #515) | ✅(list/get/run_topics research.read;start/retry/cancel research.run；后来关联仅 REST) | |
+| 课题动作(`finboard_topic_action`,✅ #516) | ✅(工具级 research.write;run.submit/replay、code_run.execute、unseal 服务端再按 research.run 强制) | |
 | portfolio(`finboard_portfolio_*`,✅ #128) | ✅(纯计算:research.read) | |
 | 后台任务队列(`finboard_job_*`,✅ #136+#221) | ✅(list/get/wait research.read;enqueue/cancel 需 research.run+data.write;archive/unarchive research.write) | |
 | 数据写操作(`finboard_data_*` / `finboard_etf_*`,✅ #137) | ✅(data.write;config_get/review_queue 为 research.read) | |
@@ -2056,6 +2057,39 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 永远不会自动启动运行；运行状态是机器事实，轮次是人类/agent 解释，不要互相替代。
 `retry` 复用既有 replay 守卫（completed/interrupted 可重放；cancelled/failed 仍按
 原错误处置），因此“失败后重试”应先确认源状态或重新入队新运行。
+
+## finboard_topic_action（✅ #516：1 写，白名单）
+
+课题内**显式执行**入口，与 REST `POST /api/research/topics/{id}/actions` 同一实现。
+工具级作用域 `research.write`；运行类动作在服务端再按 `research.run` 强制。
+`payload` 按 action 校验，未知字段拒绝（`extra="forbid"`），**没有任何代码字段**。
+
+| action | 作用域 | payload | 链接 entity_type |
+|---|---|---|---|
+| `run.submit` | research.run | 同 `finboard_run_queue` 入队字段 | research_run |
+| `run.replay` | research.run | `run_id` + 原 replay 字段{idempotency_key,requested_by} | research_run |
+| `factor_experiment.create` | research.write | hypothesis/factor_names/dataset_release_id/feature_snapshot_id/plan/comparison_group?/validation_experiment_id? | factor_experiment |
+| `code_run.execute` | research.run | `artifact_id` 或 `name`（二选一）+kind=factor+dataset_release_ids+decision_at(+symbols/params) | code_run |
+| `validation_experiment.create` | research.write | hypothesis/version_stamp/plan/thresholds?/robustness?/strategy_params_space?/supersedes_id? | validation_experiment |
+| `validation_experiment.add_trial` | research.write | experiment_id+parameters+status?+failure_reason? | validation_experiment |
+| `validation_experiment.unseal` | research.run | experiment_id(+idempotency_key?/requested_by?) | validation_experiment |
+
+- 共同前置：课题 `active` 且 `goal_version` 等于当前目标版本（`topic_not_active` /
+  `goal_version_mismatch`）；`operation_id` 是响应丢失锚，同键返回原链接/产物，
+  跨课题 `operation_id_bound`。
+- `code_run.execute` 只能执行 `research_code_artifacts` 已登记条目（draft 可跑，
+  retired 拒绝，active 未晋级拒绝），commit 由服务端固定；要改代码先
+  `finboard_research_code_submit` / `rollback`，不要在 payload 里塞 Python。
+- `validation_experiment.unseal` 已揭盲（`final_test_unsealed=true`）返回
+  conflict（`already_unsealed`），揭盲不可重做；新证据请新建实验 + `supersedes_id`。
+  排队中的揭盲任务通过 `unseal_job_id/status/error/pending` 可见。
+- 读取：`finboard_topic_read(view=artifacts)` 或 `view=context.experiment_links`；
+  OOS 先看 `oos_outcome`，再看 `status`、`trial_budget{used,limit}`、
+  `final_test_unsealed` 与 `evidence_gaps`（`no_trials` / `final_test_not_unsealed` /
+  `oos_inconclusive` / `trial_summary_oversized` / `status_not_terminal` /
+  `run_not_created` / `unseal_job_failed|interrupted|cancelled`）。
+- 失败/拒绝/中断与成功同列展示；动作永不自动触发，保存课题或追加 plan/review
+  轮次不会创建 run/job。
 
 ## finboard_data_backfill_*(✅ #511:2 只读 + 2 写)
 
