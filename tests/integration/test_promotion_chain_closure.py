@@ -23,6 +23,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from finboard_app.research_run_submission import ResearchRunSubmitInput
 from finboard_backtest.background_jobs.contracts import (
     ExecutorError,
     JobRecord,
@@ -486,7 +487,7 @@ async def _queue_factor_screen_run(
     app: McpAppContext, *, snapshot_ids: list[str], suffix: str, artifact_id: str
 ) -> dict[str, Any]:
     spec = _screen_factor_spec(f"screen_factor_{suffix}", artifact_id)
-    body = run_tools.parse_queue_payload(
+    body = ResearchRunSubmitInput.from_json_payload(
         {
             "idempotency_key": f"screen-chain-{suffix}",
             "strategy_id": spec.strategy_id,
@@ -789,7 +790,7 @@ class TestScreenBindingGates:
             await repo.publish(spec.strategy_id, 1, expected_version=1)
             await session.commit()
 
-        body = run_tools.parse_queue_payload(
+        body = ResearchRunSubmitInput.from_json_payload(
             {
                 "idempotency_key": "screen-chain-plain",
                 "strategy_id": "screen_factor_plain",
@@ -1299,7 +1300,7 @@ class TestStrategyScreenChannel:
             await _publish_spec(session, spec)
             artifact_id = artifact.artifact_id
 
-        body = run_tools.parse_queue_payload(
+        body = ResearchRunSubmitInput.from_json_payload(
             {
                 "idempotency_key": "screen-strategy-v1",
                 "strategy_id": "screen_strategy_v1",

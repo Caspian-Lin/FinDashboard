@@ -27,6 +27,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from finboard_app.research_run_submission import ResearchRunSubmitInput
 from finboard_backtest.research_run.signal_engine import (
     SignalEnginePipelineAdapter,
 )
@@ -264,7 +265,7 @@ async def _queue_issue304_run(
     spec = _infeasible_screen_spec(
         strategy_id, artifact_id, rank_threshold=rank_threshold
     )
-    body = run_tools.parse_queue_payload(
+    body = ResearchRunSubmitInput.from_json_payload(
         {
             "idempotency_key": f"issue304-{strategy_id}",
             "strategy_id": spec.strategy_id,

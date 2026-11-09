@@ -3,7 +3,11 @@
 各语义化端点(批量下载 / 特征快照 / 数据集发布 / 回测 / 数据同步 / 全量拉取 /
 质量修复 / 研究运行)在自己的路由里调 :func:`enqueue_job` 登记一个 ``queued``
 任务并立即返回 202 + ``JobOut``,**不在 HTTP 请求内执行任务**(由独立 worker
-进程消费)。本模块集中 payload checksum + 幂等创建逻辑,避免各路由重复样板。
+进程消费)。
+
+issue #513:FastAPI 无关的核心已抽到 ``finboard_app.background_jobs``
+(``enqueue_job_core``,返回 ``(row, created)``),MCP 侧不再 import 本模块。这里
+只剩 HTTP 包装:``response.status_code = 200``(幂等命中)与 ``JobOut`` 序列化。
 
 边界:只写 ``background_jobs`` 表,与实盘 orders / fills / positions / audit_logs
 完全隔离。
@@ -11,30 +15,17 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
 from fastapi import Response
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.job_schemas import JobOut
-from finboard_persistence import (
-    BackgroundJobPersistenceConflictError,
-    BackgroundJobRepository,
-)
-from finboard_shared.background_jobs import (
-    BackgroundJobStatus,
-    generate_background_job_id,
-)
+from finboard_app.background_jobs import enqueue_job_core, payload_checksum
 
-
-def payload_checksum(payload: dict[str, Any]) -> str:
-    """计算 background_jobs payload checksum(与 ``jobs.py`` 路由口径一致)。"""
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+#: 兼容再导出:测试与外部调用方按 ``finboard_api.job_helpers.BackgroundJobRepository``
+#: 定位仓储(monkeypatch 目标);实现已迁移到 ``finboard_app.background_jobs``。
+from finboard_persistence import BackgroundJobRepository
 
 
 async def enqueue_job(
@@ -55,27 +46,19 @@ async def enqueue_job(
       置 200(新建默认 202),调用方据此区分"首次提交"与"幂等命中";
     * 不 commit(调用方在路由里统一 commit / rollback),保证与其他写入原子。
     """
-    checksum = payload_checksum(payload)
-    try:
-        row, created = await BackgroundJobRepository(session).create_or_get(
-            job_id=generate_background_job_id(),
-            idempotency_key=idempotency_key,
-            kind=kind,
-            queue=queue,
-            status=BackgroundJobStatus.QUEUED.value,
-            priority=priority,
-            payload=payload,
-            payload_checksum=checksum,
-            max_attempts=max_attempts,
-            requested_by=requested_by,
-        )
-    except BackgroundJobPersistenceConflictError as exc:
-        raise BackgroundJobPersistenceConflictError(str(exc)) from exc
-    except IntegrityError as exc:
-        raise BackgroundJobPersistenceConflictError("重复 idempotency_key") from exc
+    row, created = await enqueue_job_core(
+        session,
+        kind=kind,
+        queue=queue,
+        idempotency_key=idempotency_key,
+        payload=payload,
+        requested_by=requested_by,
+        priority=priority,
+        max_attempts=max_attempts,
+    )
     if response is not None and not created:
         response.status_code = 200
     return JobOut.model_validate(row)
 
 
-__all__ = ["enqueue_job", "payload_checksum"]
+__all__ = ["BackgroundJobRepository", "enqueue_job", "payload_checksum"]
