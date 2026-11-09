@@ -18,6 +18,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -2367,14 +2368,33 @@ class McpAuditEventModel(Base, IdMixin):
 
 
 class ResearchTopicModel(Base, IdMixin):
-    """Research metadata only; never owns or deletes evidence (#500)."""
+    """Research metadata only; never owns or deletes evidence (#500/#514)."""
 
     __tablename__ = "research_topics"
     topic_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSON)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    # The column is authoritative on read; payload.status is kept in sync so old
+    # JSON consumers and the pre-#514 contract still see the current value.
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_by: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'active', 'paused', 'closed')", name="ck_research_topics_status"
+        ),
+        Index(
+            "uq_research_topics_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sql_text("idempotency_key IS NOT NULL"),
+        ),
+        Index("ix_research_topics_status_updated", "status", sql_text("updated_at DESC")),
+    )
 
 
 class ResearchTopicEntryModel(Base, IdMixin):

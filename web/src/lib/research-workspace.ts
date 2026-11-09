@@ -11,6 +11,11 @@ export interface Goal {
   criteria: string;
   source: EvidenceRef;
 }
+export type TopicStatus = "draft" | "active" | "paused" | "closed";
+export interface TopicDraftInput {
+  title: string;
+  question: string;
+}
 export interface TopicInput {
   title: string;
   question: string;
@@ -21,11 +26,16 @@ export interface TopicInput {
   open_questions: string[];
   next_step: string;
 }
-export interface Topic extends TopicInput {
+export interface Topic extends Omit<TopicInput, "goal"> {
   topic_id: string;
   revision: number;
   created_by: string;
   created_at: string;
+  updated_at?: string;
+  /** Drafts have no goal until activation. */
+  goal: Goal | null;
+  /** Server-side creation receipt: false means an idempotent retry hit. */
+  created?: boolean;
 }
 export interface RoundInput {
   entry_type: "round" | "evidence";
@@ -41,14 +51,126 @@ export interface RoundInput {
   supersedes_id: string | null;
   branch: string;
 }
-export interface Entry extends Partial<RoundInput> {
+export interface EntryTopic extends Omit<TopicInput, "goal"> {
+  goal: Goal | null;
+}
+export interface Entry extends Omit<Partial<RoundInput>, "entry_type"> {
   entry_id: string;
   topic_id: string;
   created_by: string;
   created_at: string;
-  topic?: TopicInput;
+  checksum?: string;
+  topic?: EntryTopic;
   topic_revision?: number;
   evidence_level: string;
+  /** round/evidence, plus goal snapshots, initial drafts and lifecycle audits. */
+  entry_type?: "round" | "evidence" | "goal" | "draft" | "lifecycle";
+  // Lifecycle entries (entry_type=lifecycle) carry the transition audit.
+  from?: string;
+  to?: string;
+  action?: string;
+  actor?: string;
+  reason?: string;
+  at?: string;
+}
+export interface LifecycleTransition {
+  from?: string | null;
+  to?: string | null;
+  reason?: string | null;
+  actor?: string | null;
+  action?: string | null;
+  at?: string;
+  entry_id?: string;
+}
+export interface ContextRound {
+  entry_id: string;
+  branch: string;
+  outcome?: string | null;
+  objective?: string;
+  conclusion_excerpt: string;
+  next_step?: string;
+  created_at: string;
+  created_by: string;
+  evidence_level: string;
+}
+export interface DanglingRef {
+  ref: EvidenceRef;
+  status: string;
+  entry_ids?: string[];
+}
+export interface NextAction {
+  action: string;
+  why: string;
+}
+export interface ActiveLink {
+  entity_type: string;
+  entity_id: string;
+  job_id?: string | null;
+  state: string;
+}
+export interface TopicContext {
+  topic: {
+    topic_id: string;
+    revision: number;
+    title?: string;
+    question?: string;
+    status: string;
+    conclusion: string;
+    summary: string;
+    updated_at?: string | null;
+  };
+  goal: Goal | null;
+  lifecycle: { since: string; last: LifecycleTransition | null };
+  open_questions: string[];
+  next_step: string;
+  recent_rounds: ContextRound[];
+  active_links: ActiveLink[];
+  dangling_refs: DanglingRef[];
+  evidence_levels: Record<string, string>;
+  next_actions: NextAction[];
+  generated_at: string;
+  revision: number;
+  excerpted: boolean;
+  truncated_sections?: string[];
+  bounds: Record<string, number>;
+}
+export interface BranchSummary {
+  branch: string;
+  count: number;
+  last_at: string | null;
+  last_outcome: string | null;
+}
+export interface RefCheckItem {
+  ref: EvidenceRef;
+  status: string;
+  facts?: Record<string, unknown>;
+  entry_ids: string[];
+  error?: string;
+}
+export interface RefCheckPage {
+  items: RefCheckItem[];
+  total: number;
+  has_more: boolean;
+  offset: number;
+  limit: number;
+  rounds: number;
+}
+/** Structured 409 payload (`detail`) shared by revision and state conflicts. */
+export interface TopicConflictDetail {
+  code: string;
+  current_revision?: number;
+  your_revision?: number;
+  changed_fields?: string[];
+  current_summary?: {
+    status?: string;
+    revision?: number;
+    goal_version?: string | null;
+    title?: string | null;
+  };
+  allowed?: string[];
+  current?: string;
+  action?: string;
+  idempotency_key?: string;
 }
 export interface Memory {
   memory_id: string;
@@ -118,21 +240,66 @@ export interface DecisionItem {
   trace_id?: string;
   item?: Record<string, unknown>;
 }
+export interface ActivateInput {
+  goal: Goal;
+  conclusion?: string;
+  summary?: string;
+  open_questions?: string[];
+  next_step?: string;
+  reason?: string;
+}
 export const workspaceApi = {
-  topics: (offset = 0) => fetchJSON<Page<Topic>>(`/research/topics?limit=20&offset=${offset}`),
+  topics: (offset = 0, status?: string, sort = "updated") =>
+    fetchJSON<Page<Topic>>(
+      `/research/topics?limit=20&offset=${offset}&sort=${sort}${status ? `&status=${status}` : ""}`,
+    ),
   topic: (id: string) => fetchJSON<Topic>(`/research/topics/${encodeURIComponent(id)}`),
   entries: (id: string, offset = 0) =>
     fetchJSON<Page<Entry>>(
       `/research/topics/${encodeURIComponent(id)}/entries?limit=20&offset=${offset}`,
     ),
+  context: (id: string, rounds = 10, refs = 10) =>
+    fetchJSON<TopicContext>(
+      `/research/topics/${encodeURIComponent(id)}/context?rounds=${rounds}&refs=${refs}`,
+    ),
+  branches: (id: string) =>
+    fetchJSON<Page<BranchSummary>>(`/research/topics/${encodeURIComponent(id)}/branches`),
+  refsCheck: (id: string, rounds = 10) =>
+    fetchJSON<RefCheckPage>(
+      `/research/topics/${encodeURIComponent(id)}/refs/check?rounds=${rounds}`,
+    ),
   memories: (offset = 0) =>
     fetchJSON<Page<Memory>>(`/research/topics/memories?limit=20&offset=${offset}`),
-  create: (body: TopicInput) =>
-    fetchJSON<Topic>("/research/topics", { method: "POST", body: JSON.stringify(body) }),
+  create: (body: TopicInput, idempotencyKey?: string) =>
+    fetchJSON<Topic>("/research/topics", {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+      }),
+    }),
+  createDraft: (body: TopicDraftInput, idempotencyKey?: string) =>
+    fetchJSON<Topic>("/research/topics", {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+      }),
+    }),
   update: (id: string, body: TopicInput, revision: number) =>
     fetchJSON<Topic>(`/research/topics/${encodeURIComponent(id)}`, {
       method: "PUT",
       body: JSON.stringify({ ...body, expected_revision: revision }),
+    }),
+  activate: (id: string, body: ActivateInput, revision: number) =>
+    fetchJSON<Topic>(`/research/topics/${encodeURIComponent(id)}/activate`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, expected_revision: revision }),
+    }),
+  transition: (id: string, action: string, reason: string, revision: number) =>
+    fetchJSON<Topic>(`/research/topics/${encodeURIComponent(id)}/transitions`, {
+      method: "POST",
+      body: JSON.stringify({ action, reason, expected_revision: revision }),
     }),
   append: (id: string, body: RoundInput, key: string) =>
     fetchJSON<Entry>(`/research/topics/${encodeURIComponent(id)}/entries`, {
@@ -148,6 +315,16 @@ export const workspaceApi = {
       `/research/explanation/${encodeURIComponent(id)}/decisions?${new URLSearchParams(params)}`,
     ),
 };
+
+/** Extract the structured 409 body without importing the ApiError class. */
+export function conflictDetail(error: unknown): TopicConflictDetail | null {
+  const detail = (error as { detail?: unknown } | null)?.detail;
+  if (detail && typeof detail === "object" && "code" in detail) {
+    const record = detail as { code?: unknown };
+    if (typeof record.code === "string") return detail as TopicConflictDetail;
+  }
+  return null;
+}
 
 export function evidenceUrl(ref: EvidenceRef): string | null {
   if (!ref.ref_id || ref.kind === "unknown") return null;

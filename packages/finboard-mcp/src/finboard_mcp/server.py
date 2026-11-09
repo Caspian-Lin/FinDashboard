@@ -548,9 +548,17 @@ FinBoard 研究 MCP —— 量化研究工具集
   上线,LLM 产出仍须走
   研究→回测→OOS→模拟→影子→小资金完整晋级链。
 
-== 研究课题与冻结解释 (#499/#500) ==
+== 研究课题与冻结解释 (#499/#500/#514) ==
 - finboard_topic_read/write 管理版本化目标与追加式轮次,写入不运行回测。工作摘要/agent解释不是正式结论;docs/research经PR维护,文档冲突时以文档为准。
-- 课题是持续更新的锚点与逻辑目录;已有运行/记忆/实验用topic_write append entry_type=evidence的精确source_refs关联,原产物不改写,可被多课题引用。先source_check核查,按entries分页续接;误关联追加supersedes_id纠正。没有单独聚合/反向归属API。完整例子见docs/research/topic-organization.md与Skill tools.md。
+- 生命周期(#514):draft --activate(需goal)--> active;active --pause--> paused --resume--> active;
+  active|paused --close(reason)--> closed --reopen(reason)--> active;draft --discard(reason)--> closed。
+  状态列是权威,每次转移要求expected_revision并追加entry_type=lifecycle轮次;非法转移返回conflict
+  (allowed/current),版本冲突返回current_revision/changed_fields,须重新读取后续接,不能覆盖。
+  create/draft_create/append支持idempotency_key,同键同内容返回原记录(created=false),不重复建题。
+- 续接优先用finboard_topic_read(view=context):一次取回目标、最近生命周期、开放问题、最近轮次摘录、
+  断链引用与next_actions(服务端派生建议,不是执行);截断时excerpted=true。view=branches看分支聚合,
+  view=refs逐条核验最近轮次引用(≤20条/次,offset续页),entry_id读单条全文与checksum(跨课题404)。
+- 课题是持续更新的锚点与逻辑目录;已有运行/记忆/实验用topic_write append entry_type=evidence的精确source_refs关联,原产物不改写,可被多课题引用。先source_check核查,按entries分页续接;误关联追加supersedes_id纠正。完整例子见docs/research/topic-organization.md与Skill tools.md。
 - finboard_memory_page 分页摘录,保留状态、来源与纠正链;历史故障已修复不能作为当前故障。
 - finboard_strategy_explain 必须指定运行或精确策略版本;只有commit匹配的因子定义可解释为历史机制。
 - finboard_decision_explain 用日期或decision_id+symbol有界下钻,禁止拉全量artifact替代;目标不等于成交,缺阶段不猜原因。

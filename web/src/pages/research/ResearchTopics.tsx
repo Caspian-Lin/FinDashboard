@@ -13,23 +13,20 @@ import { TopicDataCard } from "@/components/data/TopicDataCard";
 import {
   workspaceApi,
   evidenceUrl,
+  conflictDetail,
+  type ActivateInput,
   type EvidenceRef,
+  type Topic,
+  type TopicConflictDetail,
+  type TopicDraftInput,
   type TopicInput,
   type RoundInput,
   type MemoryDetail,
 } from "@/lib/research-workspace";
 import { fetchJSON } from "@/lib/api";
 
-const EMPTY: TopicInput = {
-  title: "",
-  question: "",
-  goal: { version: "", criteria: "", source: { kind: "document", ref_id: "" } },
-  status: "active",
-  conclusion: "unknown",
-  summary: "",
-  open_questions: [],
-  next_step: "",
-};
+const EMPTY_DRAFT: TopicDraftInput = { title: "", question: "" };
+const EMPTY_GOAL = { version: "", criteria: "", source: { kind: "document", ref_id: "" } };
 const STATES: Record<string, string> = {
   low: "低",
   medium: "中",
@@ -43,6 +40,7 @@ const STATES: Record<string, string> = {
   factor_series: "因子序列",
   simulation: "模拟盘",
   backtest: "探索回测",
+  draft: "草稿",
   active: "研究中",
   paused: "已暂停",
   closed: "已收束",
@@ -56,7 +54,56 @@ const STATES: Record<string, string> = {
   rejected: "被拒绝",
   forgotten: "已纠正/移除",
   archived: "归档",
+  matched: "引用存在",
+  missing: "断链",
+  checksum_mismatch: "checksum不一致",
+  version_mismatch: "版本不一致",
+  version_required: "需补精确版本",
+  invalid: "引用非法",
 };
+const ACTION_LABELS: Record<string, string> = {
+  pause: "暂停课题",
+  resume: "继续课题",
+  close: "收束课题",
+  reopen: "重开课题",
+  discard: "放弃草稿",
+};
+const ACTION_HINTS: Record<string, string> = {
+  pause: "暂停保留目标、轮次与引用；可随时继续，不产生新研究。",
+  resume: "继续后课题恢复为研究中；不会自动发起任何运行。",
+  close: "收束表示本轮研究告一段落，原因会写入生命周期记录。",
+  reopen: "重开需要已归档目标版本；历史轮次与结论原样保留。",
+  discard: "放弃草稿会收束课题并保留记录，不会删除任何证据。",
+};
+const REASON_REQUIRED = new Set(["close", "reopen", "discard"]);
+const NEXT_ACTION_LABELS: Record<string, string> = {
+  activate: "补齐目标并激活",
+  check_refs: "核验断链引用",
+  resume: "恢复课题",
+  reopen: "重开课题",
+  write_round: "记录轮次",
+  review_open_questions: "复核开放问题",
+  review: "复核证据",
+};
+
+function lifecycleActions(status: string): string[] {
+  if (status === "draft") return ["discard"];
+  if (status === "active") return ["pause", "close"];
+  if (status === "paused") return ["resume", "close"];
+  if (status === "closed") return ["reopen"];
+  return [];
+}
+
+function activationFrom(topic: Topic): ActivateInput {
+  return {
+    goal: topic.goal ?? { ...EMPTY_GOAL, source: { ...EMPTY_GOAL.source } },
+    conclusion: topic.conclusion,
+    summary: topic.summary,
+    open_questions: topic.open_questions,
+    next_step: topic.next_step,
+  };
+}
+
 export function EvidenceLinks({ refs }: { refs: EvidenceRef[] }) {
   return (
     <ul className="space-y-2">
@@ -193,6 +240,184 @@ function Choice({
     </div>
   );
 }
+
+function ContextCard({ topicId }: { topicId: string }) {
+  const q = useQuery({
+    queryKey: ["topic-context", topicId],
+    queryFn: () => workspaceApi.context(topicId),
+  });
+  if (q.isLoading) return <LoadingState />;
+  if (q.isError) return <ErrorState message={String(q.error)} onRetry={() => q.refetch()} />;
+  const context = q.data;
+  if (!context) return null;
+  return (
+    <section
+      aria-label="继续研究上下文"
+      className="space-y-3 rounded-lg border border-border p-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-semibold">继续研究（跨客户端续接）</h3>
+        <span className="text-xs text-muted-foreground">
+          生成于 <ResearchTimestamp value={context.generated_at} /> · revision {context.revision}
+          {context.excerpted ? " · 已按边界截取" : ""}
+        </span>
+      </div>
+      {context.excerpted && (
+        <p className="text-xs text-muted-foreground">
+          上下文按服务端边界截取（最近轮次 ≤{context.bounds.max_rounds}、引用核验 ≤
+          {context.bounds.max_refs}、摘录 ≤{context.bounds.excerpt_chars} 字、载荷 ≤64 KiB）；
+          精确全文请用轮次 ID 或课题详情查看。
+          {context.truncated_sections?.length
+            ? `已压缩段落：${context.truncated_sections.join("、")}`
+            : ""}
+        </p>
+      )}
+      {context.lifecycle.last && (
+        <p className="text-sm text-muted-foreground">
+          最近生命周期：
+          {STATES[context.lifecycle.last.from ?? ""] ?? context.lifecycle.last.from} →{" "}
+          {STATES[context.lifecycle.last.to ?? ""] ?? context.lifecycle.last.to}
+          {context.lifecycle.last.reason ? `（${context.lifecycle.last.reason}）` : ""}
+          {context.lifecycle.last.actor ? ` · ${context.lifecycle.last.actor}` : ""}
+        </p>
+      )}
+      {context.goal ? (
+        <p className="text-sm">
+          当前目标 {context.goal.version}：{context.goal.criteria}
+        </p>
+      ) : (
+        <p className="text-sm text-warning">尚未补齐目标版本与来源，激活后才能发起研究。</p>
+      )}
+      <div>
+        <h4 className="text-sm font-medium">建议下一步（服务端派生，不是执行）</h4>
+        <ul className="list-disc space-y-1 pl-5 text-sm">
+          {context.next_actions.map((action) => (
+            <li key={action.action}>
+              {NEXT_ACTION_LABELS[action.action] ?? action.action}：{action.why}
+            </li>
+          ))}
+        </ul>
+      </div>
+      {context.dangling_refs.length > 0 && (
+        <div role="alert" className="rounded-md border border-destructive/40 p-3 text-sm">
+          <p className="font-medium text-destructive">
+            断链引用 {context.dangling_refs.length} 条，需重新核验（不是自动接受或自动修复）：
+          </p>
+          <ul className="mt-1 space-y-1">
+            {context.dangling_refs.map((item, index) => (
+              <li key={`${item.ref.kind}-${item.ref.ref_id}-${index}`} className="break-all">
+                {item.ref.kind}：{item.ref.ref_id} · {STATES[item.status] ?? item.status}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {context.active_links.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium">进行中的关联</h4>
+          <ul className="list-disc space-y-1 pl-5 text-sm">
+            {context.active_links.map((link) => (
+              <li key={`${link.entity_type}-${link.entity_id}`} className="break-all">
+                {link.entity_type}：{link.entity_id}
+                {link.job_id ? ` · ${link.job_id}` : ""} · {link.state}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div>
+        <h4 className="text-sm font-medium">最近轮次（{context.recent_rounds.length}）</h4>
+        {context.recent_rounds.length === 0 ? (
+          <p className="text-sm text-muted-foreground">尚无轮次记录；下一步动作还没有留痕。</p>
+        ) : (
+          <ul className="space-y-2 text-sm">
+            {context.recent_rounds.map((round) => (
+              <li key={round.entry_id} className="border-t border-border pt-2">
+                <p className="text-xs text-muted-foreground">
+                  <ResearchTimestamp value={round.created_at} /> · {round.branch} ·{" "}
+                  {STATES[round.outcome ?? ""] ?? round.outcome ?? "未记录结果"} ·{" "}
+                  {round.evidence_level === "agent_interpretation" ? "agent 解释" : "人工记录"} ·{" "}
+                  {round.entry_id}
+                </p>
+                <p className="whitespace-pre-wrap">
+                  {round.conclusion_excerpt || "本轮尚无工作结论"}
+                </p>
+                {round.next_step && <p className="text-muted-foreground">下一步：{round.next_step}</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {context.open_questions.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium">开放问题</h4>
+          <ul className="list-disc space-y-1 pl-5 text-sm">
+            {context.open_questions.map((question) => (
+              <li key={question}>{question}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ConflictPanel({
+  conflict,
+  onReload,
+  onKeepNote,
+  onClose,
+}: {
+  conflict: TopicConflictDetail;
+  onReload: () => void;
+  onKeepNote: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <section
+      role="dialog"
+      aria-label="课题冲突"
+      className="space-y-3 rounded-lg border border-destructive/50 p-4"
+    >
+      <h2 className="font-semibold">课题已被其他会话更新，本次修改未保存</h2>
+      {conflict.code === "illegal_transition" ? (
+        <p className="text-sm">
+          当前状态 {STATES[conflict.current ?? ""] ?? conflict.current} 不允许该操作；允许的目标状态：
+          {(conflict.allowed ?? []).map((s) => STATES[s] ?? s).join(" / ") || "无"}
+        </p>
+      ) : conflict.code === "idempotency_conflict" ? (
+        <p className="text-sm">幂等键 {conflict.idempotency_key} 已绑定内容不同的课题。</p>
+      ) : (
+        <>
+          <p className="text-sm">
+            当前 revision {conflict.current_revision ?? "?"}，你的 revision{" "}
+            {conflict.your_revision ?? "?"}。已刷新到最新版本，你的改动没有覆盖对方内容。
+          </p>
+          {conflict.changed_fields?.length ? (
+            <p className="text-sm">变化的字段：{conflict.changed_fields.join("、")}</p>
+          ) : null}
+          {conflict.current_summary && (
+            <p className="text-sm text-muted-foreground">
+              当前：状态 {STATES[conflict.current_summary.status ?? ""] ?? conflict.current_summary.status}
+              {" · "}目标 {conflict.current_summary.goal_version ?? "未补齐"}
+              {" · "}r{conflict.current_summary.revision}
+            </p>
+          )}
+        </>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={onReload}>重新加载最新版本</Button>
+        <Button variant="outline" onClick={onKeepNote}>
+          仅保留我的说明（追加轮次）
+        </Button>
+        <Button variant="outline" onClick={onClose}>
+          关闭
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 export default function ResearchTopics() {
   const [params, setParams] = useSearchParams();
   const topicId = params.get("topic");
@@ -200,6 +425,8 @@ export default function ResearchTopics() {
   const [offset, setOffset] = useState(0);
   const [entryOffset, setEntryOffset] = useState(0);
   const [memoryOffset, setMemoryOffset] = useState(0);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [sort, setSort] = useState("updated");
   const tab = params.get("tab") ?? (memoryId ? "memories" : "topics");
   const setTab = (value: string) =>
     setParams(
@@ -209,13 +436,18 @@ export default function ResearchTopics() {
           : {}
         : { tab: value, ...(memoryId ? { memory: memoryId } : {}) },
     );
+  const [draftForm, setDraftForm] = useState<TopicDraftInput | null>(null);
+  const [draftKey, setDraftKey] = useState("");
+  const [activation, setActivation] = useState<ActivateInput | null>(null);
+  const [lifecycle, setLifecycle] = useState<{ action: string; reason: string } | null>(null);
+  const [conflict, setConflict] = useState<TopicConflictDetail | null>(null);
   const [form, setForm] = useState<TopicInput | null>(null);
   const [round, setRound] = useState<RoundInput | null>(null);
   const [key, setKey] = useState("");
   const qc = useQueryClient();
   const topics = useQuery({
-    queryKey: ["topics", offset],
-    queryFn: () => workspaceApi.topics(offset),
+    queryKey: ["topics", offset, statusFilter, sort],
+    queryFn: () => workspaceApi.topics(offset, statusFilter || undefined, sort),
   });
   const topic = useQuery({
     queryKey: ["topic", topicId],
@@ -237,6 +469,48 @@ export default function ResearchTopics() {
     queryFn: () => fetchJSON<MemoryDetail>(`/research/memories/${encodeURIComponent(memoryId!)}`),
     enabled: tab === "memories" && !!memoryId,
   });
+  const onConflict = (error: unknown) => {
+    const detail = conflictDetail(error);
+    if (detail) setConflict(detail);
+  };
+  const refreshTopic = () => {
+    void qc.invalidateQueries({ queryKey: ["topics"] });
+    void qc.invalidateQueries({ queryKey: ["topic"] });
+    void qc.invalidateQueries({ queryKey: ["topic-entries"] });
+    void qc.invalidateQueries({ queryKey: ["topic-context"] });
+  };
+  const saveDraft = useMutation({
+    mutationFn: () => workspaceApi.createDraft(draftForm!, draftKey),
+    onSuccess: (t) => {
+      setDraftForm(null);
+      setParams({ topic: t.topic_id });
+      refreshTopic();
+    },
+    onError: onConflict,
+  });
+  const activateTopic = useMutation({
+    mutationFn: () =>
+      workspaceApi.activate(topicId!, activation!, topic.data?.revision ?? 1),
+    onSuccess: () => {
+      setActivation(null);
+      refreshTopic();
+    },
+    onError: onConflict,
+  });
+  const changeLifecycle = useMutation({
+    mutationFn: () =>
+      workspaceApi.transition(
+        topicId!,
+        lifecycle!.action,
+        lifecycle!.reason,
+        topic.data?.revision ?? 1,
+      ),
+    onSuccess: () => {
+      setLifecycle(null);
+      refreshTopic();
+    },
+    onError: onConflict,
+  });
   const save = useMutation({
     mutationFn: () =>
       topicId && topic.data
@@ -245,32 +519,32 @@ export default function ResearchTopics() {
     onSuccess: (t) => {
       setForm(null);
       setParams({ topic: t.topic_id });
-      void qc.invalidateQueries({ queryKey: ["topics"] });
-      void qc.invalidateQueries({ queryKey: ["topic"] });
-      void qc.invalidateQueries({ queryKey: ["topic-entries"] });
+      refreshTopic();
     },
+    onError: onConflict,
   });
   const append = useMutation({
     mutationFn: () => workspaceApi.append(topicId!, round!, key),
     onSuccess: () => {
       setRound(null);
-      void qc.invalidateQueries({ queryKey: ["topic-entries"] });
+      refreshTopic();
     },
+    onError: onConflict,
   });
   const setValue = <K extends keyof TopicInput>(name: K, value: TopicInput[K]) =>
     setForm((f) => (f ? { ...f, [name]: value } : f));
   const setRoundValue = <K extends keyof RoundInput>(name: K, value: RoundInput[K]) =>
     setRound((r) => (r ? { ...r, [name]: value } : r));
-  const startRound = () => {
+  const startRound = (conclusion = "") => {
     setKey(crypto.randomUUID());
     setRound({
       entry_type: "round",
-      goal_version: topic.data?.goal.version ?? "",
+      goal_version: topic.data?.goal?.version ?? "",
       objective: "",
       action: "",
       rationale: "",
       outcome: "completed",
-      conclusion: "",
+      conclusion,
       confidence: "unknown",
       next_step: "",
       source_refs: [],
@@ -278,23 +552,30 @@ export default function ResearchTopics() {
       branch: "main",
     });
   };
+  const openDraftForm = () => {
+    setParams({});
+    setDraftForm({ ...EMPTY_DRAFT });
+    setDraftKey(crypto.randomUUID());
+    setForm(null);
+    setActivation(null);
+    setRound(null);
+    setLifecycle(null);
+    setConflict(null);
+    saveDraft.reset();
+  };
+  const reloadLatest = () => {
+    setConflict(null);
+    setForm(null);
+    setActivation(null);
+    setLifecycle(null);
+    refreshTopic();
+  };
   return (
     <div className="space-y-6">
       <PageHeader
         title="研究课题"
-        description="围绕问题组织每轮尝试、证据和下一步，随时暂停与续接。"
-        actions={
-          <Button
-            onClick={() => {
-              setParams({});
-              setForm(structuredClone(EMPTY));
-              setRound(null);
-              save.reset();
-            }}
-          >
-            新建课题
-          </Button>
-        }
+        description="先保存问题，再补齐目标与来源后激活；围绕问题组织每轮尝试、证据和下一步，随时暂停与续接。"
+        actions={<Button onClick={openDraftForm}>新建课题</Button>}
       />
       <div className="flex flex-wrap gap-2">
         <Button variant={tab === "topics" ? "default" : "outline"} onClick={() => setTab("topics")}>
@@ -335,8 +616,62 @@ export default function ResearchTopics() {
       )}
       <p className="max-w-prose text-sm text-muted-foreground">
         自动产物事实、agent
-        解释与工作结论各有来源。正式接受的结论以仓库研究文档为准，冲突时保留双方记录；旧记忆中的故障和假设需重新核验。
+        解释与工作结论各有来源。正式接受的结论以仓库研究文档为准，冲突时保留双方记录；旧记忆中的故障和假设需重新核验。保存课题与执行研究严格分开，保存不会启动任何运行。
       </p>
+      {conflict && (
+        <ConflictPanel
+          conflict={conflict}
+          onReload={reloadLatest}
+          onKeepNote={() => {
+            const note = form?.summary ?? activation?.summary ?? "";
+            setConflict(null);
+            setForm(null);
+            setActivation(null);
+            startRound(note);
+          }}
+          onClose={() => setConflict(null)}
+        />
+      )}
+      {draftForm && (
+        <form
+          className="space-y-4 rounded-lg border border-border p-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            saveDraft.mutate();
+          }}
+        >
+          <h2 className="text-lg font-semibold">第一步：保存研究问题草稿</h2>
+          <p className="text-sm text-muted-foreground">
+            草稿只保存问题本身并生成稳定 RT-ID；目标版本、门槛与来源在第二步补齐后才会激活。保存与执行分开。
+          </p>
+          <Field
+            label="课题标题"
+            required
+            value={draftForm.title}
+            onChange={(v) => setDraftForm({ ...draftForm, title: v })}
+          />
+          <Field
+            label="研究问题"
+            required
+            multiline
+            value={draftForm.question}
+            onChange={(v) => setDraftForm({ ...draftForm, question: v })}
+          />
+          {saveDraft.isError && (
+            <p role="alert" className="text-destructive">
+              {String(saveDraft.error)}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <Button type="submit" disabled={saveDraft.isPending}>
+              保存草稿
+            </Button>
+            <Button type="button" variant="outline" onClick={() => setDraftForm(null)}>
+              取消
+            </Button>
+          </div>
+        </form>
+      )}
       {form && (
         <form
           className="space-y-4 rounded-lg border border-border p-4"
@@ -426,9 +761,42 @@ export default function ResearchTopics() {
           </div>
         </form>
       )}
-      {tab === "topics" && !form && (
+      {tab === "topics" && !form && !draftForm && (
         <div className="grid gap-6 lg:grid-cols-[18rem_minmax(0,1fr)]">
           <aside className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Label htmlFor="topic-status-filter">状态</Label>
+              <select
+                id="topic-status-filter"
+                aria-label="按状态筛选"
+                className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                value={statusFilter}
+                onChange={(e) => {
+                  setStatusFilter(e.target.value);
+                  setOffset(0);
+                }}
+              >
+                <option value="">全部</option>
+                <option value="draft">草稿</option>
+                <option value="active">研究中</option>
+                <option value="paused">已暂停</option>
+                <option value="closed">已收束</option>
+              </select>
+              <Label htmlFor="topic-sort">排序</Label>
+              <select
+                id="topic-sort"
+                aria-label="排序方式"
+                className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                value={sort}
+                onChange={(e) => {
+                  setSort(e.target.value);
+                  setOffset(0);
+                }}
+              >
+                <option value="updated">最近更新</option>
+                <option value="created">创建时间</option>
+              </select>
+            </div>
             {topics.isLoading ? (
               <LoadingState />
             ) : topics.isError ? (
@@ -436,7 +804,7 @@ export default function ResearchTopics() {
             ) : topics.data?.items.length === 0 ? (
               <EmptyState
                 title="还没有研究课题"
-                description="为一个待验证的问题建立课题，已有运行和记忆可在轮次中关联。"
+                description="先保存一个问题作为草稿，补齐目标与来源后再激活。"
               />
             ) : (
               topics.data?.items.map((t) => (
@@ -447,11 +815,15 @@ export default function ResearchTopics() {
                     setParams({ topic: t.topic_id });
                     setEntryOffset(0);
                     setRound(null);
+                    setActivation(null);
+                    setLifecycle(null);
+                    setConflict(null);
                   }}
                 >
                   <p className="font-medium">{t.title}</p>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    {STATES[t.status]} · {STATES[t.conclusion]}
+                    {STATES[t.status] ?? t.status} · {STATES[t.conclusion] ?? t.conclusion}
+                    {t.updated_at ? ` · ${t.updated_at.slice(0, 10)}` : ""}
                   </p>
                   <p className="mt-1 line-clamp-2 text-sm">{t.next_step || t.question}</p>
                 </button>
@@ -476,13 +848,27 @@ export default function ResearchTopics() {
                   <h2 className="text-xl font-semibold">{topic.data.title}</h2>
                   <p className="max-w-prose text-sm">{topic.data.question}</p>
                   <p className="text-sm text-muted-foreground">
-                    {STATES[topic.data.status]} · {STATES[topic.data.conclusion]} · revision{" "}
+                    {STATES[topic.data.status] ?? topic.data.status} ·{" "}
+                    {STATES[topic.data.conclusion] ?? topic.data.conclusion} · revision{" "}
                     {topic.data.revision}
+                    {topic.data.updated_at ? (
+                      <>
+                        {" · "}最近更新 <ResearchTimestamp value={topic.data.updated_at} />
+                      </>
+                    ) : null}
                   </p>
-                  <p className="text-sm">
-                    当前目标 {topic.data.goal.version}：{topic.data.goal.criteria}
-                  </p>
-                  <EvidenceLinks refs={[topic.data.goal.source]} />
+                  {topic.data.goal ? (
+                    <>
+                      <p className="text-sm">
+                        当前目标 {topic.data.goal.version}：{topic.data.goal.criteria}
+                      </p>
+                      <EvidenceLinks refs={[topic.data.goal.source]} />
+                    </>
+                  ) : (
+                    <p className="text-sm text-warning">
+                      尚未补齐目标版本与验收门槛；补齐并激活前不能发起研究。
+                    </p>
+                  )}
                   <p className="max-w-prose whitespace-pre-wrap text-sm">
                     {topic.data.summary || "尚无工作摘要"}
                   </p>
@@ -494,25 +880,49 @@ export default function ResearchTopics() {
                   </ul>
                   <p className="text-sm">下一步：{topic.data.next_step || "尚未记录"}</p>
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={startRound}>记录新轮次</Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        setForm({
-                          title: topic.data!.title,
-                          question: topic.data!.question,
-                          goal: topic.data!.goal,
-                          status: topic.data!.status,
-                          conclusion: topic.data!.conclusion,
-                          summary: topic.data!.summary,
-                          open_questions: topic.data!.open_questions,
-                          next_step: topic.data!.next_step,
-                        });
-                        save.reset();
-                      }}
-                    >
-                      更新 / 暂停 / 收束
-                    </Button>
+                    <Button onClick={() => startRound()}>记录新轮次</Button>
+                    {topic.data.status === "draft" ? (
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setActivation(activationFrom(topic.data!));
+                          saveDraft.reset();
+                        }}
+                      >
+                        补齐目标并激活
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setForm({
+                            title: topic.data!.title,
+                            question: topic.data!.question,
+                            goal: topic.data!.goal ?? EMPTY_GOAL,
+                            status: topic.data!.status,
+                            conclusion: topic.data!.conclusion,
+                            summary: topic.data!.summary,
+                            open_questions: topic.data!.open_questions,
+                            next_step: topic.data!.next_step,
+                          });
+                          save.reset();
+                        }}
+                      >
+                        更新记录
+                      </Button>
+                    )}
+                    {lifecycleActions(topic.data.status).map((action) => (
+                      <Button
+                        key={action}
+                        variant="outline"
+                        onClick={() => {
+                          setLifecycle({ action, reason: "" });
+                          changeLifecycle.reset();
+                        }}
+                      >
+                        {ACTION_LABELS[action]}
+                      </Button>
+                    ))}
                   </div>
                   <div className="flex flex-wrap gap-3 text-sm">
                     <Link className="text-primary underline" to="/research/strategy">
@@ -524,7 +934,10 @@ export default function ResearchTopics() {
                     <Link className="text-primary underline" to="/research/experiments">
                       OOS 验证
                     </Link>
-                    <Link className="text-primary underline" to={`/data?tab=overview&topic=${encodeURIComponent(topic.data.topic_id)}`}>
+                    <Link
+                      className="text-primary underline"
+                      to={`/data?tab=overview&topic=${encodeURIComponent(topic.data.topic_id)}`}
+                    >
                       数据工具
                     </Link>
                     <Link className="text-primary underline" to="/research/factors">
@@ -534,6 +947,131 @@ export default function ResearchTopics() {
                   {/* 课题数据视图(#512):只读消费 /api/data/catalog/topics/{id}/coverage */}
                   <TopicDataCard topicId={topic.data.topic_id} bare />
                 </section>
+                {activation && topic.data.status === "draft" && (
+                  <form
+                    className="space-y-4 rounded-lg border border-border p-4"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      activateTopic.mutate();
+                    }}
+                  >
+                    <h3 className="font-semibold">第二步：补齐目标、门槛与来源后激活</h3>
+                    <p className="text-sm text-muted-foreground">
+                      激活只表示课题具备可执行目标，不会自动发起研究运行。
+                    </p>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <Field
+                        label="目标版本"
+                        required
+                        value={activation.goal.version}
+                        onChange={(v) =>
+                          setActivation({ ...activation, goal: { ...activation.goal, version: v } })
+                        }
+                      />
+                      <Field
+                        label="目标来源（研究文档相对路径）"
+                        required
+                        value={activation.goal.source.ref_id}
+                        onChange={(v) =>
+                          setActivation({
+                            ...activation,
+                            goal: {
+                              ...activation.goal,
+                              source: { kind: "document", ref_id: v },
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    <Field
+                      label="目标和验收门槛"
+                      required
+                      multiline
+                      value={activation.goal.criteria}
+                      onChange={(v) =>
+                        setActivation({ ...activation, goal: { ...activation.goal, criteria: v } })
+                      }
+                    />
+                    <Field
+                      label="当前摘要"
+                      multiline
+                      value={activation.summary ?? ""}
+                      onChange={(v) => setActivation({ ...activation, summary: v })}
+                    />
+                    <Field
+                      label="开放问题（每行一个）"
+                      multiline
+                      value={(activation.open_questions ?? []).join("\n")}
+                      onChange={(v) =>
+                        setActivation({
+                          ...activation,
+                          open_questions: v.split("\n").filter(Boolean),
+                        })
+                      }
+                    />
+                    <Field
+                      label="下一步"
+                      value={activation.next_step ?? ""}
+                      onChange={(v) => setActivation({ ...activation, next_step: v })}
+                    />
+                    {activateTopic.isError && (
+                      <p role="alert" className="text-destructive">
+                        {String(activateTopic.error)}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button type="submit" disabled={activateTopic.isPending}>
+                        激活课题
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setActivation(null)}
+                      >
+                        稍后再说
+                      </Button>
+                    </div>
+                  </form>
+                )}
+                {lifecycle && (
+                  <form
+                    role="dialog"
+                    aria-label="确认生命周期操作"
+                    className="space-y-3 rounded-lg border border-border p-4"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      changeLifecycle.mutate();
+                    }}
+                  >
+                    <h3 className="font-semibold">{ACTION_LABELS[lifecycle.action]}</h3>
+                    <p className="text-sm text-muted-foreground">
+                      {ACTION_HINTS[lifecycle.action]} 当前 revision {topic.data.revision}；确认后写入不可改写的生命周期记录。
+                    </p>
+                    <Field
+                      label={
+                        REASON_REQUIRED.has(lifecycle.action) ? "原因（必填）" : "原因（可选）"
+                      }
+                      required={REASON_REQUIRED.has(lifecycle.action)}
+                      multiline
+                      value={lifecycle.reason}
+                      onChange={(v) => setLifecycle({ ...lifecycle, reason: v })}
+                    />
+                    {changeLifecycle.isError && (
+                      <p role="alert" className="text-destructive">
+                        {String(changeLifecycle.error)}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button type="submit" disabled={changeLifecycle.isPending}>
+                        确认{ACTION_LABELS[lifecycle.action]}
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => setLifecycle(null)}>
+                        取消
+                      </Button>
+                    </div>
+                  </form>
+                )}
+                <ContextCard topicId={topic.data.topic_id} />
                 {round && (
                   <form
                     className="space-y-4 rounded-lg border border-border p-4"
@@ -703,13 +1241,34 @@ export default function ResearchTopics() {
                       <p className="text-xs text-muted-foreground">
                         <ResearchTimestamp value={e.created_at} /> · {e.created_by} · {e.entry_id}
                       </p>
-                      {e.topic ? (
+                      {e.entry_type === "lifecycle" ? (
                         <>
                           <h4 className="font-medium">
-                            目标记录 r{e.topic_revision} · {e.topic.goal.version}
+                            生命周期：{STATES[e.from ?? ""] ?? e.from} →{" "}
+                            {STATES[e.to ?? ""] ?? e.to}
                           </h4>
-                          <p className="text-sm">{e.topic.goal.criteria}</p>
-                          <EvidenceLinks refs={[e.topic.goal.source]} />
+                          <p className="text-sm">原因：{e.reason || "未填写"}</p>
+                          <p className="text-xs text-muted-foreground">
+                            操作者 {e.actor} · 动作 {e.action}
+                          </p>
+                        </>
+                      ) : e.topic ? (
+                        <>
+                          <h4 className="font-medium">
+                            {e.topic.goal
+                              ? `目标记录 r${e.topic_revision} · ${e.topic.goal.version}`
+                              : `草稿记录 r${e.topic_revision}`}
+                          </h4>
+                          {e.topic.goal ? (
+                            <>
+                              <p className="text-sm">{e.topic.goal.criteria}</p>
+                              <EvidenceLinks refs={[e.topic.goal.source]} />
+                            </>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">
+                              草稿只保存问题，目标版本与来源在激活时补齐。
+                            </p>
+                          )}
                           <p className="text-xs text-warning">
                             与当前目标不同的版本分别保留，不自动替换历史验收门。
                           </p>
