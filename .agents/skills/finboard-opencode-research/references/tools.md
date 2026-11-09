@@ -51,6 +51,7 @@ validation_experiment_create 的 selection_config.validation_trial_runner 显式
 | 回测(backtest.*,✅ #127+#174+#175) | ✅(读 research.read;run/网格提交 research.run;历史删除 research.write) | |
 | 模拟盘(sim.*,✅ #127+#139) | ✅(读 research.read;会话/决策/行情/评估等运行写 research.run;账户创建 research.write) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(读 research.read;queue/cancel/replay research.run) | |
+| 课题发起运行(topic_run.*,✅ #515) | ✅(list/get/run_topics research.read;start/retry/cancel research.run；后来关联仅 REST) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:research.read) | |
 | 后台任务队列(job.*,✅ #136+#221) | ✅(list/get/wait research.read;enqueue/cancel 需 research.run+data.write;archive/unarchive research.write) | |
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(data.write;config_get/review_queue 为 research.read) | |
@@ -2016,7 +2017,7 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 
 ### 已有证据归入课题
 
-课题是持续更新的锚点，目录当前由轮次source_refs构成，无独立聚合/反向归属API。先topic_read检查已有课题，memory_page/原run及实验查询选精确ID，source_check核验，再topic_write create（完整输入见上）和append evidence。不是改原run或记忆的topic_id，原产物可被多课题引用，不能为了归类调用memory_correct。完整流程见 `/workspace/docs/research/topic-organization.md`。
+课题是持续更新的锚点，目录由轮次source_refs与#515运行链接共同构成；`finboard_run_topics` 可反查一个 run 被哪些课题引用。先topic_read检查已有课题，memory_page/原run及实验查询选精确ID，source_check核验，再topic_write create（完整输入见上）和append evidence。不是改原run或记忆的topic_id，原产物可被多课题引用，不能为了归类调用memory_correct。完整流程见 `/workspace/docs/research/topic-organization.md`。
 
 ```json
 {"operation":"append","topic_id":"RT-<已有ID>","idempotency_key":"historical-evidence-v1-001","payload":{"entry_type":"evidence","goal_version":"<该课题已有目标版本>","objective":"组织历史研究证据","action":"核查选定运行、记忆与实验的精确ID后追加引用","rationale":"保留历史并跨会话续接","outcome":"completed","conclusion":"归档动作完成，策略可信度仍待复核","confidence":"unknown","next_step":"核对冻结版本与OOS结论","source_refs":[{"kind":"research_run","ref_id":"RR-<完整ID>"},{"kind":"memory","ref_id":"RM-<完整ID>"},{"kind":"experiment","ref_id":"<完整实验ID>"}],"branch":"historical-evidence"}}
@@ -2027,6 +2028,29 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 先读 `oos_outcome` 再读实验 `status`。validated_oos+not_supported不能称验证通过；published/completed不能称晋级。决策目录→选ID/日期+symbol→翻has_more，目标与成交分开解释，空阶段说明缺记录。成本/滑点/延迟配置不等于已执行，真实能力缺口仍见#502/#503。
 
 课题列表为excerpted摘要（问题/摘要/下一步最多1200字、开放问题最多5项各300字），查精确ID详情才取完整工作目标。目标同版本不可换门槛，轮次goal_version须已归档。记忆refs超过16KiB标refs_truncated且不可验证；说明书冻结manifest限1MiB、因子params限16KiB，超限不退回全量run_get。
+
+## finboard.topic_run.*（✅ #515：3 只读 + 3 写）
+
+从课题发起 ResearchRun，服务端在同一事务写 run + background_job + 课题链接 +
+审计；链接不可变，实时状态由读取时 join `research_runs` / `background_jobs`
+派生。旧 `finboard_run_queue` 独立入口不变，已存在的独立 run 可后来关联（仅 REST
+`POST /api/research/runs/{run_id}/link`，不扩到 agent 工具面）。
+
+| 工具 | 作用域 | 参数 | 返回/限制 |
+|---|---|---|---|
+| finboard_topic_run_start | research.run | topic_id, goal_version, payload, operation_id? | 201 新建 / 同 operation_id 重放返回原 RR-/BJ-（created=false）；payload 与 finboard_run_queue 同构 |
+| finboard_topic_run_list | research.read | topic_id, limit=20(1–50), cursor? | items[link + state/progress/error/result_checksum], next_cursor |
+| finboard_topic_run_get | research.read | topic_id, run_id | 单条链接 + join 状态 + `/research/runs?run=RR-` 深链；跨课题 not_found |
+| finboard_topic_run_retry | research.run | topic_id, run_id, payload{idempotency_key,requested_by}, operation_id | 新 RR-（replay_of_run_id）+ 新链接；必须换新 operation_id |
+| finboard_topic_run_cancel | research.run | topic_id, run_id | 代理既有协作式取消；completed/failed/cancelled → conflict |
+| finboard_run_topics | research.read | run_id | 反查引用该 run 的课题列表；一个 run 可被多课题引用 |
+
+`topic_run_start` 前置：课题 `status=active` 且 `goal_version` 等于当前目标版本，
+否则 conflict（`topic_not_active` / `goal_version_mismatch`）；同 `operation_id`
+跨课题复用 conflict（`operation_id_bound`）。发起是显式写动作，保存课题/追加轮次
+永远不会自动启动运行；运行状态是机器事实，轮次是人类/agent 解释，不要互相替代。
+`retry` 复用既有 replay 守卫（completed/interrupted 可重放；cancelled/failed 仍按
+原错误处置），因此“失败后重试”应先确认源状态或重新入队新运行。
 
 ## finboard.data_backfill.*(✅ #511:2 只读 + 2 写)
 

@@ -22,7 +22,7 @@ ResearchRun 是冻结输入后执行的离线研究回放，不等同所有研�
 
 ## 课题与轮次
 
-课题是跨会话持续更新的研究锚点与逻辑证据目录；当前目录由追加轮次的source_refs组成，`#514` 起可用 `/branches` 看分支聚合、`/refs/check` 逐条核验断链、`/context` 一次取回有界续接上下文（仍无 run→topic 反向归属，留待 #515 链接表）。已有运行、记忆和实验用 `entry_type=evidence` 引用关联，保留原产物和历史状态，一个产物可被多个课题引用。完整操作见 [课题组织与已有证据归档](topic-organization.md)。
+课题是跨会话持续更新的研究锚点与逻辑证据目录；当前目录由追加轮次的source_refs组成，`#514` 起可用 `/branches` 看分支聚合、`/refs/check` 逐条核验断链、`/context` 一次取回有界续接上下文；`#515` 起课题经 `research_topic_links` 显式关联研究运行，并可用 `GET /api/research/runs/{run_id}/topics` 反向归属（一个 run 可被多个课题引用）。已有运行、记忆和实验用 `entry_type=evidence` 引用关联，保留原产物和历史状态，一个产物可被多个课题引用。完整操作见 [课题组织与已有证据归档](topic-organization.md)。
 
 课题稳定ID `RT-`，含 title/question、goal（version/criteria/source）、status（draft/active/paused/closed）、conclusion（工作结论）、summary/open_questions/next_step。`status` 自 #514 起是真实列（`draft|active|paused|closed`，带 CHECK 约束），payload 内同值双写，读取以列为权威。更新需 expected_revision，旧版本冲突返回409；每次更新追加目标快照，历史15%/20%与当次15%/10%门可分别记录，系统不自行决定新门。草稿没有 goal，编辑草稿不会改变生命周期状态。
 
@@ -57,7 +57,7 @@ draft   --discard(reason)--> closed
 - `POST /topics/{id}/activate`：`{goal, expected_revision}`，可附带 summary/open_questions/next_step/conclusion；goal 的 version/criteria/source 必须完整。已 active 且 goal 相同为幂等 200，不增加 revision；goal 不同则 409，不能借激活覆盖目标。
 - `POST /topics/{id}/transitions`：`{action: pause|resume|close|reopen|discard, reason, expected_revision}`；close/reopen/discard 必填原因。
 
-`GET /api/research/topics/{id}/context?rounds=10&refs=10` 返回跨客户端续接载荷：`topic`（含 revision/status/updated_at）、`goal`、`lifecycle`（since + 最近一次转移）、`open_questions`、`next_step`、`recent_rounds`（≤20 条；结论/目标/下一步任一超长都会截到 ≤300 字并置 `excerpted=true`）、`active_links`（#515 前恒为空）、`dangling_refs`（对最近轮次引用逐条 `source_fact`，≤10 条/次）与 `dangling_refs_has_more`/`refs_checked`、`evidence_levels`、`next_actions`（服务端派生建议，不代表执行）、`generated_at`、`revision`、`bounds`。总载荷 ≤64 KiB；任何截取都置 `excerpted=true` 并在 `truncated_sections` 具名，绝不静默截断。`rounds` 上限 20，`refs` 上限 10。列表模式的 `excerpted` 只在确实截断（>1200 字或开放问题 >5 项/单项 >300 字）时为 true。
+`GET /api/research/topics/{id}/context?rounds=10&refs=10` 返回跨客户端续接载荷：`topic`（含 revision/status/updated_at）、`goal`、`lifecycle`（since + 最近一次转移）、`open_questions`、`next_step`、`recent_rounds`（≤20 条；结论/目标/下一步任一超长都会截到 ≤300 字并置 `excerpted=true`）、`active_links`（#515 起为 join 派生的进行中课题→运行链接，最多 10 条，终态链接走 `/runs` 端点）、`dangling_refs`（对最近轮次引用逐条 `source_fact`，≤10 条/次）与 `dangling_refs_has_more`/`refs_checked`、`evidence_levels`、`next_actions`（服务端派生建议，不代表执行）、`generated_at`、`revision`、`bounds`。总载荷 ≤64 KiB；任何截取都置 `excerpted=true` 并在 `truncated_sections` 具名，绝不静默截断。`rounds` 上限 20，`refs` 上限 10。列表模式的 `excerpted` 只在确实截断（>1200 字或开放问题 >5 项/单项 >300 字）时为 true。
 
 精确查询与聚合：
 
@@ -69,6 +69,38 @@ draft   --discard(reason)--> closed
 Web 侧：新建课题分两步（保存草稿 → 补齐目标激活），草稿可单独编辑（无 goal），生命周期按钮带原因与二次确认，详情展示续接上下文卡片与断链提示；表单打开时固定 `base_revision`，后台刷新不会改写提交版本；409 显示结构化冲突（当前 revision、变化字段）并提供“重新加载最新版本”和（非草稿）“仅保留我的说明（追加轮次）”，不静默覆盖。
 
 MCP 冲突返回 `conflict`，并把结构化 detail 以 `| details={json}` 形式附在 message 中（ToolError 无 details 字段），保留 `allowed`/`current`/`current_revision`/`changed_fields`。
+
+## 课题发起研究运行与链接（#515）
+
+`research_topic_links` 是课题与已有研究产物之间的**只追加**关联账本。链接一经创建即不可变，**不写 state/error 列**：运行状态、任务进度与错误在读取时 join `research_runs` / `background_jobs` 派生，因此 worker 重启、租约重排、超时与重复完成事件都不会产生重复运行或重复链接。链接元数据独立于历史 manifest；一个 run 可被多个课题引用，旧独立入口完全不变。
+
+REST：
+
+- `POST /api/research/topics/{topic_id}/runs`：body = 运行入队字段 + `goal_version`（必填）+ 可选 `operation_id`。仅 `status=active` 且 `goal_version` 等于当前目标版本可发起；201 为新建，200 为同 `operation_id` 的幂等重放（返回原 `RR-`/`BJ-`）。
+- `GET /api/research/topics/{topic_id}/runs?limit≤50&cursor`：链接 + 派生 `state`（queued/running/succeeded/failed/cancelled/interrupted）、`progress_done/progress_total/phase`、`error_code/error_summary`、`result_checksum`；`next_cursor` 续页。
+- `GET /api/research/topics/{topic_id}/runs/{run_id}`：单条链接详情 + `/research/runs?run=RR-` 深链。
+- `POST /api/research/topics/{topic_id}/runs/{run_id}/retry`：走既有 replay 生成新 `RR-`（`replay_of_run_id` 指向旧 run）与新链接，原链接保留；必须提供新的 `operation_id`，`goal_version` 继承原链接且仍须匹配当前目标。既有 replay 守卫不变：completed/interrupted 可重放，cancelled/failed 仍按原错误处置。
+- `POST /api/research/topics/{topic_id}/runs/{run_id}/cancel`：代理既有协作式取消（非实盘撤单）；completed/failed/cancelled 已终态返回 409 `run_terminal`。
+- `POST /api/research/runs/{run_id}/link`：`{topic_id, goal_version, operation_id}` 后来关联一个已存在的独立运行，幂等；同一课题/运行重复关联返回原链接（200）。
+- `GET /api/research/runs/{run_id}/topics`：反向查询引用该 run 的全部课题。
+
+事务与审计：
+
+```text
+topic lock + active/goal 校验
+→ ResearchRunSubmissionService.submit（不 commit；run + job + run.submit 审计）
+→ research_topic_links 插入（不可变）
+→ topic.run.start 审计（同 session）
+→ 唯一一次 commit（run + job + link + audit 原子生效）
+```
+
+任一环节失败整体回滚；拒绝/失败经独立会话补记 `outcome=rejected|failed`，不掩盖原始错误。成功审计 `correlation` 同时含 `topic_id` / `goal_version` / `run_id` / `job_id` / `operation_id`。同 `operation_id` 跨课题复用返回 409 `operation_id_bound`。链接写入失败映射 `link_conflict`，运行参数非法映射 `invalid_run_payload`。
+
+MCP 同步暴露 6 个工具：`finboard_topic_run_start`（research.run）、`finboard_topic_run_list` / `finboard_topic_run_get` / `finboard_run_topics`（research.read）、`finboard_topic_run_retry` / `finboard_topic_run_cancel`（research.run）。后来关联仅 REST（避免把独立入口的写能力扩散到 agent 工具面）。
+
+Web 课题详情增加“发起研究运行”卡片：只选已发布策略与发布要求、可选快照/因子序列、资金与代码版本；展示关联运行的实时状态/进度/错误/结果 checksum，提供重放与取消，深链到 `/research/runs?run=RR-`。保存课题、发起运行与记录轮次是三件事：运行状态是机器事实，轮次是人类/agent 解释，并排展示而不互相替代。
+
+迁移 `9c4f2a7d1e63` 创建独立 `research_topic_links`（无外键、无级联），down_revision=`0d2c51e14b6a`；回滚前导出该表，downgrade 只删表，不删除任何 run/job/课题/轮次/审计。
 
 ## 工具同步、验证与回滚
 
