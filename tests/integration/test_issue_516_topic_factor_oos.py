@@ -9,6 +9,8 @@ in this module: the last test asserts that explicitly.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -75,6 +77,7 @@ from finboard_persistence.models import (
     ResearchCodeRunModel,
     ResearchExperimentModel,
     ResearchRunModel,
+    ResearchTopicActionReceiptModel,
     ResearchTopicEntryModel,
     ResearchTopicLinkModel,
     ResearchTopicModel,
@@ -128,6 +131,7 @@ async def engine(_engine: AsyncEngine) -> AsyncEngine:
 async def _clean_business(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         for model in (
+            ResearchTopicActionReceiptModel,
             ResearchTopicLinkModel,
             ResearchTopicEntryModel,
             ResearchTopicModel,
@@ -422,11 +426,7 @@ async def test_review_requires_document_ref_and_checksum(engine: AsyncEngine) ->
         )
 
     topic = await _create_topic(engine)
-    digest = (
-        Path("docs/research") / DOC_PATH
-    ).read_bytes()
-    import hashlib
-
+    digest = (Path("docs/research") / DOC_PATH).read_bytes()
     document_checksum = hashlib.sha256(digest).hexdigest()
     async with session_factory(engine)() as session:
         record = await workspace_write(
@@ -461,6 +461,25 @@ async def test_review_requires_document_ref_and_checksum(engine: AsyncEngine) ->
     assert probe["total"] == 1
     assert probe["items"][0]["status"] == "matched"
     assert probe["items"][0]["ref"]["kind"] == "document"
+
+    # B2: document_ref is relative to docs/research (same root as source_fact).
+    async with session_factory(engine)() as session:
+        relative = await source_fact(
+            session,
+            {"kind": "document", "ref_id": DOC_PATH, "checksum": document_checksum},
+            Path("docs/research"),
+        )
+        repo_relative = await source_fact(
+            session,
+            {
+                "kind": "document",
+                "ref_id": f"docs/research/{DOC_PATH}",
+                "checksum": document_checksum,
+            },
+            Path("docs/research"),
+        )
+    assert relative["status"] == "matched"
+    assert repo_relative["status"] == "missing"
 
 
 async def test_context_separates_plan_executed_and_reviewed(engine: AsyncEngine) -> None:
@@ -513,7 +532,9 @@ async def test_factor_experiment_action_links_and_audits(engine: AsyncEngine) ->
             payload=_factor_payload(),
             ctx=_ctx("OP-516-factor"),
         )
-    assert result["created"] is True
+    assert result["artifact_created"] is True
+    assert result["link_created"] is True
+    assert result["replayed"] is False
     assert result["entity_type"] == "factor_experiment"
     experiment_id = result["entity_id"]
     assert await _count(engine, FactorExperimentModel) == 1
@@ -608,7 +629,8 @@ async def test_code_run_execute_requires_registered_artifact(engine: AsyncEngine
             ctx=_ctx("OP-516-run"),
             sandbox_enabled=True,
         )
-    assert result["created"] is True
+    assert result["artifact_created"] is True
+    assert result["link_created"] is True
     assert result["entity_type"] == "code_run"
     assert result["entity_id"] == result["job_id"]
     assert await _count(engine, BackgroundJobModel) == 1
@@ -639,7 +661,9 @@ async def test_code_run_execute_requires_registered_artifact(engine: AsyncEngine
             ctx=_ctx("OP-516-run"),
             sandbox_enabled=True,
         )
-    assert replay["created"] is False
+    assert replay["replayed"] is True
+    assert replay["artifact_created"] is False
+    assert replay["link_created"] is False
     assert replay["entity_id"] == result["entity_id"]
     assert await _count(engine, BackgroundJobModel) == 1
     assert await _count(engine, ResearchTopicLinkModel) == 1
@@ -741,6 +765,7 @@ async def test_validation_experiment_create_add_trial_and_unseal(
             payload={"experiment_id": experiment_id},
             ctx=_ctx("OP-516-unseal"),
         )
+    assert unsealed["artifact_created"] is True
     assert unsealed["result"]["created"] is True
     assert unsealed["job_id"] is not None
     assert await _count(engine, BackgroundJobModel) == 1
@@ -762,6 +787,157 @@ async def test_validation_experiment_create_add_trial_and_unseal(
     assert "topic.action.validation_experiment.add_trial" in operations
     assert "topic.action.validation_experiment.unseal" in operations
     assert "job.enqueue" in operations
+
+
+async def test_second_action_on_same_artifact_keeps_receipt_idempotency(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    """B1: the link is unique per entity, so the *receipt* must anchor OP-B."""
+
+    topic = await _create_topic(engine)
+    async with session_factory(engine)() as session:
+        created = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.create",
+            goal_version="v1",
+            payload=_validation_payload(),
+            ctx=_ctx("OP-516-create"),
+        )
+    experiment_id = created["entity_id"]
+
+    async with session_factory(engine)() as session:
+        first = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.add_trial",
+            goal_version="v1",
+            payload={"experiment_id": experiment_id, "parameters": {"window": 20}},
+            ctx=_ctx("OP-516-trial-B"),
+        )
+    assert first["artifact_created"] is True
+    assert first["link_created"] is False  # link already exists for the entity
+    assert first["replayed"] is False
+    trial_id = first["result"]["trial_id"]
+
+    # Lost-receipt retry of the *second* action must not add another trial.
+    async with session_factory(engine)() as session:
+        replay = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.add_trial",
+            goal_version="v1",
+            payload={"experiment_id": experiment_id, "parameters": {"window": 20}},
+            ctx=_ctx("OP-516-trial-B"),
+        )
+    assert replay["replayed"] is True
+    assert replay["artifact_created"] is False
+    assert replay["link_created"] is False
+    assert replay["result"]["trial_id"] == trial_id
+    assert await _count(engine, ResearchTrialModel) == 1
+    async with session_factory(engine)() as session:
+        experiment = await ResearchExperimentRepository(session).get(experiment_id)
+        assert experiment is not None
+        assert experiment.trials_used == 1
+        assert len(await ResearchTrialRepository(session).list_by_experiment(experiment_id)) == 1
+
+    # A genuinely new operation still executes and adds the next trial.
+    async with session_factory(engine)() as session:
+        second = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.add_trial",
+            goal_version="v1",
+            payload={"experiment_id": experiment_id, "parameters": {"window": 60}},
+            ctx=_ctx("OP-516-trial-C"),
+        )
+    assert second["artifact_created"] is True
+    assert second["result"]["trial_index"] == 1
+    assert await _count(engine, ResearchTrialModel) == 2
+
+    # A receipt replay still works after the topic is paused (the retry must not
+    # turn into a confusing topic_not_active 409).
+    async with session_factory(engine)() as session:
+        await workspace_write(
+            session,
+            actor="user:api",
+            operation="transition",
+            topic_id=topic["topic_id"],
+            expected_revision=1,
+            payload={"action": "pause", "reason": "暂停后重试回执"},
+        )
+    async with session_factory(engine)() as session:
+        paused_replay = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.add_trial",
+            goal_version="v1",
+            payload={"experiment_id": experiment_id, "parameters": {"window": 20}},
+            ctx=_ctx("OP-516-trial-B"),
+        )
+    assert paused_replay["replayed"] is True
+    assert paused_replay["result"]["trial_id"] == trial_id
+
+    # Reusing OP-B for a different action is a conflict, not a silent no-op.
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchConflictError) as bound:
+            await run_topic_action(
+                session,
+                topic_id=topic["topic_id"],
+                action="validation_experiment.unseal",
+                goal_version="v1",
+                payload={"experiment_id": experiment_id},
+                ctx=_ctx("OP-516-trial-B"),
+            )
+    assert bound.value.code == "operation_id_bound"
+
+
+async def test_unseal_replay_returns_receipt_instead_of_already_unsealed(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    topic = await _create_topic(engine)
+    async with session_factory(engine)() as session:
+        created = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.create",
+            goal_version="v1",
+            payload=_validation_payload(),
+            ctx=_ctx("OP-516-create-u"),
+        )
+    experiment_id = created["entity_id"]
+    async with session_factory(engine)() as session:
+        first = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.unseal",
+            goal_version="v1",
+            payload={"experiment_id": experiment_id},
+            ctx=_ctx("OP-516-unseal-U"),
+        )
+    # Nothing is unsealed yet (the worker owns the one-time gate).
+    assert first["result"]["final_test_unsealed"] is False
+    assert await _count(engine, BackgroundJobModel) == 1
+
+    async with session_factory(engine)() as session:
+        replay = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="validation_experiment.unseal",
+            goal_version="v1",
+            payload={"experiment_id": experiment_id},
+            ctx=_ctx("OP-516-unseal-U"),
+        )
+    assert replay["replayed"] is True
+    assert replay["job_id"] == first["job_id"]
+    assert await _count(engine, BackgroundJobModel) == 1
+    # The replay path never goes through the already_unsealed preflight.
+    rejected = [
+        row
+        for row in await _audit_rows(engine, "topic.action.validation_experiment.unseal")
+        if row.outcome != "succeeded"
+    ]
+    assert rejected == []
 
 
 async def test_duplicate_unseal_is_conflict_and_does_not_touch_state(
@@ -813,6 +989,32 @@ async def test_run_submit_action_delegates_to_515(engine: AsyncEngine) -> None:
     # #515 owns the audit operation for run submission (no double event).
     assert len(await _audit_rows(engine, "topic.run.start")) == 1
     assert await _audit_rows(engine, "topic.action.run.submit") == []
+
+
+async def test_run_submit_failure_is_audited_once_by_515(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    """The action layer must not add a second, unregistered run audit event."""
+
+    topic = await _create_topic(engine)
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchPreconditionFailedError) as excinfo:
+            await run_topic_action(
+                session,
+                topic_id=topic["topic_id"],
+                action="run.submit",
+                goal_version="v9",
+                payload=_payload("topic-action-516-fail"),
+                ctx=_ctx("OP-516-run-fail"),
+            )
+    assert excinfo.value.code == "goal_version_mismatch"
+    rejected = [
+        row for row in await _audit_rows(engine, "topic.run.start") if row.outcome == "rejected"
+    ]
+    assert len(rejected) == 1
+    assert await _audit_rows(engine, "topic.action.run.submit") == []
+    assert await _count(engine, ResearchRunModel) == 0
+    assert await _count(engine, BackgroundJobModel) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -957,6 +1159,41 @@ async def test_oversized_trial_set_returns_unknown_with_named_gap(
         )
     facts = fact["facts"]
     assert fact["status"] == "matched"
+    assert facts["oos_outcome"] == "unknown"
+    assert facts["evidence_gaps"] == ["trial_summary_oversized"]
+
+
+async def test_oversized_trial_bytes_returns_unknown_with_named_gap(
+    engine: AsyncEngine,
+) -> None:
+    """The guard is 500 trials **or** 1 MiB; bytes alone must trip it."""
+
+    experiment_id = await _save_experiment(engine, _experiment())
+    blob = "x" * 400_000
+    async with engine.begin() as conn:
+        for index in range(1, 4):
+            await conn.execute(
+                text(
+                    "INSERT INTO research_trials "
+                    "(trial_id, experiment_id, trial_index, parameters, status, "
+                    " walk_forward_windows, robustness_probes, created_at) "
+                    "VALUES (:trial_id, :experiment_id, :trial_index, "
+                    " CAST(:parameters AS json), 'candidate', '[]'::json, '[]'::json, now())"
+                ),
+                {
+                    "trial_id": f"big-516-{index}",
+                    "experiment_id": experiment_id,
+                    "trial_index": index,
+                    "parameters": json.dumps({"blob": blob}),
+                },
+            )
+    async with session_factory(engine)() as session:
+        fact = await source_fact(
+            session,
+            {"kind": "validation_experiment", "ref_id": experiment_id},
+            Path("docs/research"),
+        )
+    facts = fact["facts"]
     assert facts["oos_outcome"] == "unknown"
     assert facts["evidence_gaps"] == ["trial_summary_oversized"]
 

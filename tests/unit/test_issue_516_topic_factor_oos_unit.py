@@ -24,6 +24,7 @@ from finboard_app.research_topic_artifacts import (
     CodeRunExecuteIn,
     FactorExperimentCreateIn,
     ValidationUnsealIn,
+    _reject_code_fields,
     _validate_action_payload,
 )
 from finboard_app.research_workspace import (
@@ -75,7 +76,7 @@ def test_evidence_ref_literal_keeps_old_kinds_and_adds_new() -> None:
             "objective": "o",
             "action": "a",
             "rationale": "r",
-            "document_ref": {"kind": "document", "ref_id": "docs/x.md"},
+            "document_ref": {"kind": "document", "ref_id": "rounds/x.md"},
         },
         {
             "entry_type": "review",
@@ -85,7 +86,7 @@ def test_evidence_ref_literal_keeps_old_kinds_and_adds_new() -> None:
             "rationale": "r",
             "document_ref": {
                 "kind": "research_run",
-                "ref_id": "docs/x.md",
+                "ref_id": "rounds/x.md",
                 "checksum": "c" * 64,
             },
         },
@@ -111,7 +112,7 @@ def test_evidence_ref_literal_keeps_old_kinds_and_adds_new() -> None:
             "objective": "o",
             "action": "a",
             "rationale": "r",
-            "document_ref": {"kind": "document", "ref_id": "docs/x.md", "checksum": "c"},
+            "document_ref": {"kind": "document", "ref_id": "rounds/x.md", "checksum": "c"},
         },
     ],
 )
@@ -130,7 +131,7 @@ def test_review_entry_is_a_reviewed_conclusion() -> None:
             "rationale": "结论一致",
             "document_ref": {
                 "kind": "document",
-                "ref_id": "docs/research/ROADMAP.md",
+                "ref_id": "ROADMAP.md",
                 "checksum": "c" * 64,
             },
         }
@@ -185,6 +186,15 @@ def test_request_models_have_no_code_field() -> None:
             },
         )
     assert excinfo.value.code == "code_channel_forbidden"
+    # Every action rejects code-bearing keys before touching the DB, including
+    # delegated run payloads (where pydantic would otherwise report invalid_*).
+    for action in ("run.submit", "run.replay", "validation_experiment.add_trial"):
+        with pytest.raises(ResearchInvalidInputError) as run_excinfo:
+            _validate_action_payload(action, {"run_id": "RR-x", "code": "print(1)"})
+        assert run_excinfo.value.code == "code_channel_forbidden"
+    with pytest.raises(ResearchInvalidInputError) as raw_excinfo:
+        _reject_code_fields({"module_path": "factors/x.py"})
+    assert raw_excinfo.value.code == "code_channel_forbidden"
 
 
 def test_code_run_target_is_artifact_or_name_only() -> None:
@@ -249,3 +259,4 @@ def test_web_sources_have_no_mcp_code_channel() -> None:
         body = path.read_text(encoding="utf-8")
         assert "finboard_research_code_submit" not in body, path
         assert "source_code" not in body, path
+

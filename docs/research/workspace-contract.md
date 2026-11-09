@@ -28,7 +28,7 @@ ResearchRun 是冻结输入后执行的离线研究回放，不等同所有研�
 
 轮次稳定ID `RE-`，只追加，记录 goal_version/objective/action/rationale/outcome/conclusion/confidence/next_step、source_refs、branch、supersedes_id。同课题幂等键相同且内容相同返回原记录，内容不同拒绝；纠正链仅能引用同课题已有记录。可记录 completed/failed/interrupted/rejected/paused，不抹掉失败与断续过程。引用精确ID，策略版本需补 version；checksum可选，缺失会限制核验强度。用户创建者由REST固定为user:api，agent由MCP固定为agent:mcp，payload不能伪造创建者。
 
-`entry_type` 自 #516 起有四个记录类型：`round`（执行后记录）、`evidence`（组织已有产物）、`plan`（只记录设计，`outcome` 必须 completed，**永不触发执行**）、`review`（复核结论，必须带 `document_ref`：仓库内相对 `.md` 路径 + checksum）。`plan` 与 `review` 的 `evidence_level` 分别为 `research_plan` / `reviewed_conclusion`，与人工记录、agent 解释、机器事实并列而不互相覆盖；`goal`/`draft`/`lifecycle` 快照仍单独展示。
+`entry_type` 自 #516 起有四个记录类型：`round`（执行后记录）、`evidence`（组织已有产物）、`plan`（只记录设计，`outcome` 必须 completed，**永不触发执行**）、`review`（复核结论，必须带 `document_ref`：**相对 `docs/research`** 的 `.md` 路径 + checksum；`/refs/check` 与 `source_fact` 使用同一解析根，`docs/research/rounds/x.md` 应写成 `rounds/x.md`）。`plan` 与 `review` 的 `evidence_level` 分别为 `research_plan` / `reviewed_conclusion`，与人工记录、agent 解释、机器事实并列而不互相覆盖；`goal`/`draft`/`lifecycle` 快照仍单独展示。
 
 引用只是指针，不级联删除或修改研究产物。`GET /api/research/topics/source` 与 `finboard_source_check` 核验存在性、精确版本、checksum，并展示自动事实。断链/版本缺失/校验不符显式呈现；实验事实复用 `derive_oos_outcome`。引用存在不是假设通过。文档路径只允许研究根目录内 `.md`；文档正文以经PR维护的仓库为准。工作摘要、agent轮次与记忆不能自动覆盖正式文档，冲突保留双方来源。
 
@@ -102,11 +102,11 @@ MCP 同步暴露 6 个工具：`finboard_topic_run_start`（research.run）、`f
 
 Web 课题详情增加“发起研究运行”卡片：只选已发布策略与发布要求、可选快照/因子序列、资金与代码版本；展示关联运行的实时状态/进度/错误/结果 checksum，提供重放与取消，深链到 `/research/runs?run=RR-`。保存课题、发起运行与记录轮次是三件事：运行状态是机器事实，轮次是人类/agent 解释，并排展示而不互相替代。
 
-迁移 `9c4f2a7d1e63` 创建独立 `research_topic_links`（无外键、无级联），down_revision=`0d2c51e14b6a`；回滚前导出该表，downgrade 只删表，不删除任何 run/job/课题/轮次/审计。
+迁移 `9c4f2a7d1e63` 创建独立 `research_topic_links`（无外键、无级联），down_revision=`0d2c51e14b6a`；回滚前导出该表，downgrade 只删表，不删除任何 run/job/课题/轮次/审计。迁移 `b7d1e94c3a26`（#516，down_revision=`9c4f2a7d1e63`）新增 `research_topic_action_receipts`（同样无外键/无级联，唯一键 `(topic_id, operation_id)`）；downgrade 只删表，历史产物与审计保留。
 
 ## 课题内因子 / 代码 / OOS 动作与引用（#516）
 
-**证据类型**（`EvidenceRef.kind`，无迁移；历史 8 类语义不变）：
+**证据类型**（`EvidenceRef.kind`；历史 9 类语义不变，新增 5 类）：
 
 | kind | 事实来源 | version | checksum |
 |---|---|---|---|
@@ -131,15 +131,19 @@ Web 课题详情增加“发起研究运行”卡片：只选已发布策略与�
 共同不变量：
 
 - 课题必须 `active` 且 `goal_version` 等于当前目标版本；漂移返回 409 `topic_not_active` / `goal_version_mismatch`。
-- 每个动作在**同一事务**写产物/任务 + 不可变链接 + `topic.action.<action>` 研究审计；失败整体回滚，拒绝/失败独立会话补记。
-- `operation_id` 是响应丢失的幂等锚：同键重放返回原链接/产物；跨课题复用返回 409 `operation_id_bound`。
-- `code_run.execute` 的请求模型 `extra="forbid"` 且没有任何代码字段；`code` / `source_code` / `module` / `module_path` / `expression` 等键一律 422 `code_channel_forbidden`。代码提交只在 MCP `finboard_research_code_submit`，Web 只引用已登记 artifact。
+- 每个动作在**同一事务**写产物/任务 + 不可变链接 + 回执 + `topic.action.<action>` 研究审计；失败整体回滚，拒绝/失败独立会话补记。
+- `operation_id` 是响应丢失的幂等锚。**链接唯一键 `(topic, entity_type, entity_id)` 不足以锚定同一产物的第二次动作**（例如同一实验的第二次 `add_trial`），因此新增只追加回执表 `research_topic_action_receipts`（迁移 `b7d1e94c3a26`）：
+  - 列：`topic_id, operation_id, action, entity_type, entity_id, job_id, result_code, result_summary JSON, created_by, created_at`；`UNIQUE(topic_id, operation_id)`，索引 `(entity_type, entity_id)` / `entity_id` / `topic_id`；无外键无级联。
+  - 动作入口先查回执，命中即返回原结果（不重跑、不新增 trial、不消耗预算、不新建沙箱任务）；同 `operation_id` 用于不同 action/entity_type → 409 `operation_id_bound`；并发同键 → 409 `operation_id_in_flight`（重试即命中回执）。
+  - `run.submit` / `run.replay` 委托 #515，由其链接 `operation_id` 与 `topic.run.*` 审计负责幂等，**不写**动作回执、也**不重复**写 `topic.action.run.*` 审计；active/goal 门同样由 #515 校验（拒绝只留一条 `topic.run.start`/`topic.run.retry`）。
+- 响应区分 `artifact_created`（本次真的新建了产物/任务/trial）与 `link_created`（本次新建了链接），并附 `replayed`；REST 仅当两者皆 false（纯回执重放）时返回 200，否则 201。
+- `code_run.execute` 的请求模型 `extra="forbid"` 且没有任何代码字段；**所有 action**（含 `run.submit`/`add_trial`）的 payload 出现 `code` / `source_code` / `python` / `module` / `module_path` / `expression` / `expr` / `script` 键一律 422 `code_channel_forbidden`。代码提交只在 MCP `finboard_research_code_submit`，Web 只引用已登记 artifact。
 - 重复揭盲返回 409 `already_unsealed`，且不改变 `final_test_unsealed`；揭盲仍是一次性门，重做必须新建实验（`supersedes_id`）。
 - **动作永不自动执行**：保存计划/复核条目不会产生 run/job；只有显式提交动作才入队。
 
-**读取**：`GET /topics/{id}/artifacts?limit≤50`（MCP `finboard_topic_read(view=artifacts)`）返回链接 + 读取时派生的 `state`、`status`、`checksum`、`evidence_gaps`；OOS 链接额外给 `oos_outcome`（首要）、`trial_budget{used,limit}`、`final_test_unsealed`。失败、拒绝、中断与成功同列展示，不折叠；`code_run` 链接在 worker 生成 `RCR-` 前以入队 `job_id` 为 `entity_id`（`job_id` 列同值），读取时按 job 派生运行记录与缺口 `run_not_created`。
+**读取**：`GET /topics/{id}/artifacts?limit≤50`（MCP `finboard_topic_read(view=artifacts)`）返回链接 + 读取时派生的 `state`、`status`、`checksum`、`evidence_gaps`；因子实验额外给 `result_bytes` / `result_checksum`（≤64 KiB 才给摘要）/ 小体积 `metrics`；OOS 链接额外给 `oos_outcome`（首要）、`trial_budget{used,limit}`、`final_test_unsealed`。失败、拒绝、中断与成功同列展示，不折叠；`code_run` 链接在 worker 生成 `RCR-` 前以入队 `job_id` 为 `entity_id`（`job_id` 列同值），读取时按 job 派生运行记录与缺口 `run_not_created`。
 
-**Web**：课题详情新增“因子实验 / 沙箱运行 / OOS 实验”卡片：OOS 卡先显示 `oos_outcome`，再显示流程状态、试验预算与“已揭盲，不可重做”；未揭盲且课题 active 时提供“显式执行一次性揭盲”按钮，重复揭盲显示 409 文案。轮次表单区分“记录新轮次（执行后）/ 只保存计划（不执行）/ 记录复核结论”，复核必须填仓库相对 `.md` 路径与 checksum。Web 源码不调用 `finboard_research_code_submit`（有 grep 守卫测试）。
+**Web**：课题详情新增“因子实验 / 沙箱运行 / OOS 实验”卡片：OOS 卡先显示 `oos_outcome`，再显示流程状态、试验预算与“已揭盲，不可重做”；未揭盲且课题 active 时提供“显式执行一次性揭盲”按钮，重复揭盲显示 409 文案。因子实验卡显示数据发布 checksum、结果摘要 checksum/字节数与指标（体量受限）、失败原因。轮次表单区分“记录新轮次（执行后）/ 只保存计划（不执行）/ 记录复核结论”，复核必须填**相对 `docs/research`** 的 `.md` 路径与 checksum。卡片是只读展示 + 显式动作，不提供因子实验/沙箱创建表单（这些走 FactorLab 或 MCP）；Web 源码不调用 `finboard_research_code_submit`（有 grep 守卫测试）。
 
 ## 工具同步、验证与回滚
 

@@ -60,7 +60,7 @@ export interface RoundInput {
   source_refs: EvidenceRef[];
   supersedes_id: string | null;
   branch: string;
-  /** Only review entries carry this: repo-relative .md path + checksum. */
+  /** Only review entries carry this: .md path relative to docs/research + checksum. */
   document_ref?: EvidenceRef | null;
 }
 export interface EntryTopic extends Omit<TopicInput, "goal"> {
@@ -77,7 +77,7 @@ export interface Entry extends Omit<Partial<RoundInput>, "entry_type"> {
   evidence_level: string;
   /** round/evidence/plan/review, plus goal snapshots, initial drafts and lifecycle audits. */
   entry_type?: "round" | "evidence" | "plan" | "review" | "goal" | "draft" | "lifecycle";
-  /** Only review entries carry this (repo-relative .md path + checksum). */
+  /** Only review entries carry this (.md path relative to docs/research + checksum). */
   document_ref?: EvidenceRef | null;
   // Lifecycle entries (entry_type=lifecycle) carry the transition audit.
   from?: string;
@@ -157,6 +157,10 @@ export interface TopicArtifactLink {
   validation_experiment_id?: string | null;
   failure_reason?: string | null;
   error_summary?: string | null;
+  /** Factor experiment result projection (bounded; digest only under 64 KiB). */
+  result_bytes?: number | null;
+  result_checksum?: string | null;
+  metrics?: Record<string, unknown> | null;
 }
 export interface TopicArtifactPage {
   topic_id: string;
@@ -180,9 +184,14 @@ export interface TopicActionReceipt {
   entity_id: string;
   job_id: string | null;
   operation_id: string | null;
-  created: boolean;
+  /** True when this request really created the artifact/job/trial. */
+  artifact_created: boolean;
+  /** True when this request created the topic link (first action on the entity). */
+  link_created: boolean;
+  /** True when the operation_id was replayed from a receipt (nothing re-ran). */
+  replayed: boolean;
   result?: Record<string, unknown>;
-  link?: TopicArtifactLink;
+  link?: TopicArtifactLink | Record<string, unknown>;
 }
 export interface TopicContext {
   topic: {

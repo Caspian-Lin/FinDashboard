@@ -35,7 +35,7 @@ draft --discard(原因)--> closed
 5. `finboard_topic_write(operation=append)` 使用 `entry_type=evidence` 归档已有证据；记录为什么有关、哪些仍缺证据，以及原记忆的历史日期/状态。每批最多30个引用，超过时分批，各用稳定幂等键。
 6. `finboard_topic_read(topic_id=...,entries=true)` 或 `entry_id=RE-...` 精确读取单条全文与 checksum（跨课题 ID 返回 404）验证归档；返回 has_more 时按 offset 续页，不只读第一页就声称目录完整。选择与本次问题有关的轮次，不把全量长文塞入上下文。
 7. 后续真实研究追加 `entry_type=round`；目标或工作摘要更新用 `operation=update`，先读最新 revision。`update` 只改内容、**不能改状态**（显式传不同 status 会被拒绝，须走 `transition`）；草稿可用 update 编辑 title/question/summary/open_questions/next_step，但不能带 goal（须走 `activate`）。目标内容改动必须使用新 goal.version，不能覆盖旧门槛。暂停/继续/收束/重开用 `operation=transition` 并写原因。
-8. #516 起课题条目分三层：`entry_type=plan` 只记录设计（因子公式/窗口/方向/预注册假设/试验预算），不执行且 `outcome` 必须 `completed`；`entry_type=round` 记录执行后的尝试；`entry_type=review` 记录复核结论并**必须**带 `document_ref`（仓库内相对 `.md` 路径 + sha256 checksum），证据等级为 `reviewed_conclusion`。真正执行只走 `finboard_topic_action`（白名单动作，见下），保存计划/复核不会创建任何 run 或 job。
+8. #516 起课题条目分三层：`entry_type=plan` 只记录设计（因子公式/窗口/方向/预注册假设/试验预算），不执行且 `outcome` 必须 `completed`；`entry_type=round` 记录执行后的尝试；`entry_type=review` 记录复核结论并**必须**带 `document_ref`（**相对 `docs/research`** 的 `.md` 路径，如 `ROADMAP.md` / `rounds/2026-11-09-x.md`，+ sha256 checksum），证据等级为 `reviewed_conclusion`。真正执行只走 `finboard_topic_action`（白名单动作，见下），保存计划/复核不会创建任何 run 或 job。
 
 ## 课题内执行动作（#516）
 

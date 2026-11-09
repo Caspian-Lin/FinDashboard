@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 from sqlalchemy import select, text
@@ -94,6 +95,10 @@ from finboard_persistence.models import (
     ResearchExperimentModel,
     ResearchTopicLinkModel,
 )
+from finboard_persistence.research_topic_action_receipt_repo import (
+    ResearchTopicActionReceiptConflictError,
+    ResearchTopicActionReceiptRepository,
+)
 from finboard_persistence.research_topic_link_repo import (
     ResearchTopicLinkConflictError,
     ResearchTopicLinkRepository,
@@ -142,6 +147,11 @@ CODE_FORBIDDEN_FIELDS: tuple[str, ...] = (
     "expr",
     "script",
 )
+
+#: Actions delegated to #515. They keep #515's link-based ``operation_id``
+#: replay and its ``topic.run.*`` audit; the action layer must not add a second
+#: receipt or a second audit event for them.
+_DELEGATED_RUN_ACTIONS: frozenset[str] = frozenset({"run.submit", "run.replay"})
 
 _TERMINAL_EXPERIMENT_STATUSES: frozenset[str] = frozenset(
     {
@@ -544,7 +554,9 @@ async def _add_validation_trial(
         )
     existing = await trial_repo.list_by_experiment(experiment_id)
     trial = TrialRecord(
-        trial_id=f"{experiment_id}-topic-{len(existing)}",
+        # UUID suffix: concurrent add_trial requests must not collide on the
+        # ``trial_id`` unique index before the receipt/serialization decides.
+        trial_id=f"{experiment_id}-topic-{uuid4().hex[:8]}",
         experiment_id=experiment_id,
         trial_index=len(existing),
         parameters=dict(data.parameters),
@@ -694,14 +706,35 @@ async def _artifact_facts(
                 ).where(FactorExperimentModel.experiment_id.in_(factor_ids))
             )
         ).mappings()
+        # Result bodies are never loaded wholesale: only a size cap + digest, plus
+        # the metrics object when it is itself small (same 64 KiB row cap).
+        result_rows = (
+            await session.execute(
+                text(
+                    "SELECT experiment_id, octet_length(result::text) AS result_bytes, "
+                    "CASE WHEN octet_length(result::text) <= 65536 "
+                    "THEN md5(result::text) END AS result_digest, "
+                    "CASE WHEN octet_length(coalesce(result::jsonb->'metrics','{}'::jsonb)::text) <= 8192 "
+                    "THEN result::jsonb->'metrics' END AS metrics "
+                    "FROM factor_experiments WHERE experiment_id = ANY(CAST(:ids AS text[]))"
+                ),
+                {"ids": factor_ids},
+            )
+        ).mappings()
+        result_facts = {str(row["experiment_id"]): row for row in result_rows}
         for row in rows:
-            facts[str(row["experiment_id"])] = {
+            experiment_id = str(row["experiment_id"])
+            extra = result_facts.get(experiment_id)
+            facts[experiment_id] = {
                 "entity_type": "factor_experiment",
                 "status": row["status"],
                 "checksum": row["dataset_release_checksum"],
                 "feature_snapshot_id": row["feature_snapshot_id"],
                 "validation_experiment_id": row["validation_experiment_id"],
                 "failure_reason": row["failure_reason"],
+                "result_bytes": int(extra["result_bytes"] or 0) if extra is not None else 0,
+                "result_checksum": extra["result_digest"] if extra is not None else None,
+                "metrics": extra["metrics"] if extra is not None else None,
                 "state": _experiment_state(row["status"]),
                 "updated_at": row["updated_at"].isoformat()
                 if row["updated_at"] is not None
@@ -887,6 +920,9 @@ def _artifact_link_payload(
         "failure_reason",
         "error_summary",
         "updated_at",
+        "result_bytes",
+        "result_checksum",
+        "metrics",
     ):
         if data.get(key) is not None:
             payload[key] = data[key]
@@ -1045,7 +1081,11 @@ async def _record_failure(
     )
 
 
-def _validate_action_payload(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _reject_code_fields(payload: Any) -> None:
+    """Fail-closed on any code-bearing key, for **every** action (incl. run.*)."""
+
+    if not isinstance(payload, dict):
+        return
     forbidden = sorted(set(payload) & set(CODE_FORBIDDEN_FIELDS))
     if forbidden:
         raise ResearchInvalidInputError(
@@ -1054,6 +1094,10 @@ def _validate_action_payload(action: str, payload: dict[str, Any]) -> dict[str, 
             code="code_channel_forbidden",
             details={"forbidden_fields": forbidden},
         )
+
+
+def _validate_action_payload(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    _reject_code_fields(payload)
     if action == "factor_experiment.create":
         return FactorExperimentCreateIn.model_validate(payload).model_dump(mode="json")
     if action == "code_run.execute":
@@ -1113,8 +1157,14 @@ async def run_topic_action(
     """Execute one whitelisted topic action inside a single transaction.
 
     ``run.submit`` / ``run.replay`` stay delegated to #515 (which owns its own
-    link + audit + commit); every other action writes the artifact/job, the
-    immutable link and the audit event here, then commits exactly once.
+    link + audit + commit and its own ``operation_id`` replay); they do not get a
+    second action receipt or audit event here.
+
+    Every other action is anchored by ``research_topic_action_receipts`` on
+    ``(topic_id, operation_id)`` -- the link itself is unique per
+    ``(topic, entity_type, entity_id)`` and therefore cannot anchor a second
+    action on the same artifact (e.g. two ``add_trial`` calls). The receipt, the
+    artifact/job, the immutable link and the audit event share one commit.
     """
 
     if action not in TOPIC_ACTION_ENTITY_TYPES:
@@ -1124,10 +1174,12 @@ async def run_topic_action(
             details={"allowed": sorted(TOPIC_ACTION_ENTITY_TYPES)},
         )
     entity_type = TOPIC_ACTION_ENTITY_TYPES[action]
+    _reject_code_fields(payload)
     params = _params_summary(
         action, payload, topic_id=topic_id, goal_version=goal_version, operation_id=ctx.operation_id
     )
     link_repo = ResearchTopicLinkRepository(session)
+    receipts = ResearchTopicActionReceiptRepository(session)
     entity_id: str | None = None
     job_id: str | None = None
     try:
@@ -1136,7 +1188,6 @@ async def run_topic_action(
         _valid_operation_id(ctx.operation_id)
         _require_action_scope(ctx, action)
         topic = await _require_topic(session, topic_id, lock=True)
-        _require_active_with_goal(topic, goal_version)
 
         if action in {"run.submit", "run.replay"}:
             if action == "run.submit":
@@ -1169,33 +1220,49 @@ async def run_topic_action(
                 )
             return {**run_receipt, "action": action, "entity_type": entity_type}
 
-        # Lost receipt: the operation id already names an artifact link.
+        # Lost receipt: this exact request already produced a receipt. Return the
+        # stored result without executing again (budget/trials stay untouched).
+        # Checked *before* the active/goal gate so a replay after the topic was
+        # paused still returns the original result instead of a confusing 409.
         if ctx.operation_id:
-            bound = await link_repo.get_by_operation_id(ctx.operation_id)
-            if bound is not None:
-                if bound.topic_id != topic_id or bound.entity_type != entity_type:
+            stored = await receipts.get(topic_id, ctx.operation_id)
+            if stored is not None:
+                if stored.action != action or stored.entity_type != entity_type:
                     raise ResearchConflictError(
-                        "operation_id 已绑定其他课题或产物;不能跨课题复用",
+                        "operation_id 已绑定该课题的其他动作;不能跨动作复用",
                         code="operation_id_bound",
                         details={
                             "operation_id": ctx.operation_id,
-                            "topic_id": bound.topic_id,
-                            "entity_type": bound.entity_type,
-                            "entity_id": bound.entity_id,
+                            "bound_action": stored.action,
+                            "bound_entity_type": stored.entity_type,
+                            "requested_action": action,
                         },
                     )
-                facts = await _artifact_facts(session, [bound])
+                link = await link_repo.get(topic_id, entity_type, stored.entity_id)
+                facts = await _artifact_facts(session, [link] if link is not None else [])
                 return {
                     "action": action,
                     "topic_id": topic_id,
-                    "goal_version": bound.goal_version,
+                    "goal_version": link.goal_version if link is not None else goal_version,
                     "entity_type": entity_type,
-                    "entity_id": bound.entity_id,
-                    "job_id": bound.job_id,
-                    "operation_id": bound.operation_id,
-                    "created": False,
-                    "result": _artifact_link_payload(bound, facts.get(bound.entity_id)),
+                    "entity_id": stored.entity_id,
+                    "job_id": stored.job_id,
+                    "operation_id": ctx.operation_id,
+                    "artifact_created": False,
+                    "link_created": False,
+                    "replayed": True,
+                    "result": dict(stored.result_summary or {}),
+                    "link": (
+                        _artifact_link_payload(link, facts.get(link.entity_id))
+                        if link is not None
+                        else None
+                    ),
                 }
+
+        # run.* delegates the active/goal gate (and its rejection audit) to #515
+        # so a rejected submission produces exactly one topic.run.* event.
+        if action not in _DELEGATED_RUN_ACTIONS:
+            _require_active_with_goal(topic, goal_version)
 
         data = _validated_action_payload(action, payload)
         receipt: dict[str, Any]
@@ -1221,6 +1288,7 @@ async def run_topic_action(
                 session, entity_id, data["unseal"], ctx=ctx
             )
             job_id = str(receipt["job_id"])
+        artifact_created = bool(receipt.get("created", True))
         try:
             link, link_created = await link_repo.create_or_get(
                 topic_id=topic_id,
@@ -1233,6 +1301,28 @@ async def run_topic_action(
             )
         except ResearchTopicLinkConflictError as exc:
             raise ResearchConflictError(str(exc), code="link_conflict") from exc
+        result_code = "created" if (artifact_created or link_created) else "idempotent_hit"
+        if ctx.operation_id:
+            try:
+                await receipts.create(
+                    topic_id=topic_id,
+                    operation_id=ctx.operation_id,
+                    action=action,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    job_id=job_id,
+                    result_code=result_code,
+                    result_summary=receipt,
+                    created_by=ctx.actor,
+                )
+            except ResearchTopicActionReceiptConflictError as exc:
+                # Concurrent duplicate request: the loser rolls back entirely and
+                # sees a conflict; a retry then reads the winner's receipt.
+                raise ResearchConflictError(
+                    "operation_id 已被并发请求绑定;请重试读取原回执",
+                    code="operation_id_in_flight",
+                    details={"operation_id": ctx.operation_id},
+                ) from exc
         params = {
             **params,
             **_params_summary(
@@ -1243,7 +1333,6 @@ async def run_topic_action(
                 operation_id=ctx.operation_id,
             ),
         }
-        created = link_created
         await _record_success(
             session,
             action=action,
@@ -1253,7 +1342,7 @@ async def run_topic_action(
             entity_type=entity_type,
             entity_id=entity_id,
             job_id=job_id,
-            result_code="created" if created else "idempotent_hit",
+            result_code=result_code,
             params=params,
         )
         facts = await _artifact_facts(session, [link])
@@ -1266,11 +1355,21 @@ async def run_topic_action(
             "entity_id": entity_id,
             "job_id": job_id,
             "operation_id": link.operation_id,
-            "created": created,
+            "artifact_created": artifact_created,
+            "link_created": link_created,
+            "replayed": False,
             "result": receipt,
             "link": _artifact_link_payload(link, facts.get(link.entity_id)),
         }
     except Exception as exc:
+        if action in _DELEGATED_RUN_ACTIONS and not isinstance(
+            exc, ResearchPermissionDeniedError
+        ):
+            # #515 already records the rejection/failure (topic.run.start /
+            # topic.run.retry); a second topic.action.run.* event would
+            # double-count the same attempt. Scope denials happen before any
+            # #515 call, so they still get a `denied` audit here.
+            raise
         correlation: dict[str, str] = {}
         if entity_id:
             correlation["entity_id"] = entity_id

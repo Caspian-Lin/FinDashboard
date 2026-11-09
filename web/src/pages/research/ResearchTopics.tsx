@@ -622,6 +622,13 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
                   特征快照：{link.feature_snapshot_id ?? "—"}
                   {link.validation_experiment_id ? ` · 关联 OOS：${link.validation_experiment_id}` : ""}
                 </p>
+                <p className="break-all text-xs text-muted-foreground">
+                  结果 checksum：{link.result_checksum ?? "未产出（或结果超 64 KiB 不取摘要）"} ·{" "}
+                  {link.result_bytes ?? 0} 字节
+                  {link.metrics
+                    ? ` · 指标：${JSON.stringify(link.metrics).slice(0, 240)}`
+                    : ""}
+                </p>
                 {link.failure_reason && (
                   <p className="text-xs text-destructive">失败原因：{link.failure_reason}</p>
                 )}
@@ -661,8 +668,9 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
         ))}
       </ul>
       <p className="text-xs text-muted-foreground">
-        读取与执行严格分开：本卡片不会自动发起任何运行；只有显式提交动作才会入队，
-        服务端会要求课题 active 且目标版本匹配。
+        本卡片只读展示（不提供因子实验/沙箱创建表单；创建走 FactorLab 或 MCP），读取与执行严格分开：
+        不会自动发起任何运行；只有显式提交动作（如一次性揭盲）才入队，服务端会要求课题 active
+        且目标版本匹配，并按 operation_id 返回原回执而不是重复执行。
       </p>
     </section>
   );
@@ -1940,11 +1948,12 @@ export default function ResearchTopics() {
                     {round.entry_type === "review" && (
                       <div className="space-y-2 rounded-md border border-border p-3">
                         <p className="text-xs text-muted-foreground">
-                          复核结论必须指向仓库内相对 .md 文件与 checksum，证据等级记为
+                          复核结论必须指向 <code>docs/research</code> 下的相对 .md 文件与 checksum
+                          （如 <code>ROADMAP.md</code>、<code>rounds/2026-11-09-x.md</code>），证据等级记为
                           reviewed_conclusion，区别于人工记录与 agent 解释。
                         </p>
                         <Field
-                          label="正式文档路径（仓库相对 .md）"
+                          label="正式文档路径（相对 docs/research 的 .md）"
                           required
                           value={round.document_ref?.ref_id ?? ""}
                           onChange={(v) =>

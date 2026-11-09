@@ -599,8 +599,8 @@ finboard_topic_write(operation="append") 追加轮次 + finboard_memory_remember
   断链引用与next_actions(服务端派生建议,不是执行);截断时excerpted=true。view=branches看分支聚合,
   view=refs逐条核验最近轮次引用(≤20条/次,offset续页),entry_id读单条全文与checksum(跨课题404)。
 - 课题是持续更新的锚点与逻辑目录;已有运行/记忆/实验用topic_write append entry_type=evidence的精确source_refs关联,原产物不改写,可被多课题引用。先source_check核查,按entries分页续接;误关联追加supersedes_id纠正。完整例子见docs/research/topic-organization.md与Skill tools.md。
-- 课题条目分四层(#516):entry_type=plan只记录设计(因子/窗口/方向/预注册假设/试验预算),不触发执行;round记录执行后尝试;evidence组织已有产物;review记录复核结论且必须带document_ref(仓库内.md路径+checksum)。证据等级依次为research_plan/reviewed_conclusion/agent_interpretation/human_record,机器事实另列。
-- 课题内执行走finboard_topic_action(白名单,#516):factor_experiment.create、code_run.execute(只能引用已登记artifact)、validation_experiment.create/add_trial/unseal、run.submit/replay(委托#515)。服务端要求课题active且goal_version匹配,同事务写链接+研究审计;code_run.execute/unseal等启动执行的动作需research.run,元数据写需research.write。重复揭盲返回conflict(already_unsealed)。Web通道不接受代码,代码只经finboard_research_code_submit登记后按artifact引用。
+- 课题条目分四层(#516):entry_type=plan只记录设计(因子/窗口/方向/预注册假设/试验预算),不触发执行;round记录执行后尝试;evidence组织已有产物;review记录复核结论且必须带document_ref(相对docs/research的.md路径+checksum)。证据等级依次为research_plan/reviewed_conclusion/agent_interpretation/human_record,机器事实另列。
+- 课题内执行走finboard_topic_action(白名单,#516):factor_experiment.create、code_run.execute(只能引用已登记artifact)、validation_experiment.create/add_trial/unseal、run.submit/replay(委托#515)。服务端要求课题active且goal_version匹配,同事务写产物/任务+链接+回执(research_topic_action_receipts)+研究审计;operation_id同键重放返回原结果、不重复执行(不新增trial/任务,unseal不误报已揭盲),响应区分artifact_created/link_created/replayed;同键用于不同动作conflict(operation_id_bound)。code_run.execute/unseal等启动执行的动作需research.run,元数据写需research.write。重复揭盲返回conflict(already_unsealed)。Web通道不接受代码(所有action的code/module/expression等键一律code_channel_forbidden),代码只经finboard_research_code_submit登记后按artifact引用。
 - 课题产物链接用finboard_topic_read(view=artifacts)或context.experiment_links读取:OOS实验先看oos_outcome再看status,并列trial_budget已用/上限、final_test_unsealed与evidence_gaps;失败/拒绝/中断与成功同列展示。
 - finboard_memory_page 分页摘录,保留状态、来源与纠正链;历史故障已修复不能作为当前故障。
 - finboard_strategy_explain 必须指定运行或精确策略版本;只有commit匹配的因子定义可解释为历史机制。

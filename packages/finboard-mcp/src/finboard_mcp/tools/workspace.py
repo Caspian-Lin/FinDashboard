@@ -134,7 +134,7 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_topic_write",
-        description="结构化课题create/draft_create/update/activate/transition/append。draft_create只需title/question生成draft;activate需topic_id+expected_revision+payload.goal(可带summary/open_questions/next_step)完成draft→active;transition的payload.action=pause/resume/close/reopen/discard,close/reopen/discard须reason,全部需expected_revision。更新需expected_revision,追加需幂等键;create/append可带idempotency_key,同键同内容返回原记录(created=false)。非法状态转移409等价conflict(附allowed/current),版本冲突附current_revision/changed_fields。entry_type=round记录尝试,evidence组织已有运行/记忆/实验的精确source_refs,plan只记录设计(不执行,outcome须completed),review复核结论须带document_ref(仓库内.md相对路径+checksum)且证据等级为reviewed_conclusion。只保存记录,不运行研究、不接受正式结论;真正执行走finboard_topic_action。例子见tools.md与topic-organization.md。",
+        description="结构化课题create/draft_create/update/activate/transition/append。draft_create只需title/question生成draft;activate需topic_id+expected_revision+payload.goal(可带summary/open_questions/next_step)完成draft→active;transition的payload.action=pause/resume/close/reopen/discard,close/reopen/discard须reason,全部需expected_revision。更新需expected_revision,追加需幂等键;create/append可带idempotency_key,同键同内容返回原记录(created=false)。非法状态转移409等价conflict(附allowed/current),版本冲突附current_revision/changed_fields。entry_type=round记录尝试,evidence组织已有运行/记忆/实验的精确source_refs,plan只记录设计(不执行,outcome须completed),review复核结论须带document_ref(相对docs/research的.md路径+checksum)且证据等级为reviewed_conclusion。只保存记录,不运行研究、不接受正式结论;真正执行走finboard_topic_action。例子见tools.md与topic-organization.md。",
     )
     async def write(
         operation: str,

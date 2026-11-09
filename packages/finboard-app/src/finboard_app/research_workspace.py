@@ -92,8 +92,9 @@ class RoundInput(WorkspaceInput):
     ``plan`` records the design only (factor formula, window, direction,
     pre-registered hypothesis, trial budget) and never triggers execution.
     ``review`` records a formal reviewed conclusion and therefore requires an
-    exact in-repo ``.md`` ``document_ref`` plus its checksum, which keeps it
-    distinct from a human record or an agent interpretation.
+    exact ``.md`` ``document_ref`` **relative to ``docs/research``** plus its
+    checksum (the same root ``source_fact`` resolves documents against), which
+    keeps it distinct from a human record or an agent interpretation.
     """
 
     entry_type: Literal["round", "evidence", "plan", "review"] = "round"
@@ -115,7 +116,9 @@ class RoundInput(WorkspaceInput):
     def validate_entry_kind(self) -> RoundInput:
         if self.entry_type == "review":
             if self.document_ref is None:
-                raise ValueError("review 条目必须提供 document_ref(仓库内 .md 路径 + checksum)")
+                raise ValueError(
+                    "review 条目必须提供 document_ref(相对 docs/research 的 .md 路径 + checksum)"
+                )
             if self.document_ref.kind != "document":
                 raise ValueError("document_ref.kind 必须为 document")
             path = Path(self.document_ref.ref_id)
@@ -127,7 +130,7 @@ class RoundInput(WorkspaceInput):
                 or not self.document_ref.checksum
             ):
                 raise ValueError(
-                    "review 的 document_ref 必须是仓库内相对 .md 路径且带 checksum"
+                    "review 的 document_ref 必须是相对 docs/research 的 .md 路径且带 checksum"
                 )
         elif self.document_ref is not None:
             raise ValueError("只有 review 条目可以携带 document_ref")

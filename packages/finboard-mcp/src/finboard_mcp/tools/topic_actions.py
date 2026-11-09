@@ -91,12 +91,16 @@ def register(mcp: MCPServer) -> None:
             "validation_experiment.create / add_trial(需 research.write)、"
             "validation_experiment.unseal(一次性揭盲入队,需 research.run)。"
             "每个动作要求 topic 为 active 且 goal_version 等于当前目标版本,并写入"
-            "不可变课题链接 + 研究审计(同一事务)。code_run.execute 的 payload 只能"
+            "不可变课题链接 + 回执(research_topic_action_receipts)+ 研究审计(同一事务)。"
+            "operation_id 是响应丢失锚:同键重放返回原产物/原 job,不会重复执行"
+            "(add_trial 不再新增 trial、unseal 不再新建任务、也不误报 already_unsealed);"
+            "同键用于不同动作返回 conflict(operation_id_bound)。返回 artifact_created / "
+            "link_created / replayed 区分新建与回执重放。code_run.execute 的 payload 只能"
             "含 artifact_id 或 (kind,name)+dataset_release_ids+decision_at+symbols+"
-            "params;不接受 Python/模块路径/表达式(代码提交只走 "
-            "finboard_research_code_submit)。operation_id 用于响应丢失后取回原链接;"
-            "validation_experiment.unseal 已揭盲返回 conflict(already_unsealed)。"
-            "只读审计/链接用 finboard_topic_read(view=context|artifacts)。"
+            "params;任何动作出现 Python/模块路径/表达式键(如 code/module/expression)"
+            "一律 invalid_argument(code_channel_forbidden);代码提交只走 "
+            "finboard_research_code_submit。已揭盲实验的 unseal 返回 conflict"
+            "(already_unsealed)。只读链接用 finboard_topic_read(view=context|artifacts)。"
         ),
     )
     async def _action(

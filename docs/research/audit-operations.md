@@ -68,11 +68,11 @@
 | `topic.run.retry` | `research_topic_actions.retry_topic_run` | web / mcp | 新运行与新链接同事务；`correlation.replay_of_run_id` 指向旧 run |
 | `topic.run.cancel` | `research_topic_actions.cancel_topic_run`（代理既有取消，`checkpoint(commit=False)`） | web / mcp | run 状态迁移 + job `request_cancel` + 审计同一事务；终态 → `rejected` + `run_terminal` |
 | `topic.run.link` | `research_topic_actions.link_run_to_topic`（REST `POST /runs/{id}/link`） | web | 幂等追加链接；不改 run/课题 |
-| `topic.action.factor_experiment.create` | `research_topic_artifacts.run_topic_action`（REST `POST /topics/{id}/actions`、MCP `finboard_topic_action`） | web / mcp | 与 factor_experiments 行 + 课题链接同事务；`entity_type=factor_experiment`；只登记不执行 |
-| `topic.action.code_run.execute` | 同上（`action=code_run.execute`） | web / mcp | 与 background_jobs 行 + 链接同事务；`correlation.job_id`；拒绝 `sandbox_disabled` / `artifact_not_found` / `artifact_retired` / `code_channel_forbidden` |
-| `topic.action.validation_experiment.create` | 同上（`action=validation_experiment.create`） | web / mcp | 与 research_experiments 行 + 链接同事务 |
-| `topic.action.validation_experiment.add_trial` | 同上（`action=validation_experiment.add_trial`） | web / mcp | 与 trial + trials_used 同事务；预算/揭盲拒绝 `trial_budget_exhausted` / `already_unsealed` |
-| `topic.action.validation_experiment.unseal` | 同上（`action=validation_experiment.unseal`） | web / mcp | 入队既有一次性揭盲；已揭盲 → `rejected` + `already_unsealed`（不改变 `final_test_unsealed`） |
+| `topic.action.factor_experiment.create` | `research_topic_artifacts.run_topic_action`（REST `POST /topics/{id}/actions`、MCP `finboard_topic_action`） | web / mcp | 与 factor_experiments 行 + 课题链接 + 回执同事务；`entity_type=factor_experiment`；只登记不执行 |
+| `topic.action.code_run.execute` | 同上（`action=code_run.execute`） | web / mcp | 与 background_jobs 行 + 链接 + 回执同事务；`correlation.job_id`；拒绝 `sandbox_disabled` / `artifact_not_found` / `artifact_retired` / `code_channel_forbidden`；同 `operation_id` 重放不再新建任务 |
+| `topic.action.validation_experiment.create` | 同上（`action=validation_experiment.create`） | web / mcp | 与 research_experiments 行 + 链接 + 回执同事务 |
+| `topic.action.validation_experiment.add_trial` | 同上（`action=validation_experiment.add_trial`） | web / mcp | 与 trial + trials_used + 回执同事务；预算/揭盲拒绝 `trial_budget_exhausted` / `already_unsealed`；同 `operation_id` 重放只返回回执、不再新增 trial |
+| `topic.action.validation_experiment.unseal` | 同上（`action=validation_experiment.unseal`） | web / mcp | 入队既有一次性揭盲 + 回执（同事务）；已揭盲 → `rejected` + `already_unsealed`（不改变 `final_test_unsealed`）；同 `operation_id` 重放返回原 job，不误报已揭盲 |
 | `experiment.unseal` | MCP `finboard_validation_experiment_run`（拒绝/入队）+ `ValidationExperimentExecutor`（worker 揭盲） | mcp / worker | 已揭盲 → `rejected` + `already_unsealed`；揭盲成功 → `succeeded` + `unsealed`（worker 侧 `actor=worker:validation_experiment`） |
 | `research_code.submit` | MCP `finboard_research_code_submit` | mcp | 与 artifact 行同事务；`draft_created` |
 | `research_code.promote` | MCP `finboard_research_code_promote` | mcp | 晋级门失败 → `rejected` + `promotion_gate_failed`；成功 `promoted` |
@@ -90,6 +90,10 @@
 - **拒绝/失败路径**：业务事务已回滚，`record_detached(event)` 用**独立会话**
   写入并 commit；自身失败只记 `research.audit.detached_failed` 日志，
   **绝不**掩盖原始错误（调用方仍看到原始异常/HTTP 码）。
+- **课题动作回执**：`topic.action.*` 的成功写入还在同一事务插入
+  `research_topic_action_receipts`（`UNIQUE(topic_id, operation_id)`，迁移
+  `b7d1e94c3a26`）。同 `operation_id` 重放直接返回回执结果，**不重复执行**也不新增
+  审计成功行；`run.submit`/`run.replay` 委托 #515，只留 `topic.run.*` 一条记录。
 - **幂等**：重复提交命中 `idempotency_key` 时记 `result_code=idempotent_hit`；
   同幂等键的第二次成功写仍会新增一条审计行（审计是事件流，不是状态表）。
 - **顺序**：`occurred_at` 由服务端时钟；游标为 `(occurred_at, id)` 二元组，

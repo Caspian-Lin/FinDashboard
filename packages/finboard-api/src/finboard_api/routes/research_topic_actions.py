@@ -99,7 +99,14 @@ async def topic_action(
     except ResearchOperationError as exc:
         await session.rollback()
         raise _http_error(exc) from exc
-    if not result.get("created", True):
+    # 201 whenever *something* was newly created; 200 only for a pure receipt
+    # replay (both flags false). #515 run receipts keep their own `created`.
+    created = bool(
+        result.get("artifact_created")
+        or result.get("link_created")
+        or result.get("created", False)
+    )
+    if not created:
         response.status_code = 200
     return result
 
