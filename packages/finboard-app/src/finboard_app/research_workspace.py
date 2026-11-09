@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,7 +15,10 @@ from sqlalchemy import func, literal_column, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_persistence.models import ResearchMemoryModel
-from finboard_persistence.research_topic_repo import ResearchTopicRepository
+from finboard_persistence.research_topic_repo import (
+    TOPIC_STATUSES,
+    ResearchTopicRepository,
+)
 
 
 class WorkspaceInput(BaseModel):
@@ -95,7 +101,330 @@ def record_out(row: Any) -> dict[str, Any]:
         )
     else:
         result.update(revision=row.revision, evidence_level="working_summary")
+        # Internal creation-mode marker stays in storage for idempotency checks; it
+        # is not part of the public contract (payloads are extra="forbid").
+        result.pop("created_as", None)
+        # The column is authoritative; payload.status is kept in sync for old JSON
+        # consumers only.
+        status = getattr(row, "status", None)
+        if status:
+            result["status"] = status
+        updated_at = getattr(row, "updated_at", None)
+        if updated_at is not None:
+            result["updated_at"] = updated_at.isoformat()
     return result
+
+
+async def topic_entry(session: AsyncSession, topic_id: str, entry_id: str) -> dict[str, Any]:
+    """Exact entry lookup scoped to one topic; a cross-topic id is a 404."""
+    repo = ResearchTopicRepository(session)
+    await repo.get(topic_id)
+    row = await repo.entry(topic_id, entry_id)
+    if row is None:
+        raise LookupError(f"轮次不存在或不属于该课题: {entry_id}")
+    result = record_out(row)
+    result["refs"] = row.payload.get("source_refs", [])
+    result["topic_revision"] = row.payload.get("topic_revision")
+    return result
+
+
+async def topic_branches(
+    session: AsyncSession, topic_id: str, *, limit: int = 20, offset: int = 0
+) -> dict[str, Any]:
+    if not 1 <= limit <= 50 or not 0 <= offset <= 100000:
+        raise ValueError("分页范围: limit 1-50,offset 0-100000")
+    repo = ResearchTopicRepository(session)
+    await repo.get(topic_id)
+    rows = await repo.branches(topic_id, limit, offset)
+    items = [
+        {
+            **row,
+            "count": int(row["count"]),
+            "last_at": row["last_at"].isoformat() if row["last_at"] is not None else None,
+        }
+        for row in rows[:limit]
+    ]
+    return {
+        "items": items,
+        "has_more": len(rows) > limit,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+async def topic_refs_check(
+    session: AsyncSession,
+    topic_id: str,
+    *,
+    rounds: int = 10,
+    limit: int = 20,
+    offset: int = 0,
+    docs_root: Path | None = None,
+) -> dict[str, Any]:
+    """Probe the refs of the most recent rounds; at most 20 refs per call."""
+    if not 1 <= rounds <= 20:
+        raise ValueError("rounds 范围: 1-20")
+    if not 1 <= limit <= 20 or not 0 <= offset <= 100000:
+        raise ValueError("引用检查分页范围: limit 1-20,offset 0-100000")
+    repo = ResearchTopicRepository(session)
+    await repo.get(topic_id)
+    rows = await repo.recent_rounds(topic_id, rounds)
+    ordered: list[dict[str, Any]] = []
+    seen: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        payload = row["payload"] if isinstance(row["payload"], dict) else {}
+        for ref in payload.get("source_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            key = (ref.get("kind"), ref.get("ref_id"), ref.get("version"), ref.get("checksum"))
+            item = seen.get(key)
+            if item is None:
+                item = {"ref": ref, "entry_ids": []}
+                seen[key] = item
+                ordered.append(item)
+            item["entry_ids"].append(row["entry_id"])
+    page = ordered[offset : offset + limit]
+    items: list[dict[str, Any]] = []
+    root = docs_root or Path("docs/research")
+    for item in page:
+        try:
+            fact = await source_fact(session, item["ref"], root)
+            items.append({**item, "status": fact["status"], "facts": fact.get("facts")})
+        except ValueError as exc:
+            items.append({**item, "status": "invalid", "error": str(exc)})
+    total = len(ordered)
+    return {
+        "items": items,
+        "total": total,
+        "has_more": offset + limit < total,
+        "offset": offset,
+        "limit": limit,
+        "rounds": rounds,
+    }
+
+
+CONTEXT_MAX_BYTES = 64 * 1024
+CONTEXT_MAX_ROUNDS = 20
+CONTEXT_MAX_REFS = 10
+CONTEXT_EXCERPT_CHARS = 300
+
+
+def _context_size(payload: Mapping[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, default=str).encode())
+
+
+def _excerpt(value: Any, limit: int) -> tuple[str, bool]:
+    text_value = value if isinstance(value, str) else ""
+    if len(text_value) <= limit:
+        return text_value, False
+    return text_value[:limit], True
+
+
+def _next_actions(
+    *,
+    status: str,
+    recent_rounds: list[dict[str, Any]],
+    dangling_refs: list[dict[str, Any]],
+    open_questions: list[str],
+) -> list[dict[str, str]]:
+    actions: list[dict[str, str]] = []
+    if status == "draft":
+        actions.append(
+            {"action": "activate", "why": "草稿缺少目标版本与来源,补齐后才能发起研究"}
+        )
+    if dangling_refs:
+        actions.append(
+            {
+                "action": "check_refs",
+                "why": f"{len(dangling_refs)}个引用断链、版本或checksum不符,需重新核验",
+            }
+        )
+    if status == "paused":
+        actions.append({"action": "resume", "why": "课题已暂停;续接前先确认是否恢复"})
+    if status == "closed":
+        actions.append({"action": "reopen", "why": "课题已收束;需要新证据时先重开"})
+    if status == "active" and not recent_rounds:
+        actions.append({"action": "write_round", "why": "尚无轮次记录,下一步动作未留痕"})
+    if status == "active" and recent_rounds:
+        last = recent_rounds[0]
+        if last.get("outcome") in {"failed", "interrupted", "paused"}:
+            actions.append(
+                {"action": "write_round", "why": "最近一轮失败或中断,需记录新尝试或原因"}
+            )
+    if status == "active" and open_questions:
+        actions.append(
+            {"action": "review_open_questions", "why": "仍有未解决的开放问题,先核对证据"}
+        )
+    if not actions:
+        actions.append(
+            {"action": "review", "why": "暂无自动发现的缺口;读轮次与正式文档后决定下一步"}
+        )
+    return actions[:6]
+
+
+async def topic_context(
+    session: AsyncSession,
+    topic_id: str,
+    *,
+    rounds: int = 10,
+    refs: int = 10,
+    docs_root: Path | None = None,
+) -> dict[str, Any]:
+    """Bounded cross-client continuation payload (plan #514 §5.4)."""
+    if not 1 <= rounds <= CONTEXT_MAX_ROUNDS:
+        raise ValueError(f"rounds 范围: 1-{CONTEXT_MAX_ROUNDS}")
+    if not 0 <= refs <= CONTEXT_MAX_REFS:
+        raise ValueError(f"refs 范围: 0-{CONTEXT_MAX_REFS}")
+    repo = ResearchTopicRepository(session)
+    topic = await repo.get(topic_id)
+    payload: Mapping[str, Any] = topic.payload if isinstance(topic.payload, dict) else {}
+    total_rounds = await repo.count_rounds(topic_id)
+    lifecycle = await repo.latest_lifecycle(topic_id)
+    round_rows = await repo.recent_rounds(topic_id, rounds)
+
+    excerpted = total_rounds > len(round_rows)
+    recent_rounds: list[dict[str, Any]] = []
+    for row in round_rows:
+        data = row["payload"] if isinstance(row["payload"], dict) else {}
+        conclusion, cut_conclusion = _excerpt(data.get("conclusion"), CONTEXT_EXCERPT_CHARS)
+        objective, cut_objective = _excerpt(data.get("objective"), CONTEXT_EXCERPT_CHARS)
+        next_step, cut_next_step = _excerpt(data.get("next_step"), CONTEXT_EXCERPT_CHARS)
+        # Never truncate silently: every shortened field flips the payload flag.
+        excerpted = excerpted or cut_conclusion or cut_objective or cut_next_step
+        recent_rounds.append(
+            {
+                "entry_id": row["entry_id"],
+                "branch": data.get("branch") or "main",
+                "outcome": data.get("outcome"),
+                "objective": objective,
+                "conclusion_excerpt": conclusion,
+                "next_step": next_step,
+                "created_at": row["created_at"].isoformat(),
+                "created_by": row["created_by"],
+                "evidence_level": "agent_interpretation"
+                if str(row["created_by"]).startswith("agent:")
+                else "human_record",
+            }
+        )
+
+    questions: list[str] = []
+    for question in payload.get("open_questions") or []:
+        if not isinstance(question, str) or not question.strip():
+            continue
+        text_question, cut = _excerpt(question, 1000)
+        excerpted = excerpted or cut
+        questions.append(text_question)
+        if len(questions) >= 30:
+            excerpted = True
+            break
+
+    dangling_refs: list[dict[str, Any]] = []
+    dangling_has_more = False
+    refs_checked = 0
+    if refs:
+        probe = await topic_refs_check(
+            session, topic_id, rounds=rounds, limit=refs, docs_root=docs_root
+        )
+        refs_checked = len(probe["items"])
+        dangling_has_more = bool(probe["has_more"])
+        dangling_refs = [
+            {"ref": item["ref"], "status": item["status"], "entry_ids": item["entry_ids"]}
+            for item in probe["items"]
+            if item["status"] != "matched"
+        ]
+
+    last_lifecycle = None
+    since = topic.created_at.isoformat()
+    if lifecycle is not None:
+        last_payload = lifecycle["payload"] if isinstance(lifecycle["payload"], dict) else {}
+        since = lifecycle["created_at"].isoformat()
+        last_lifecycle = {
+            "from": last_payload.get("from"),
+            "to": last_payload.get("to"),
+            "reason": last_payload.get("reason"),
+            "actor": last_payload.get("actor"),
+            "action": last_payload.get("action"),
+            "at": last_payload.get("at") or since,
+            "entry_id": lifecycle["entry_id"],
+        }
+
+    goal = payload.get("goal") if isinstance(payload.get("goal"), dict) else None
+    context: dict[str, Any] = {
+        "topic": {
+            "topic_id": topic.topic_id,
+            "revision": topic.revision,
+            "title": payload.get("title"),
+            "question": payload.get("question"),
+            "status": topic.status,
+            "conclusion": payload.get("conclusion") or "unknown",
+            "summary": payload.get("summary") or "",
+            "updated_at": topic.updated_at.isoformat() if topic.updated_at else None,
+        },
+        "goal": goal,
+        "lifecycle": {"since": since, "last": last_lifecycle},
+        "open_questions": questions,
+        "next_step": payload.get("next_step") or "",
+        "recent_rounds": recent_rounds,
+        "active_links": [],  # Populated by #515 once topic <-> run links exist.
+        "dangling_refs": dangling_refs,
+        "dangling_refs_has_more": dangling_has_more,
+        "refs_checked": refs_checked,
+        "evidence_levels": {
+            "topic": "working_summary",
+            "rounds": "agent_interpretation",
+            "documents": "canonical_document",
+            "links": "automatic_fact",
+        },
+        "next_actions": _next_actions(
+            status=topic.status,
+            recent_rounds=recent_rounds,
+            dangling_refs=dangling_refs,
+            open_questions=questions,
+        ),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "revision": topic.revision,
+        "excerpted": excerpted,
+        "bounds": {
+            "rounds": rounds,
+            "refs": refs,
+            "total_rounds": total_rounds,
+            "max_rounds": CONTEXT_MAX_ROUNDS,
+            "max_refs": CONTEXT_MAX_REFS,
+            "excerpt_chars": CONTEXT_EXCERPT_CHARS,
+            "max_bytes": CONTEXT_MAX_BYTES,
+        },
+    }
+
+    truncated_sections: list[str] = []
+    if _context_size(context) > CONTEXT_MAX_BYTES:
+        for item in recent_rounds:
+            item["conclusion_excerpt"] = item["conclusion_excerpt"][:120]
+            item["objective"] = item["objective"][:120]
+            item["next_step"] = item["next_step"][:120]
+        questions = [q[:200] for q in questions]
+        context["open_questions"] = questions
+        context["dangling_refs"] = [
+            {k: v for k, v in item.items() if k != "facts"} for item in dangling_refs
+        ]
+        truncated_sections.append("excerpts")
+        excerpted = True
+    if _context_size(context) > CONTEXT_MAX_BYTES:
+        context["recent_rounds"] = recent_rounds[:5]
+        context["open_questions"] = questions[:10]
+        context["dangling_refs"] = context["dangling_refs"][:5]
+        context["topic"]["summary"] = str(context["topic"]["summary"])[:500]
+        truncated_sections.append("rounds_and_questions")
+        excerpted = True
+    if _context_size(context) > CONTEXT_MAX_BYTES:
+        context["recent_rounds"] = []
+        context["open_questions"] = []
+        context["dangling_refs"] = []
+        truncated_sections.append("sections_dropped")
+        excerpted = True
+    context["excerpted"] = excerpted
+    if truncated_sections:
+        context["truncated_sections"] = truncated_sections
+    return context
 
 
 async def workspace_read(
@@ -105,29 +434,76 @@ async def workspace_read(
     entries: bool = False,
     limit: int = 20,
     offset: int = 0,
+    view: str | None = None,
+    entry_id: str | None = None,
+    status: str | None = None,
+    sort: str = "updated",
+    rounds: int = 10,
+    refs: int = 10,
+    docs_root: Path | None = None,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 50 or not 0 <= offset <= 100000:
         raise ValueError("分页范围: limit 1-50,offset 0-100000")
+    if entry_id:
+        if not topic_id:
+            raise ValueError("精确条目查询须提供 topic_id")
+        return await topic_entry(session, topic_id, entry_id)
+    if view == "context":
+        if not topic_id:
+            raise ValueError("续接上下文须提供 topic_id")
+        return await topic_context(session, topic_id, rounds=rounds, refs=refs, docs_root=docs_root)
+    if view == "branches":
+        if not topic_id:
+            raise ValueError("分支聚合须提供 topic_id")
+        return await topic_branches(session, topic_id, limit=limit, offset=offset)
+    if view == "refs":
+        if not topic_id:
+            raise ValueError("断链检查须提供 topic_id")
+        return await topic_refs_check(
+            session,
+            topic_id,
+            rounds=rounds,
+            limit=min(limit, 20),
+            offset=offset,
+            docs_root=docs_root,
+        )
+    if view not in (None, "list", "detail"):
+        raise ValueError("view 必须为 context/branches/refs")
+    if status is not None and status not in TOPIC_STATUSES:
+        raise ValueError(f"status 必须为 {'/'.join(TOPIC_STATUSES)}")
+    if sort not in {"updated", "created"}:
+        raise ValueError("sort 必须为 updated/created")
     repo = ResearchTopicRepository(session)
     if topic_id and not entries:
         return record_out(await repo.get(topic_id))
     rows = (
         await repo.entries(topic_id, limit + 1, offset)
         if topic_id
-        else await repo.list_topics(limit + 1, offset)
+        else await repo.list_topics(limit + 1, offset, status=status, sort=sort)
     )
     items = [record_out(r) for r in rows[:limit]]
     if not topic_id:
         for item in items:
-            item["excerpted"] = True
+            # List mode is an excerpt view, but the flag must mean "something was
+            # actually shortened", not "this endpoint always shortens".
+            truncated = False
             for field in ("question", "summary", "next_step"):
-                item[field] = item[field][:1200]
-            item["open_questions"] = [q[:300] for q in item["open_questions"][:5]]
+                value = item.get(field) or ""
+                if len(value) > 1200:
+                    truncated = True
+                item[field] = value[:1200]
+            questions = item.get("open_questions") or []
+            if len(questions) > 5 or any(len(question) > 300 for question in questions):
+                truncated = True
+            item["open_questions"] = [question[:300] for question in questions[:5]]
+            item["excerpted"] = truncated
     return {
         "items": items,
         "has_more": len(rows) > limit,
         "offset": offset,
         "limit": limit,
+        "sort": sort,
+        "status": status,
     }
 
 
@@ -140,17 +516,52 @@ async def workspace_write(
     topic_id: str | None = None,
     expected_revision: int | None = None,
     idempotency_key: str | None = None,
+    status_declared: bool | None = None,
 ) -> dict[str, Any]:
+    from finboard_app.research_topic_lifecycle import (
+        activate_topic,
+        create_topic,
+        transition_topic,
+        update_topic,
+    )
+
     repo = ResearchTopicRepository(session)
-    row: Any
-    if operation == "create":
-        row = await repo.create(TopicInput.model_validate(payload).model_dump(mode="json"), actor)
-    elif operation == "update" and topic_id and expected_revision is not None:
-        row = await repo.update(
-            topic_id,
-            TopicInput.model_validate(payload).model_dump(mode="json"),
-            expected_revision,
-            actor,
+    record: dict[str, Any]
+    if operation in {"create", "draft_create"}:
+        created_record, created = await create_topic(
+            session,
+            actor=actor,
+            payload=payload,
+            draft=operation == "draft_create",
+            idempotency_key=idempotency_key,
+        )
+        await session.commit()
+        return {**created_record, "created": created}
+    if operation == "update" and topic_id and expected_revision is not None:
+        declared = status_declared if status_declared is not None else ("status" in payload)
+        record = await update_topic(
+            session,
+            actor=actor,
+            topic_id=topic_id,
+            payload=payload,
+            expected_revision=expected_revision,
+            status_declared=declared,
+        )
+    elif operation == "activate" and topic_id:
+        record = await activate_topic(
+            session,
+            actor=actor,
+            topic_id=topic_id,
+            payload=payload,
+            expected_revision=expected_revision,
+        )
+    elif operation == "transition" and topic_id:
+        record = await transition_topic(
+            session,
+            actor=actor,
+            topic_id=topic_id,
+            payload=payload,
+            expected_revision=expected_revision,
         )
     elif operation == "append" and topic_id and idempotency_key and len(idempotency_key) <= 128:
         data = RoundInput.model_validate(payload).model_dump(mode="json")
@@ -165,13 +576,14 @@ async def workspace_write(
             )
             if old is None:
                 raise ValueError("纠正链只能引用同课题已有轮次")
-        row = await repo.append(topic_id, idempotency_key, data, actor)
+        record = record_out(await repo.append(topic_id, idempotency_key, data, actor))
     else:
         raise ValueError(
-            "operation 必须 create/update/append,更新需 expected_revision,追加需幂等键"
+            "operation 必须 create/draft_create/update/activate/transition/append;"
+            "更新/激活/转移需 expected_revision,追加需幂等键"
         )
     await session.commit()
-    return record_out(row)
+    return record
 
 
 async def memory_page(session: AsyncSession, limit: int = 20, offset: int = 0) -> dict[str, Any]:

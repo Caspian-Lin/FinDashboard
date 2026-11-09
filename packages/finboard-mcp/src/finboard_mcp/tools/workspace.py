@@ -1,5 +1,6 @@
-"""Bounded research context and frozen explanation tools (#499/#500)."""
+"""Bounded research context and frozen explanation tools (#499/#500/#514)."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
 from finboard_app.research_explanation import decision_evidence, explain
+from finboard_app.research_topic_lifecycle import TopicWriteConflictError
 from finboard_app.research_workspace import (
     memory_page,
     source_fact,
@@ -37,9 +39,22 @@ async def call(app: McpAppContext, operation: str, arguments: dict[str, Any]) ->
             raise McpToolError("permission_denied", "MCP 只读模式不允许写课题")
         async with app.session_maker() as session:
             if operation == "write":
-                return await workspace_write(session, actor="agent:mcp", **args)
+                try:
+                    return await workspace_write(session, actor="agent:mcp", **args)
+                except TopicWriteConflictError as exc:
+                    # Structured 409 equivalent: state/revision conflicts are not
+                    # invalid arguments. ToolError has no details field, so the
+                    # machine-readable detail rides along as JSON in the message.
+                    raise McpToolError(
+                        "conflict",
+                        f"{exc} | details={json.dumps(exc.detail, ensure_ascii=False, sort_keys=True)}",
+                    ) from exc
             if operation == "read":
-                return await workspace_read(session, **args)
+                return await workspace_read(
+                    session,
+                    docs_root=Path(app.settings.research_docs_dir),
+                    **args,
+                )
             if operation == "memories":
                 return await memory_page(session, **args)
             if operation == "explain":
@@ -77,24 +92,41 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_topic_read",
-        description="分页课题/轮次,默认20最多50;无topic_id列课题,有ID读取详情,entries=true读轮次和引用目录,has_more按offset续页。课题是持续锚点,工作摘要不是canonical结论。",
+        description="分页课题/轮次,默认20最多50;无topic_id列课题(可按status筛选、sort=updated|created),有ID读取详情,entries=true读轮次和引用目录,has_more按offset续页。view=context读有界续接上下文(≤20轮、≤10引用核验、≤64KiB,截断时excerpted=true);view=branches按分支聚合;view=refs逐条核验最近轮次引用(每次≤20条,offset续页);entry_id按精确RE-ID读单条全文与checksum,跨课题404。课题是持续锚点,工作摘要不是canonical结论。",
     )
     async def read(
         topic_id: str | None = None,
         entries: bool = False,
         limit: int = 20,
         offset: int = 0,
+        view: str | None = None,
+        entry_id: str | None = None,
+        status: str | None = None,
+        sort: str = "updated",
+        rounds: int = 10,
+        refs: int = 10,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await call(
             app_context(ctx),
             "read",
-            {"topic_id": topic_id, "entries": entries, "limit": limit, "offset": offset},
+            {
+                "topic_id": topic_id,
+                "entries": entries,
+                "limit": limit,
+                "offset": offset,
+                "view": view,
+                "entry_id": entry_id,
+                "status": status,
+                "sort": sort,
+                "rounds": rounds,
+                "refs": refs,
+            },
         )
 
     @mcp.tool(
         name="finboard_topic_write",
-        description="结构化课题create/update/append;更新需expected_revision,追加需幂等键。entry_type=round记录尝试,evidence组织已有运行/记忆/实验的精确source_refs,不改写原产物。目标含version/criteria/source,轮次含goal_version/objective/action/rationale/conclusion/confidence/next_step。只保存记录,不运行研究、不接受正式结论。例子见tools.md与topic-organization.md。",
+        description="结构化课题create/draft_create/update/activate/transition/append。draft_create只需title/question生成draft;activate需topic_id+expected_revision+payload.goal(可带summary/open_questions/next_step)完成draft→active;transition的payload.action=pause/resume/close/reopen/discard,close/reopen/discard须reason,全部需expected_revision。更新需expected_revision,追加需幂等键;create/append可带idempotency_key,同键同内容返回原记录(created=false)。非法状态转移409等价conflict(附allowed/current),版本冲突附current_revision/changed_fields。entry_type=round记录尝试,evidence组织已有运行/记忆/实验的精确source_refs,不改写原产物。只保存记录,不运行研究、不接受正式结论。例子见tools.md与topic-organization.md。",
     )
     async def write(
         operation: str,

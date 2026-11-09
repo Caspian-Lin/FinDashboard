@@ -8,19 +8,35 @@
 
 因此，“把已有证据归入新课题”是创建课题并追加证据引用，不是将所有产物改写成唯一的 topic_id。发现误关联时追加 `supersedes_id` 纠正记录，旧记录仍留审计。研究记忆正文有错误时才走原 `finboard_memory_correct`，不能为了归类而改写旧记忆。
 
-当前目录保存在轮次引用中，`finboard_topic_read(entries=true)` 分页读取；尚无单独的聚合目录/反向归属 API。课题工作结论与自动产物事实、canonical 文档分别保留，不能把“归档动作完成”当作“策略通过验证”。
+当前目录保存在轮次引用中，`finboard_topic_read(entries=true)` 分页读取；`view=branches` 看分支聚合，`view=refs` 逐条核验断链，`view=context` 一次取回有界续接上下文。仍无 run→topic 反向归属 API（#515 链接表落地后提供）。课题工作结论与自动产物事实、canonical 文档分别保留，不能把“归档动作完成”当作“策略通过验证”。
+
+## 生命周期与两步建题（#514）
+
+```text
+draft --activate(需目标)--> active
+active --pause--> paused --resume--> active
+active|paused --close(原因)--> closed --reopen(原因)--> active
+draft --discard(原因)--> closed
+```
+
+1. 先 `finboard_topic_write(operation=draft_create)` 只保存 title/question，得到稳定 `RT-`；草稿没有目标版本，`goal=null`。建题可带 `idempotency_key`，回执丢失后用同一键重试返回原课题（`created=false`），不会重复建题。
+2. 核对来源后 `operation=activate`，传 `topic_id`、`expected_revision` 与 `payload.goal{version,criteria,source}`，可同时补 summary/open_questions/next_step。目标必须含版本、门槛和可核验来源；已激活且目标相同是幂等成功，目标不同会被拒绝，不能借激活覆盖目标。
+3. 日常用 `operation=transition`：`payload.action=pause|resume|close|reopen|discard`，close/reopen/discard 必须写原因。每次转移都要求 `expected_revision`，服务端加锁比对并追加 `entry_type=lifecycle` 轮次；非法转移返回 `conflict`（附 `allowed`/`current`），版本冲突附 `current_revision`/`changed_fields`。
+4. 被放弃的草稿没有目标版本，不能直接重开；需要继续时新建课题并补齐目标。
+
+保存类操作（草稿、激活、转移、追加轮次）都不会启动回测、模拟或实盘，也不会改写历史轮次与目标快照。跨会话续接优先读 `view=context`：它包含当前目标、最近生命周期、开放问题、最近轮次摘录、断链引用与 `next_actions`（服务端派生建议，不是执行），载荷 ≤64 KiB，截断时 `excerpted=true` 且 `truncated_sections` 具名。
 
 ## Agent 操作步骤
 
-1. 读 `ROADMAP.md`、`FINDINGS.md` 和相关记忆，核对目标来源；先 `finboard_topic_read` 分页检查是否已有相同问题，优先续接，避免重复建课题。
+1. 读 `ROADMAP.md`、`FINDINGS.md` 和相关记忆，核对目标来源；先 `finboard_topic_read` 分页检查是否已有相同问题（可用 `status` 过滤、`sort=updated|created`），优先续接，避免重复建课题。跨会话恢复时直接 `finboard_topic_read(view=context)` 取回目标、最近轮次与断链。
 2. 用 `finboard_memory_page` 读摘录及历史状态/纠正链，必要时用 `finboard_memory_get` 获取选定正文。查询已有运行/实验，选出真正相关的精确 ID。历史数字、旧故障和未支持的假设不自动成为当前事实。
-3. 对选定引用调用 `finboard_source_check`。策略补精确 version，checksum 有则传；未知种类、缩写 ID、断链或版本缺失不编造补齐。实验先读 `oos_outcome`，再读流程 `status`。
-4. `finboard_topic_write(operation=create)` 新建，保存返回的 RT-ID、revision 和目标 version。已有课题则跳过此步。
+3. 对选定引用调用 `finboard_source_check`。策略补精确 version，checksum 有则传；未知种类、缩写 ID、断链或版本缺失不编造补齐。实验先读 `oos_outcome`，再读流程 `status`。断链可用 `finboard_topic_read(view=refs)` 按最近轮次批量复核。
+4. `finboard_topic_write(operation=draft_create)` 先存问题；已有课题则跳过。随后 `operation=activate` 补齐目标、门槛与来源，保存返回的 RT-ID、revision 和目标 version。
 5. `finboard_topic_write(operation=append)` 使用 `entry_type=evidence` 归档已有证据；记录为什么有关、哪些仍缺证据，以及原记忆的历史日期/状态。每批最多30个引用，超过时分批，各用稳定幂等键。
-6. `finboard_topic_read(topic_id=...,entries=true)` 验证归档；返回 has_more 时按 offset 续页，不只读第一页就声称目录完整。选择与本次问题有关的轮次，不把全量长文塞入上下文。
-7. 后续真实研究追加 `entry_type=round`；目标或工作摘要更新用 `operation=update`，先读最新 revision。目标内容改动必须使用新 goal.version，不能覆盖旧门槛。同版本无关摘要仍可更新。
+6. `finboard_topic_read(topic_id=...,entries=true)` 或 `entry_id=RE-...` 精确读取单条全文与 checksum（跨课题 ID 返回 404）验证归档；返回 has_more 时按 offset 续页，不只读第一页就声称目录完整。选择与本次问题有关的轮次，不把全量长文塞入上下文。
+7. 后续真实研究追加 `entry_type=round`；目标或工作摘要更新用 `operation=update`，先读最新 revision。`update` 只改内容、**不能改状态**（显式传不同 status 会被拒绝，须走 `transition`）；草稿可用 update 编辑 title/question/summary/open_questions/next_step，但不能带 goal（须走 `activate`）。目标内容改动必须使用新 goal.version，不能覆盖旧门槛。暂停/继续/收束/重开用 `operation=transition` 并写原因。
 
-写操作受 MCP readonly_only 拒绝，创建者由服务器固定；创建/追加/更新课题都不启动回测、模拟或实盘。
+写操作受 MCP readonly_only 拒绝，创建者由服务器固定；创建/追加/更新/转移课题都不启动回测、模拟或实盘。版本冲突先重新读取并合并，Web 侧可“仅保留我的说明”追加轮次，而不是覆盖对方内容。
 
 ## 完整调用示例
 
@@ -109,6 +125,6 @@
 {"topic_id":"RT-<已有ID>","entries":true,"limit":20,"offset":0}
 ```
 
-修改摘要/状态/下一步时，将第1步的完整输入形状作为 payload，传 `operation=update`、topic_id 和读取得到的 `expected_revision`。**不要把读取响应中的 topic_id/revision/created_by/created_at/evidence_level 混入 payload**。发生版本冲突先重新读取和合并，不盲目覆盖；改变 criteria/source 时必须改 goal.version。
+修改摘要/下一步时，将第1步的完整输入形状作为 payload，传 `operation=update`、topic_id 和读取得到的 `expected_revision`。**PUT 不能改变状态**：显式带不同 status 返回 conflict，先重新读取再用 `transition`；草稿 PUT 只接受 title/question/conclusion/summary/open_questions/next_step，带 goal 会被拒绝（走 `activate`）。**不要把读取响应中的 topic_id/revision/created_by/created_at/evidence_level 混入 payload**。发生版本冲突先重新读取和合并，不盲目覆盖；改变 criteria/source 时必须改 goal.version。
 
 每轮收尾同时保留课题记录与原研究记忆指针。正式结论依旧经 PR 进入 docs/research，研究 agent 不写只读挂载文件、不自动推送文档 PR。

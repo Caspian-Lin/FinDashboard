@@ -71,7 +71,8 @@ async def test_resume_goals_correction_and_idempotency(db_session):
     assert first["entry_id"] == repeated["entry_id"]
     changed = topic_payload()
     changed["goal"] = {**changed["goal"], "version": "2026-09-22", "criteria": "年化15%,回撤10%"}
-    changed["status"] = "paused"
+    # #514: PUT never changes lifecycle state; status changes go through
+    # POST /{id}/transitions (a declared mismatch is a 409 illegal_transition).
     current = await workspace_write(
         db_session,
         actor="user:api",
@@ -81,6 +82,7 @@ async def test_resume_goals_correction_and_idempotency(db_session):
         payload=changed,
     )
     assert current["revision"] == 2
+    assert current["status"] == "active"
     correction = {
         **round_payload(),
         "supersedes_id": first["entry_id"],

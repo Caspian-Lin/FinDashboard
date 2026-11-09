@@ -39,7 +39,7 @@ export default function TopicOverview() {
           </Link>
           <p className="max-w-prose text-sm">{t.question}</p>
           <p className="text-xs text-muted-foreground">
-            状态：{t.status} · 工作结论：{t.conclusion} · 目标版本：{t.goal.version}
+            状态：{t.status} · 工作结论：{t.conclusion} · 目标版本：{t.goal?.version ?? "未补齐"}
           </p>
           <p className="text-sm">证据缺口：{t.open_questions.join("；") || "尚未记录"}</p>
           <p className="text-sm">下一步：{t.next_step || "尚未记录"}</p>

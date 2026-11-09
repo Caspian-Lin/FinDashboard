@@ -139,13 +139,15 @@ finboard_memory_remember(
 > `references/research-workflow.md`。
 
 
-## 课题续接与收尾（#500）
+## 课题续接与收尾（#500/#514）
 
-课题是跨会话持续更新的研究锚点，运行/记忆/实验通过轮次精确引用构成逻辑目录。已有证据归档先核查后topic_write append entry_type=evidence，不修改原产物；完整调用顺序见只读 docs/research/topic-organization.md 或tools.md。一个产物可被多课题引用，目录当前通过entries分页读取，无独立聚合/反向归属API。
+课题是跨会话持续更新的研究锚点，运行/记忆/实验通过轮次精确引用构成逻辑目录。已有证据归档先核查后topic_write append entry_type=evidence，不修改原产物；完整调用顺序见只读 docs/research/topic-organization.md 或tools.md。一个产物可被多课题引用；`view=branches` 看分支聚合、`view=refs` 逐条核验断链、`entry_id` 精确读单条（跨课题404），仍无run→topic反向归属API（#515）。
 
-启动仍先读ROADMAP/FINDINGS与记忆索引；再finboard_topic_read选稳定课题ID，加载当前目标版本、开放问题及最近轮次。文档与工作摘要冲突保留双方来源并以文档为canonical，不自行松门。finboard_memory_page分页核对来源/纠正链，历史故障不得直接当当前故障；finboard_source_check核验精确引用。
+启动仍先读ROADMAP/FINDINGS与记忆索引；再finboard_topic_read选稳定课题ID，优先 `view=context` 一次取回当前目标版本、最近生命周期、开放问题、最近轮次摘录、断链引用与next_actions（服务端建议，不是执行）；载荷≤64KiB，截断时excerpted=true。文档与工作摘要冲突保留双方来源并以文档为canonical，不自行松门。finboard_memory_page分页核对来源/纠正链，历史故障不得直接当当前故障；finboard_source_check核验精确引用。
 
-轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，研究容器只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。
+建题分两步：draft_create只存title/question（可带idempotency_key，回执丢失同键重试返回原课题created=false；同一键不能跨create/draft_create复用），核对来源后activate传goal{version,criteria,source}+expected_revision补齐目标并激活；已激活且目标相同为幂等，目标不同拒绝。暂停/继续/收束/重开/放弃草稿用transition传action+reason+expected_revision，close/reopen/discard必须写原因。update只改内容：显式传不同status会被拒绝（先读再用transition），草稿update不能带goal（走activate）；create只支持active。非法转移返回conflict(allowed/current)，版本冲突返回current_revision/changed_fields——先重新读取续接，不覆盖；被放弃的草稿没有目标，不能直接重开。
+
+轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，研究容器只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。保存、激活与转移都不启动任何运行。
 
 ## 确定性复核分支（#504）
 
