@@ -63,7 +63,8 @@ _RUN_DATA_WRITE: frozenset[Scope] = frozenset({"research.run", "data.write"})
 #: #518 研究操作审计读取:只发给运维 / 审计客户端,不进常规研究预设。
 _AUDIT_READ: frozenset[Scope] = frozenset({"audit.read"})
 
-#: 工具名 → 所需作用域。键是 ``@mcp.tool(name=...)`` 的注册名(155 个)。
+#: 工具名 → 所需作用域。键是 ``@mcp.tool(name=...)`` 的注册名,与注册表**集合相等**
+#: (不锁数量;#516 等新增工具只改本表,不改文档里的数字)。
 #: 混合工具(如 ``finboard_research_stress`` 的 plan/get 与 queue)按最高权限
 #: 取并集,只读客户端不能调用其只读 operation —— 工具级强制点不接受参数级
 #: 绕过。新增工具必须同时登记本表,否则 ``run_tool`` fail-closed。

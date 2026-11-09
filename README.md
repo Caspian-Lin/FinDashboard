@@ -117,6 +117,10 @@ The MCP registry has no order placement, cancellation, position mutation, broker
 - Versioned Python submission with import and filesystem restrictions
 - One-shot Docker execution with no network, read-only root, dropped capabilities, and resource limits
 - Promotion lifecycle from draft and screen through OOS validation to active artifacts
+- Any external agent harness (Codex, DeepSeek Harness, ZCode, OpenCode) can drive it over
+  loopback MCP with a revocable per-client Bearer credential and a scope preset; the
+  client-agnostic Skill lives in `.agents/skills/finboard-research/` and per-client setup
+  (tested / pending) is in [docs/agent-integration.md](docs/agent-integration.md)
 
 ## Quick start
 

@@ -627,7 +627,7 @@ FinBoard 把 [OpenCode](https://opencode.ai) 作为受控研究 Agent 运行时,
 opencode web Docker 容器(宿主机侧锁 loopback)
   ↓ finboard-researcher agent(内置 bash/edit/write/webfetch 等默认拒绝,
     只放行 read/glob/grep/skill + finboard_* MCP 工具)
-finboard-mcp(受控 MCP 工具,155 个;研究写操作自主执行 #122;#160 后零内置 LLM)
+finboard-mcp(受控 MCP 工具,清单见 TOOL_SCOPES;研究写操作自主执行 #122;#160 后零内置 LLM)
   ↓ Bearer token(streamable-http;按客户端凭据 / 作用域,#517)
 FinDashboard service / repository(唯一事实来源)
 ```
@@ -717,11 +717,28 @@ IndexedDB(iframe 与新窗口各自独立),服务端无法预置 —— 首次�
 - 每次 MCP 工具调用记录审计事件(structlog + 内存副本;`FINBOARD_MCP_AUDIT_PERSIST=true`
   时追加到独立 `mcp_audit_events` 表,`GET /api/mcp/audit` 可查询,#157);作用域
   拒绝同样进审计,`caller` 记录客户端 ID;
-- 工具清单与边界同步规范见 #123:`_INSTRUCTIONS` / Skill `SKILL.md` /
-  `references/tools.md` / `ROADMAP.md` 必须与注册表同步,契约测试锁定工具总数
-  与 `TOOL_SCOPES` 覆盖(155 个);
+- 工具清单与边界同步规范见 #123:`_INSTRUCTIONS` / Skill
+  `.agents/skills/finboard-research/`(`SKILL.md` + `references/tools.md`)/ `ROADMAP.md`
+  必须与注册表同步。**唯一事实源 = `finboard_mcp/scopes.py` 的 `TOOL_SCOPES`**;契约
+  测试锁定"集合相等",文档不再写死工具总数(#519);
 - 按客户端授权(#517):`mcp_clients` 可撤销凭据 + 五个作用域 + 唯一漏斗
   `run_tool` 强制;详见 `docs/mcp-client-auth.md`。
+
+### 外部 Harness 接入(#519)
+
+研究 Agent 不必是内置容器:任何支持 streamable-http / stdio 的 MCP 客户端都能接入。
+
+- **Skill(客户端无关)**:`.agents/skills/finboard-research/`,含 `references/`
+  (工具契约 / 工作流 / 记忆 / 研究流程 / 系统概览)与 `presets/`
+  (`read-only` / `research-write` / `data-operator`);旧名
+  `.agents/skills/finboard-opencode-research/` 只是弃用 shim,#520 删除。
+- **接入文档**:`docs/agent-integration.md`(逐客户端安装 / 配置 / 排障 +
+  实测与待验表;已验 Codex CLI 0.163.0 与外部 OpenCode 2.0.32,2026-11-10)。
+- **交接语义**:课题 `RT-` + 深链 `/research/topics?topic=RT-…` → 
+  `finboard_topic_read(view="context")`;续等原 `BJ-`;引用原 `RR-`;收尾
+  `finboard_topic_write(operation="append")` + `research-round` 记忆。
+- **边界**:`.opencode/agent/*.md` 仍是**内置容器**的唯一 agent 定义;外部 Harness
+  的 agent / 权限配置由客户端自己管,服务端只按凭据作用域强制。
 
 ### 回滚
 

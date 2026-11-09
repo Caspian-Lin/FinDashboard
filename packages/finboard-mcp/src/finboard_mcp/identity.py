@@ -10,7 +10,7 @@
 身份如何到达工具(设计选择):**HTTP 由 ASGI 中间件把解析出的身份写进
 ``scope["state"]["mcp_identity"]``,工具入口 ``app_context(ctx)`` 再把它写入
 ``contextvars.ContextVar``,``run_tool`` 在唯一漏斗读取**。不采用「每个工具
-签名多一个 identity 参数」:155 个工具、135 处 ``run_tool`` 调用点会全面
+签名多一个 identity 参数」:全部工具、上百处 ``run_tool`` 调用点会全面
 改签名且容易漏;也不采用纯 contextvar:实测 MCP SDK 的 in-memory / stdio
 任务上下文不会继承外层 ``ContextVar``,必须由工具调用自身所在的
 ``request_context`` 注入。stdio 无 HTTP 请求时回退到进程级
