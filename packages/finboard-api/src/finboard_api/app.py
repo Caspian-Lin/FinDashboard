@@ -49,6 +49,7 @@ from finboard_api.routes import (
     strategy_specs_router,
     watchlist_router,
 )
+from finboard_api.routes.research_audit import router as research_audit_router
 from finboard_api.routes.research_diagnostics import router as research_diagnostics_router
 from finboard_api.routes.research_topics import explanation_router
 from finboard_api.routes.research_topics import router as research_topics_router
@@ -315,6 +316,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging(settings)
 
     components = build_kernel_components(settings)
+    # issue #518:研究审计的拒绝/失败补记走独立会话;成功写随业务事务。
+    from finboard_app.research_audit import (
+        ResearchAuditRecorder,
+        configure_research_audit_recorder,
+    )
+
+    configure_research_audit_recorder(
+        ResearchAuditRecorder(session_maker=components.session_maker)
+    )
     async with components.session_maker() as session:
         kernel = components.new_kernel(session)
 
@@ -562,6 +572,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_router)
     app.include_router(research_docs_router)
     app.include_router(research_topics_router)
+    app.include_router(research_audit_router)
     app.include_router(explanation_router)
     app.include_router(research_diagnostics_router)
     app.include_router(research_memories_router)

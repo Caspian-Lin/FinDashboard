@@ -37,6 +37,8 @@ _EXPECTED_TOOLS = {
     "finboard_run_cancel",
     "finboard_run_replay",
     "finboard_run_lineage",
+    # #518 研究操作审计
+    "finboard_audit_query",
     # #124 数据查询工具
     "finboard_instrument_list",
     "finboard_instrument_get",
@@ -215,7 +217,7 @@ class TestToolExposure:
     async def test_tool_scopes_cover_all_registered_tools(self) -> None:
         """#517:TOOL_SCOPES 必须与注册工具集一一对应(数量同源)。"""
         names = await _tool_names()
-        assert len(names) == 148
+        assert len(names) == 149
         assert set(TOOL_SCOPES) == names
         for tool_name, scopes in TOOL_SCOPES.items():
             assert scopes, f"{tool_name} 没有声明作用域"

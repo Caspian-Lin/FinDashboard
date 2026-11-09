@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from finboard_app.config import Settings
 from finboard_backtest.research_code import (
@@ -189,7 +189,10 @@ class _SessionContext:
 
 
 def _promotion_app(tmp_path: Path) -> tuple[McpAppContext, SimpleNamespace]:
-    session = SimpleNamespace(commit=AsyncMock())
+    # #518:研究审计与业务写同事务,伪 session 需具备 add/flush(真实 AsyncSession 语义)。
+    session = SimpleNamespace(
+        add=MagicMock(), flush=AsyncMock(), commit=AsyncMock()
+    )
     app = SimpleNamespace(
         settings=Settings(research_code_repo_path=str(tmp_path / "code.git")),
         write_tools_enabled=True,

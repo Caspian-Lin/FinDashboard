@@ -223,6 +223,13 @@ class Settings(BaseSettings):
     # 审计是否额外持久化到研究审计表(默认仅结构化日志 + 内存副本)。
     mcp_audit_persist: bool = False
 
+    # ---- 研究操作审计(issue #518)----
+    # 客户端声明事件端点默认关闭(不默认扩大攻击面);开启后仍要求 MCP 凭据。
+    research_audit_client_events: bool = False
+    # 研究审计保留天数(默认 365)。v1 **不自动清理**,只有
+    # ``finboard research audit purge --before`` 显式调用。
+    research_audit_retention_days: int = Field(default=365, ge=1)
+
     # ---- OpenCode 研究运行时接入(issue #109)----
     # OpenCode 作为外置研究 Agent 运行时,通过 finboard-mcp 受控工具访问研究能力。
     # 默认关闭;启用时需要先 ``opencode serve`` 并配置 base_url。
