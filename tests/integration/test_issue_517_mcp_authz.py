@@ -6,7 +6,7 @@
 * 吊销 / 错误密钥 / 过期 token → 401,且不泄露客户端存在性;
 * 旧 ``FINBOARD_MCP_AUTH_TOKEN`` 兼容为 ``MC-legacy`` / 通配作用域;
 * 重复客户端名被拒绝;数据库不存明文 token;
-* ``TOOL_SCOPES`` 覆盖全部 148 个注册工具;
+* ``TOOL_SCOPES`` 覆盖全部注册工具;
 * stdio 默认作用域拒绝写操作;
 * 启动门禁:``FINBOARD_MCP_ENABLED=false`` 退出码 2;非 loopback 绑定无
   ``FINBOARD_MCP_ALLOW_REMOTE=true`` 具名拒绝;无 OpenCode 环境也能独立启动。
@@ -395,7 +395,8 @@ class TestCli:
 class TestScopeModel:
     async def test_tool_scopes_cover_all_registered_tools(self) -> None:
         names = {tool.name for tool in await build_mcp_server().list_tools()}
-        assert len(names) == 148
+        # 不写死数量:``TOOL_SCOPES`` 与注册表的双向集合相等才是契约本体;
+        # 新增/删除工具必须同步改 scopes 表,而不是改这个数字。
         assert set(TOOL_SCOPES) == names
         for tool_name, scopes in TOOL_SCOPES.items():
             assert scopes, tool_name
