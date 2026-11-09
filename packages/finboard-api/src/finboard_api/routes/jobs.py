@@ -27,6 +27,12 @@ from finboard_api.job_schemas import (
     JobIn,
     JobOut,
 )
+from finboard_app.research_audit import (
+    ResearchAuditEvent,
+    is_research_job_kind,
+    research_audit_recorder,
+)
+from finboard_app.research_operation import ResearchOperationContext
 from finboard_backtest.background_jobs.payload_contracts import (
     PayloadContractError,
     validate_job_payload,
@@ -172,12 +178,35 @@ async def cancel_job(
     row = await repo.get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="后台任务不存在")
+    research_job = is_research_job_kind(row.kind)
+    requested = False
     try:
         await repo.request_cancel(job_id)
-        await session.commit()
+        requested = True
     except BackgroundJobPersistenceConflictError:
         await session.rollback()
         # 不在 running(可能已排队/已终态)—— 直接返回当前状态给调用方判断。
+    if research_job:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        correlation = {"job_id": job_id}
+        for key in ("run_id", "experiment_id"):
+            if payload.get(key):
+                correlation[key] = str(payload[key])
+        # issue #518:研究域任务的取消请求进研究审计(同事务)。
+        await research_audit_recorder().record(
+            session,
+            ResearchAuditEvent(
+                operation="job.cancel",
+                outcome="succeeded",
+                context=ResearchOperationContext.for_web(),
+                entity_type="background_job",
+                entity_id=job_id,
+                correlation=correlation,
+                result_code="cancel_requested" if requested else "not_running",
+                params_summary={"job_id": job_id, "kind": row.kind},
+            ),
+        )
+    await session.commit()
     row = await repo.get(job_id)
     assert row is not None
     return JobOut.model_validate(row)

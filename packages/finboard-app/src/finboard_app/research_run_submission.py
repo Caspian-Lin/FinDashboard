@@ -39,6 +39,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_app.background_jobs import enqueue_job_core
+from finboard_app.research_audit import ResearchAuditEvent, research_audit_recorder
 from finboard_app.research_operation import (
     ResearchConflictError,
     ResearchInvalidInputError,
@@ -789,45 +790,136 @@ class ResearchRunSubmissionService:
         )
 
     # -- 提交(不 commit) -------------------------------------------------- #
+    @staticmethod
+    def _run_params(payload: ResearchRunSubmitInput) -> dict[str, Any]:
+        """审计参数摘要(只放可追溯的冻结输入标识,不放全量 payload)。"""
+
+        return {
+            "strategy_id": payload.strategy_id,
+            "strategy_version": payload.strategy_version,
+            "dataset_release_ids": list(payload.dataset_release_ids),
+            "factor_snapshot_count": len(payload.factor_snapshot_ids),
+            "factor_series_count": len(payload.factor_series_ids),
+            "requested_by": payload.requested_by,
+            "data_scope_declared": payload.data_scope is not None,
+        }
+
+    async def _record_run_failure(
+        self,
+        operation: str,
+        ctx: ResearchOperationContext,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        params_summary: Mapping[str, Any],
+        exc: Exception,
+        replay_of_run_id: str | None = None,
+    ) -> None:
+        """拒绝/失败路径:业务事务已回滚,独立会话补记,绝不掩盖原始错误。"""
+
+        rejected = isinstance(exc, ResearchOperationError)
+        if isinstance(exc, ResearchOperationError):
+            result_code, error_summary = exc.code, exc.message
+        else:
+            result_code, error_summary = type(exc).__name__, str(exc)
+        correlation: dict[str, str] = {"run_id": run_id}
+        if replay_of_run_id:
+            correlation["replay_of_run_id"] = replay_of_run_id
+        if ctx.operation_id:
+            correlation["operation_id"] = ctx.operation_id
+        await research_audit_recorder().record_detached(
+            ResearchAuditEvent(
+                operation=operation,
+                outcome="rejected" if rejected else "failed",
+                context=ctx,
+                entity_type="research_run",
+                entity_id=run_id,
+                correlation=correlation,
+                result_code=result_code,
+                params_summary=dict(params_summary),
+                error_summary=error_summary,
+                idempotency_key=idempotency_key,
+            )
+        )
+
     async def submit(
         self,
         payload: ResearchRunSubmitInput,
         ctx: ResearchOperationContext,
     ) -> SubmitOutcome:
-        """冻结输入并登记 queued run + 同事务 background_jobs 行(不 commit)。"""
+        """冻结输入并登记 queued run + 同事务 background_jobs 行(不 commit)。
 
-        report = await self.preflight(payload, ctx)
-        manifest = report.manifest
+        issue #518:成功审计与业务写入共用调用方 session(唯一一次 commit 前
+        插入),审计失败 → 业务回滚;任何拒绝/失败改用独立会话补记。
+        """
+
+        run_id = research_run_id_for(payload.idempotency_key)
+        manifest: ResearchRunManifest
+        row: ResearchRunModel
+        created = False
         job_row: BackgroundJobModel | None = None
         try:
-            row, created = await ResearchRunRepository(self._session).create_or_get(
-                run_id=manifest.run_id,
-                idempotency_key=manifest.idempotency_key,
-                replay_of_run_id=None,
-                strategy_id=manifest.strategy_spec.strategy_id,
-                strategy_kind=manifest.strategy_kind,
-                status=ResearchRunStatus.QUEUED.value,
-                schema_version=manifest.schema_version,
-                manifest_checksum=manifest.checksum,
-                manifest=cast(dict[str, object], to_json_value(manifest)),
-                requested_by=manifest.requested_by,
+            report = await self.preflight(payload, ctx)
+            manifest = report.manifest
+            try:
+                row, created = await ResearchRunRepository(self._session).create_or_get(
+                    run_id=manifest.run_id,
+                    idempotency_key=manifest.idempotency_key,
+                    replay_of_run_id=None,
+                    strategy_id=manifest.strategy_spec.strategy_id,
+                    strategy_kind=manifest.strategy_kind,
+                    status=ResearchRunStatus.QUEUED.value,
+                    schema_version=manifest.schema_version,
+                    manifest_checksum=manifest.checksum,
+                    manifest=cast(dict[str, object], to_json_value(manifest)),
+                    requested_by=manifest.requested_by,
+                )
+                # issue #143:同事务双写 background_jobs,共用 idempotency_key 保证幂等。
+                # 已存在的 research_run(幂等命中)若已有 job_id 则保留,否则补建。
+                if not row.job_id:
+                    job_row = await self._enqueue_research_run_job(manifest, ctx)
+                    row.job_id = job_row.job_id
+            except (
+                # ``SqlAlchemyResearchRunStore.create_or_get`` 把仓储层的
+                # ``ResearchRunPersistenceConflictError`` 包装成领域错误
+                # ``ResearchRunConflictError``(#513 复核对齐):两条都要收口,
+                # 否则业务层会漏出非 ``ResearchOperationError`` 异常。
+                ResearchRunConflictError,
+                ResearchRunPersistenceConflictError,
+                BackgroundJobPersistenceConflictError,
+                IntegrityError,
+            ) as exc:
+                raise ResearchConflictError(str(exc), code="run_conflict") from exc
+            correlation = {
+                "run_id": manifest.run_id,
+                "job_id": (job_row.job_id if job_row is not None else row.job_id) or "",
+            }
+            if ctx.operation_id:
+                correlation["operation_id"] = ctx.operation_id
+            await research_audit_recorder().record(
+                self._session,
+                ResearchAuditEvent(
+                    operation="run.submit",
+                    outcome="succeeded",
+                    context=ctx,
+                    entity_type="research_run",
+                    entity_id=manifest.run_id,
+                    correlation=correlation,
+                    result_code="created" if created else "idempotent_hit",
+                    params_summary=self._run_params(payload),
+                    idempotency_key=manifest.idempotency_key,
+                ),
             )
-            # issue #143:同事务双写 background_jobs,共用 idempotency_key 保证幂等。
-            # 已存在的 research_run(幂等命中)若已有 job_id 则保留,否则补建。
-            if not row.job_id:
-                job_row = await self._enqueue_research_run_job(manifest)
-                row.job_id = job_row.job_id
-        except (
-            # ``SqlAlchemyResearchRunStore.create_or_get`` 把仓储层的
-            # ``ResearchRunPersistenceConflictError`` 包装成领域错误
-            # ``ResearchRunConflictError``(#513 复核对齐):两条都要收口,
-            # 否则业务层会漏出非 ``ResearchOperationError`` 异常。
-            ResearchRunConflictError,
-            ResearchRunPersistenceConflictError,
-            BackgroundJobPersistenceConflictError,
-            IntegrityError,
-        ) as exc:
-            raise ResearchConflictError(str(exc), code="run_conflict") from exc
+        except Exception as exc:
+            await self._record_run_failure(
+                "run.submit",
+                ctx,
+                run_id=run_id,
+                idempotency_key=payload.idempotency_key,
+                params_summary=self._run_params(payload),
+                exc=exc,
+            )
+            raise
         return SubmitOutcome(
             run_row=row,
             job_row=job_row,
@@ -849,45 +941,92 @@ class ResearchRunSubmissionService:
         completed 重放行为不变。
         """
 
-        store = SqlAlchemyResearchRunStore(ResearchRunRepository(self._session))
-        source = await store.get(run_id)
-        if source is None:
-            raise ResearchNotFoundError("源研究运行不存在", code="source_run_not_found")
-        if source.status not in REPLAYABLE_SOURCE_STATUSES:
-            raise ResearchConflictError(
-                replay_guard_error(source.status), code="run_not_replayable"
-            )
-        manifest = replace(
-            source.manifest,
-            run_id=research_run_id_for(payload.idempotency_key),
-            idempotency_key=payload.idempotency_key,
-            requested_by=payload.requested_by,
-            # issue #312:通道归属由服务端上下文决定(REST 默认 human,MCP 恒 agent)。
-            actor_type=ctx.actor_type,
-            replay_of_run_id=run_id,
-            replay_source_status=source.status.value,
-        )
+        new_run_id = research_run_id_for(payload.idempotency_key)
+        replay_params = {
+            "replay_of_run_id": run_id,
+            "requested_by": payload.requested_by,
+        }
+        manifest: ResearchRunManifest
+        row: ResearchRunModel
+        created = False
         job_row: BackgroundJobModel | None = None
         try:
-            _record, created = await store.create_or_get(manifest)
-            row = await ResearchRunRepository(self._session).get(manifest.run_id)
-            if row is None:  # pragma: no cover - create_or_get 已保证存在
-                raise ResearchNotFoundError("研究运行不存在", code="run_not_found")
-            # issue #143:重放也走双写;background_jobs 用重放后的新 idempotency_key。
-            if created and not row.job_id:
-                job_row = await self._enqueue_research_run_job(manifest)
-                row.job_id = job_row.job_id
-        except (
-            # ``SqlAlchemyResearchRunStore.create_or_get`` 把仓储层的
-            # ``ResearchRunPersistenceConflictError`` 包装成领域错误
-            # ``ResearchRunConflictError``(#513 复核对齐):两条都要收口,
-            # 否则业务层会漏出非 ``ResearchOperationError`` 异常。
-            ResearchRunConflictError,
-            ResearchRunPersistenceConflictError,
-            BackgroundJobPersistenceConflictError,
-            IntegrityError,
-        ) as exc:
-            raise ResearchConflictError(str(exc), code="run_conflict") from exc
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(self._session))
+            source = await store.get(run_id)
+            if source is None:
+                raise ResearchNotFoundError("源研究运行不存在", code="source_run_not_found")
+            if source.status not in REPLAYABLE_SOURCE_STATUSES:
+                raise ResearchConflictError(
+                    replay_guard_error(source.status), code="run_not_replayable"
+                )
+            manifest = replace(
+                source.manifest,
+                run_id=new_run_id,
+                idempotency_key=payload.idempotency_key,
+                requested_by=payload.requested_by,
+                # issue #312:通道归属由服务端上下文决定(REST 默认 human,MCP 恒 agent)。
+                actor_type=ctx.actor_type,
+                replay_of_run_id=run_id,
+                replay_source_status=source.status.value,
+            )
+            replay_params = {
+                "replay_of_run_id": run_id,
+                "replay_source_status": source.status.value,
+                "requested_by": payload.requested_by,
+            }
+            try:
+                _record, created = await store.create_or_get(manifest)
+                fetched = await ResearchRunRepository(self._session).get(manifest.run_id)
+                if fetched is None:  # pragma: no cover - create_or_get 已保证存在
+                    raise ResearchNotFoundError("研究运行不存在", code="run_not_found")
+                row = fetched
+                # issue #143:重放也走双写;background_jobs 用重放后的新 idempotency_key。
+                if created and not row.job_id:
+                    job_row = await self._enqueue_research_run_job(manifest, ctx)
+                    row.job_id = job_row.job_id
+            except (
+                # ``SqlAlchemyResearchRunStore.create_or_get`` 把仓储层的
+                # ``ResearchRunPersistenceConflictError`` 包装成领域错误
+                # ``ResearchRunConflictError``(#513 复核对齐):两条都要收口,
+                # 否则业务层会漏出非 ``ResearchOperationError`` 异常。
+                ResearchRunConflictError,
+                ResearchRunPersistenceConflictError,
+                BackgroundJobPersistenceConflictError,
+                IntegrityError,
+            ) as exc:
+                raise ResearchConflictError(str(exc), code="run_conflict") from exc
+            correlation = {
+                "run_id": manifest.run_id,
+                "replay_of_run_id": run_id,
+                "job_id": (job_row.job_id if job_row is not None else row.job_id) or "",
+            }
+            if ctx.operation_id:
+                correlation["operation_id"] = ctx.operation_id
+            await research_audit_recorder().record(
+                self._session,
+                ResearchAuditEvent(
+                    operation="run.replay",
+                    outcome="succeeded",
+                    context=ctx,
+                    entity_type="research_run",
+                    entity_id=manifest.run_id,
+                    correlation=correlation,
+                    result_code="created" if created else "idempotent_hit",
+                    params_summary=replay_params,
+                    idempotency_key=manifest.idempotency_key,
+                ),
+            )
+        except Exception as exc:
+            await self._record_run_failure(
+                "run.replay",
+                ctx,
+                run_id=new_run_id,
+                idempotency_key=payload.idempotency_key,
+                params_summary=replay_params,
+                exc=exc,
+                replay_of_run_id=run_id,
+            )
+            raise
         return SubmitOutcome(
             run_row=row,
             job_row=job_row,
@@ -897,7 +1036,7 @@ class ResearchRunSubmissionService:
 
     # -- 内部 -------------------------------------------------------------- #
     async def _enqueue_research_run_job(
-        self, manifest: ResearchRunManifest
+        self, manifest: ResearchRunManifest, ctx: ResearchOperationContext | None = None
     ) -> BackgroundJobModel:
         """在同事务内为研究运行创建 background_jobs 行(issue #143)。"""
 
@@ -914,6 +1053,7 @@ class ResearchRunSubmissionService:
             requested_by=manifest.requested_by,
             priority=0,
             max_attempts=3,
+            context=ctx,
         )
         return job_row
 

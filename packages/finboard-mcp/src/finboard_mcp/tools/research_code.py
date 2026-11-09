@@ -33,6 +33,7 @@ from finboard_backtest.validation.contracts import derive_oos_outcome
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
+from finboard_mcp.tools._audit import record_failure, record_success
 from finboard_mcp.tools._serde import to_jsonable
 from finboard_persistence import (
     FeatureSnapshotRepository,
@@ -94,7 +95,18 @@ async def submit(
     files: dict[str, str],
 ) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
-        await _require_write_enabled(app)
+        try:
+            await _require_write_enabled(app)
+        except McpToolError as exc:
+            await record_failure(
+                app,
+                operation="research_code.submit",
+                params_summary={"kind": kind, "name": name, "file_names": sorted(files)},
+                error=exc,
+                outcome="denied",
+                result_code=exc.kind,
+            )
+            raise
         service = _service(app)
         try:
             result = service.submit(
@@ -106,6 +118,13 @@ async def submit(
                 max_file_bytes=app.settings.research_code_max_file_bytes,
             )
         except ResearchCodeError as exc:
+            await record_failure(
+                app,
+                operation="research_code.submit",
+                params_summary={"kind": kind, "name": name, "file_names": sorted(files)},
+                error=exc,
+                result_code="research_code_invalid",
+            )
             raise McpToolError("invalid_argument", str(exc)) from exc
         async with app.session_maker() as session:
             repo = ResearchCodeArtifactRepository(session)
@@ -117,6 +136,21 @@ async def submit(
                 checksum=result["checksum"],
                 created_by=_AGENT_ACTOR,
                 status="draft",
+            )
+            # issue #518:成功写与审计同事务(唯一一次 commit 前插入)。
+            await record_success(
+                session,
+                app=app,
+                operation="research_code.submit",
+                entity_type="research_code_artifact",
+                entity_id=record.artifact_id,
+                correlation={
+                    "artifact_id": record.artifact_id,
+                    "commit": str(result["commit"]),
+                    "checksum": str(result["checksum"]),
+                },
+                result_code="draft_created",
+                params_summary={"kind": kind, "name": name, "file_names": sorted(files)},
             )
             await session.commit()
             return {
@@ -261,20 +295,63 @@ async def promote(
     """校验 screen + OOS 证据并把 draft 晋级为 active。"""
 
     async def _do() -> dict[str, Any]:
-        await _require_write_enabled(app)
+        params = {
+            "artifact_id": artifact_id,
+            "validation_experiment_id": validation_experiment_id,
+            "screen_run_id": screen_run_id,
+        }
+        try:
+            await _require_write_enabled(app)
+        except McpToolError as exc:
+            await record_failure(
+                app,
+                operation="research_code.promote",
+                params_summary=params,
+                error=exc,
+                outcome="denied",
+                result_code=exc.kind,
+            )
+            raise
         async with app.session_maker() as session:
             artifact_repo = ResearchCodeArtifactRepository(session)
             artifact = await artifact_repo.get(artifact_id)
             if artifact is None:
-                raise McpToolError("not_found", f"研究代码产物不存在: {artifact_id}")
+                error = McpToolError("not_found", f"研究代码产物不存在: {artifact_id}")
+                await record_failure(
+                    app,
+                    operation="research_code.promote",
+                    params_summary=params,
+                    error=error,
+                    result_code="artifact_not_found",
+                )
+                raise error
             if artifact.status == "active" and is_promoted_artifact(artifact):
+                await record_success(
+                    session,
+                    app=app,
+                    operation="research_code.promote",
+                    entity_type="research_code_artifact",
+                    entity_id=artifact.artifact_id,
+                    correlation=params,
+                    result_code="already_promoted",
+                    params_summary=params,
+                )
+                await session.commit()
                 return _artifact_to_dict(artifact)
             if artifact.status != "draft":
-                raise McpToolError(
+                error = McpToolError(
                     "conflict",
                     f"只有 draft 产物可以晋级: artifact_id={artifact_id} "
                     f"status={artifact.status} promotion_status={artifact.promotion_status}",
                 )
+                await record_failure(
+                    app,
+                    operation="research_code.promote",
+                    params_summary=params,
+                    error=error,
+                    result_code="artifact_not_draft",
+                )
+                raise error
 
             experiment = await ResearchExperimentRepository(session).get(validation_experiment_id)
             # issue #310:派生 oos_outcome 随晋级证据展示——status=validated_oos
@@ -294,6 +371,7 @@ async def promote(
                     f"OOS 验证实验不存在: {validation_experiment_id}",
                 )
                 await _record_promotion_failure(
+                    app,
                     session,
                     artifact=artifact,
                     validation_experiment_id=validation_experiment_id,
@@ -308,6 +386,7 @@ async def promote(
                 )
             except McpToolError as failure:
                 await _record_promotion_failure(
+                    app,
                     session,
                     artifact=artifact,
                     validation_experiment_id=validation_experiment_id,
@@ -342,15 +421,36 @@ async def promote(
                     evidence=evidence,
                 )
                 await session.commit()
-                raise McpToolError(
+                error = McpToolError(
                     "invalid_argument",
                     "研究代码产物未通过晋级门: " + ", ".join(gate.failures),
                 )
+                await record_failure(
+                    app,
+                    operation="research_code.promote",
+                    params_summary=params,
+                    error=error,
+                    result_code="promotion_gate_failed",
+                    entity_type="research_code_artifact",
+                    entity_id=artifact.artifact_id,
+                    correlation=params,
+                )
+                raise error
             promoted = await artifact_repo.promote(
                 artifact.artifact_id,
                 validation_experiment_id=validation_experiment_id,
                 screen_run_id=screen_run_id,
                 evidence=evidence,
+            )
+            await record_success(
+                session,
+                app=app,
+                operation="research_code.promote",
+                entity_type="research_code_artifact",
+                entity_id=promoted.artifact_id,
+                correlation=params,
+                result_code="promoted",
+                params_summary=params,
             )
             await session.commit()
             return _artifact_to_dict(promoted)
@@ -381,6 +481,7 @@ def _promotion_thresholds(app: McpAppContext) -> PromotionScreenThresholds:
 
 
 async def _record_promotion_failure(
+    app: McpAppContext,
     session: Any,
     *,
     artifact: Any,
@@ -410,6 +511,25 @@ async def _record_promotion_failure(
         evidence=evidence,
     )
     await session.commit()
+    # issue #518:晋级拒绝独立留痕(业务失败已随 mark_promotion_failed 提交)。
+    await record_failure(
+        app,
+        operation="research_code.promote",
+        params_summary={
+            "artifact_id": artifact.artifact_id,
+            "validation_experiment_id": validation_experiment_id,
+            "screen_run_id": screen_run_id,
+        },
+        error=failure,
+        result_code=failure.kind,
+        entity_type="research_code_artifact",
+        entity_id=artifact.artifact_id,
+        correlation={
+            "artifact_id": artifact.artifact_id,
+            "validation_experiment_id": validation_experiment_id,
+            "screen_run_id": screen_run_id,
+        },
+    )
 
 
 def _promotion_evidence(

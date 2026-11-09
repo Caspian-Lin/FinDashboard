@@ -1187,13 +1187,19 @@ def worker_recover(ctx: typer.Context) -> None:
 
 
 def build_executor_registry(
-    settings: Settings, session_maker: async_sessionmaker[AsyncSession]
+    settings: Settings,
+    session_maker: async_sessionmaker[AsyncSession],
+    *,
+    worker_id: str | None = None,
 ) -> JobExecutorRegistry:
     """装配全部 job kind 的执行器注册表(issue #383 抽取为共享工厂)。
 
     单一事实源:``worker run`` 主循环(:func:`_run_worker`)与 ``job-flamegraph``
     的诊断重放子进程(``job-replay-exec``)都经此构造,保证两边执行器 wiring
     一致 —— 此前装配内联在 ``_run_worker`` 里,诊断进程无法复用。
+
+    issue #518:研究执行器注入 worker 审计收口(``worker_id`` 缺省为
+    ``job-replay`` 诊断进程;真实 worker 传 ``default_worker_id()``)。
     """
 
     from finboard_backtest.background_jobs import JobExecutorRegistry
@@ -1223,6 +1229,16 @@ def build_executor_registry(
     )
 
     settings_factory = default_settings_factory
+    # issue #518:worker 终态审计(独立会话写入,失败不影响任务结果)。
+    from finboard_app.research_audit import (
+        ResearchAuditRecorder,
+        ResearchAuditWorkerSink,
+    )
+
+    worker_audit = ResearchAuditWorkerSink(
+        ResearchAuditRecorder(session_maker=session_maker),
+        worker_id=worker_id or "job-replay",
+    )
     registry = JobExecutorRegistry()
     registry.register("echo", EchoExecutor())
     # issue #511:课题缺口 → 全局补数 → 复用发布(kind=data_backfill)。
@@ -1246,6 +1262,7 @@ def build_executor_registry(
                 session_maker,
                 settings_factory=settings_factory,
             ),
+            audit=worker_audit,
         ),
     )
     # issue #144:7 类数据域任务迁移到统一队列。
@@ -1325,6 +1342,7 @@ def build_executor_registry(
         ValidationExperimentExecutor(
             session_maker=session_maker,
             runner_factory=default_trial_runner_factory,
+            audit=worker_audit,
         ),
     )
     return registry
@@ -1357,7 +1375,18 @@ async def _run_worker(settings: Settings) -> None:
         lease_active_seconds=settings.worker_lease_timeout_seconds,
     )
 
-    registry = build_executor_registry(settings, components.session_maker)
+    registry = build_executor_registry(
+        settings, components.session_maker, worker_id=default_worker_id()
+    )
+    # issue #518:worker 进程内的拒绝/失败审计走独立会话(成功写在各服务同事务)。
+    from finboard_app.research_audit import (
+        ResearchAuditRecorder as _AuditRecorder,
+    )
+    from finboard_app.research_audit import (
+        configure_research_audit_recorder as _configure_audit,
+    )
+
+    _configure_audit(_AuditRecorder(session_maker=components.session_maker))
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -2386,6 +2415,72 @@ def job_replay_exec(
 # ---------------------------------------------------------------------------
 # mcp 子命令(issue #517:MCP 按客户端凭据管理)
 # ---------------------------------------------------------------------------
+research_app = typer.Typer(
+    name="research",
+    help="研究域运维命令(审计保留等,#518)。",
+    no_args_is_help=True,
+)
+research_audit_app = typer.Typer(
+    name="audit",
+    help="研究操作审计运维:v1 不自动清理,只提供显式保留清理。",
+    no_args_is_help=True,
+)
+
+
+@research_audit_app.command(name="purge")
+def research_audit_purge(
+    ctx: typer.Context,
+    before: Annotated[
+        str,
+        typer.Option("--before", help="删除 occurred_at 早于该日(YYYY-MM-DD,UTC)的行"),
+    ],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="默认只统计(--dry-run);显式 --no-dry-run 才真正删除",
+        ),
+    ] = True,
+) -> None:
+    """手动清理研究审计(issue #518):``FINBOARD_RESEARCH_AUDIT_RETENTION_DAYS`` 只声明保留策略。"""
+
+    import asyncio
+    import sys
+    from datetime import UTC, datetime
+
+    from finboard_app.config import load_settings
+
+    try:
+        cutoff = datetime.strptime(before, "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise typer.BadParameter("--before 必须是 YYYY-MM-DD", param_hint="--before") from exc
+    settings = ctx.obj if isinstance(ctx.obj, Settings) else load_settings()
+
+    async def _run() -> int:
+        from finboard_persistence import create_async_engine, session_factory
+        from finboard_persistence.research_audit_repo import ResearchAuditRepository
+
+        engine = create_async_engine(settings.db_url)
+        try:
+            async with session_factory(engine)() as session:
+                count = await ResearchAuditRepository(session).purge_before(
+                    cutoff, dry_run=dry_run
+                )
+                if dry_run:
+                    await session.rollback()
+                else:
+                    await session.commit()
+                return count
+        finally:
+            await engine.dispose()
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    affected = asyncio.run(_run())
+    mode = "DRY-RUN(未删除)" if dry_run else "已删除"
+    typer.echo(f"research audit purge {mode}: before={cutoff.date().isoformat()} rows={affected}")
+
+
 mcp_app = typer.Typer(
     name="mcp",
     help="FinBoard MCP server 凭据管理(按客户端授权,#517)。",
@@ -2592,6 +2687,8 @@ def _iso(value: Any) -> str:
 
 mcp_app.add_typer(mcp_client_app, name="client")
 app.add_typer(mcp_app, name="mcp")
+research_app.add_typer(research_audit_app, name="audit")
+app.add_typer(research_app, name="research")
 
 
 def main() -> None:

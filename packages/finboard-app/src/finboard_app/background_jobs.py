@@ -26,6 +26,8 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_app.research_audit import ResearchAuditEvent, research_audit_recorder
+from finboard_app.research_operation import ResearchOperationContext
 from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
@@ -55,16 +57,20 @@ async def enqueue_job_core(
     requested_by: str,
     priority: int = 0,
     max_attempts: int = 3,
+    context: ResearchOperationContext | None = None,
 ) -> tuple[BackgroundJobModel, bool]:
     """在同事务内幂等创建一个 ``queued`` 任务,返回 ``(row, created)``。
 
     ``created=False`` 表示同 ``idempotency_key`` 的活跃任务已存在(幂等命中)。
     ``IntegrityError``(并发插入撞唯一索引)统一转
     :class:`BackgroundJobPersistenceConflictError`,与既有 REST 语义一致。
+
+    issue #518:传入服务端 ``context`` 时,在同一事务内追加 ``job.enqueue``
+    研究审计行(不 commit;失败随业务事务回滚)。
     """
 
     try:
-        return await BackgroundJobRepository(session).create_or_get(
+        job_row, created = await BackgroundJobRepository(session).create_or_get(
             job_id=generate_background_job_id(),
             idempotency_key=idempotency_key,
             kind=kind,
@@ -78,6 +84,25 @@ async def enqueue_job_core(
         )
     except IntegrityError as exc:
         raise BackgroundJobPersistenceConflictError("重复 idempotency_key") from exc
+    if context is not None:
+        await research_audit_recorder().record(
+            session,
+            ResearchAuditEvent(
+                operation="job.enqueue",
+                outcome="succeeded",
+                context=context,
+                entity_type="background_job",
+                entity_id=job_row.job_id,
+                correlation={
+                    "job_id": job_row.job_id,
+                    **({"run_id": str(payload["run_id"])} if "run_id" in payload else {}),
+                },
+                result_code="created" if created else "idempotent_hit",
+                params_summary={"kind": kind, "queue": queue},
+                idempotency_key=idempotency_key,
+            ),
+        )
+    return job_row, created
 
 
 __all__ = ["enqueue_job_core", "payload_checksum"]

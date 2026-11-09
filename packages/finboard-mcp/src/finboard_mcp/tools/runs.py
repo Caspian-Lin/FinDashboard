@@ -28,6 +28,7 @@ from finboard_app.research_run_submission import (
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
+from finboard_mcp.identity import current_identity
 from finboard_mcp.tools._serde import to_jsonable
 from finboard_persistence.background_job_repo import (
     BackgroundJobPersistenceConflictError,
@@ -297,6 +298,15 @@ def _mcp_error(exc: ResearchOperationError) -> McpToolError:
     return McpToolError(exc.mcp_kind, message, retryable=exc.retryable)
 
 
+def _mcp_operation_context(app: McpAppContext) -> ResearchOperationContext:
+    """当前 MCP 调用的服务端身份(#518):客户端 ID 来自 #517 凭据解析。"""
+
+    identity = getattr(app, "identity", None) or current_identity()
+    return ResearchOperationContext.for_mcp(
+        client_id=identity.client_id if identity is not None else None
+    )
+
+
 async def enqueue_research_run(
     app: McpAppContext,
     body: ResearchRunSubmitInput,
@@ -314,7 +324,7 @@ async def enqueue_research_run(
             session, sandbox_enabled=app.settings.research_sandbox_enabled
         )
         try:
-            outcome = await service.submit(body, ResearchOperationContext.for_mcp())
+            outcome = await service.submit(body, _mcp_operation_context(app))
             await session.commit()
         except ResearchOperationError as exc:
             await session.rollback()
@@ -417,7 +427,7 @@ async def replay_run(
             )
             try:
                 outcome = await service.replay(
-                    run_id, body, ResearchOperationContext.for_mcp()
+                    run_id, body, _mcp_operation_context(app)
                 )
                 await session.commit()
             except ResearchOperationError as exc:

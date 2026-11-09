@@ -29,6 +29,10 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from finboard_app.config import Settings, load_settings
+from finboard_app.research_audit import (
+    ResearchAuditRecorder,
+    configure_research_audit_recorder,
+)
 from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.auth import warn_legacy_auth_token
@@ -94,7 +98,7 @@ def _identity_from_request(ctx: Context) -> McpClientIdentity | None:
 def app_context(ctx: Context) -> McpAppContext:
     """从 MCP ``Context`` 取出 lifespan 组装的依赖,并绑定本次调用的身份。
 
-    每次工具调用都会执行(148 个工具全部经此入口),因此 contextvar 总是被
+    每次工具调用都会执行(149 个工具全部经此入口),因此 contextvar 总是被
     覆盖,不会残留上一次调用的身份:
 
     * HTTP 请求(``request_context.request`` 存在):只信任中间件写入
@@ -148,6 +152,10 @@ async def app_lifespan(_server: MCPServer) -> AsyncIterator[McpAppContext]:
         max_overflow=settings.db_max_overflow,
     )
     smaker = session_factory(engine)
+    # issue #518:研究操作审计(拒绝/失败走独立会话,成功写与工具业务同事务)。
+    configure_research_audit_recorder(
+        ResearchAuditRecorder(session_maker=smaker)
+    )
 
     context = McpAppContext(
         settings=settings,
