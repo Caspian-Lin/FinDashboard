@@ -21,8 +21,8 @@ packages/
   finboard-data/          — 历史行情数据(akshare/tushare)            [研究]
   finboard-backtest/      — 回测引擎 / 因子实验室 / 策略规格 / ResearchRun / AI 助手  [研究]
   finboard-simulation/    — 模拟盘(独立 simulation_* 表)            [研究]
-  finboard-mcp/           — MCP Server(向 Agent 暴露研究工具)        [研究-AI 接口]
-  finboard-opencode/      — OpenCode 研究运行时集成                   [研究-AI 接口]
+  finboard-mcp/           — MCP Server(向外部 Harness 暴露研究工具)  [研究-AI 接口]
+  finboard-opencode/      — 内置 OpenCode 托管集成(将退役,#520)      [研究-AI 接口]
   finboard-broker/        — BrokerAdapter / MarketDataAdapter 抽象   [实盘]
   finboard-broker-qmt/    — QMT 适配器(Windows-only)                [实盘]
   finboard-broker-ctp/    — CTP 适配器(期货)                         [实盘]
@@ -65,26 +65,29 @@ packages/
 - **LLM / Agent 的产出必须经过完整流程才可上实盘**
 - 模拟盘**禁止自动晋级**影子盘 / 实盘
 
-## AI 接口层(研究 Agent 的两个入口)
+## AI 接口层(研究 Agent 的唯一入口 = MCP)
 
-### 1. MCP Server(`finboard-mcp`,#108)
-- 把研究能力以受控 MCP 工具暴露给 OpenCode 等外置 Agent 运行时
-- 115 个已实现工具(#124-#141 扩展完成;#160 移除 ai.* 后 FinBoard 零内置 LLM)
+### 1. MCP Server(`finboard-mcp`,#108/#517)
+- 把研究能力以受控 MCP 工具暴露给**外部 Agent Harness**(Codex、DeepSeek
+  Harness、ZCode、外部 OpenCode 等),FinDashboard 不内置 LLM(#160)
+- 工具清单以运行时注册表为准(与 `finboard_mcp.scopes.TOOL_SCOPES` 集合相等);
+  当前注册工具见 `TOOL_SCOPES`,不在文档里写死总数
 - 权限矩阵:研究写操作 agent 自主执行;实盘能力永久不注册
-- 统一信封 `ToolEnvelope` + 审计事件(structlog + 内存副本)
+- **按客户端凭据**签发与吊销(#517):Bearer token 只存 sha256 摘要,作用域
+  `research.read` / `research.write` / `research.run` / `data.write` /
+  `audit.read` 在唯一漏斗 `run_tool` 强制,未登记工具 fail-closed
+- 统一信封 `ToolEnvelope` + 审计事件(structlog + `mcp_audit_events`)
+- 接入方式(安装 / 配置 / 排障 / 已验与待验)见 `docs/agent-integration.md`
 
-### 2. OpenCode 研究运行时(`finboard-opencode`,#109/#118)
-- 把 OpenCode Web 作为受控研究 Agent 运行时(Docker 容器隔离)
-- OpenCode 通过 `finboard.*` MCP 工具访问研究能力
-- 不连接实盘 broker / 账户 / 订单 / 持仓 / Kill Switch
-- `opencode_web_enabled` 默认关闭,回滚方案为关闭入口
-- **研究文档只读挂载**(#268):`/workspace/docs/research/`(ROADMAP /
-  FINDINGS / rounds,跨会话结论共享的事实源);容器侧一律 `:ro`,canonical
-  文档经 PR 维护,宿主机目录缺失时跳过该挂载
+### 2. 内置 OpenCode 托管(`finboard-opencode`,#109/#118;#520 退役)
+- 当前仍保留:把 OpenCode Web 作为受控研究 Agent 运行时(Docker 容器隔离)
+- `opencode_web_enabled` 默认关闭;退役后研究 Agent 一律走外部 Harness + MCP
+- **研究文档只读**:`docs/research/`(ROADMAP / FINDINGS / rounds,跨会话结论
+  共享的事实源)经 PR 维护;容器内挂载一律 `:ro`,在你的工作目录中同样只读
 
 ## 安全红线(对 Agent 的硬约束)
 
-Agent(包括本 MCP / OpenCode 运行时)**不允许**:
+Agent(本 MCP 的任何外部 Harness)**不允许**:
 - 直接连接实盘账户
 - 直接发送订单 / 撤单
 - 修改账户持仓

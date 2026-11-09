@@ -1,11 +1,15 @@
 # FinBoard MCP 工具契约(详细)
 
-本文件列出 `finboard-researcher` agent 可用的全部 `finboard.*` MCP 工具。
+本文件列出研究 Agent(外部 Harness)可用的全部 MCP 工具,**工具名一律写真实
+注册名 `finboard_<family>_<operation>`**;家族标题里的 `finboard_<family>_*`
+只是分组。审计文档里的 `finboard.research.*` 是审计事件名,与工具名不是一回事,
+不要拿审计名去调工具。
 所有工具返回统一信封 `ToolEnvelope`:
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-工具数量与参数以当前注册schema为准。所有工具遵守权限边界:研究写操作由持有
+工具清单以运行时注册表为准(与 `finboard_mcp.scopes.TOOL_SCOPES` 的键集合相等;
+当前注册工具见 `TOOL_SCOPES`)。所有工具遵守权限边界:研究写操作由持有
 对应作用域的客户端自主执行,不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 身份与作用域(#517,先读)
@@ -44,23 +48,23 @@ validation_experiment_create 的 selection_config.validation_trial_runner 显式
 
 | 类别 | 只读/自主 | 永久不可用 |
 |------|----------|-----------|
-| 只读查询(run.* / instrument.* / dataset.* / data.* / tushare.*) | ✅(research.read) | |
-| 研究记忆(memory.*) | ✅(读 research.read;写 research.write) | |
-| 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅(读 research.read;建快照/实验 research.write;启动任务 research.run) | |
-| 策略规格(strategy.* / preset.*,✅ #126) | ✅(读 research.read;draft/publish/rollback/preset 写 research.write) | |
-| 回测(backtest.*,✅ #127+#174+#175) | ✅(读 research.read;run/网格提交 research.run;历史删除 research.write) | |
-| 模拟盘(sim.*,✅ #127+#139) | ✅(读 research.read;会话/决策/行情/评估等运行写 research.run;账户创建 research.write) | |
-| ResearchRun 生命周期(run.* 写,✅ #127) | ✅(读 research.read;queue/cancel/replay research.run) | |
-| 课题发起运行(topic_run.*,✅ #515) | ✅(list/get/run_topics research.read;start/retry/cancel research.run；后来关联仅 REST) | |
-| portfolio(portfolio.*,✅ #128) | ✅(纯计算:research.read) | |
-| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get/wait research.read;enqueue/cancel 需 research.run+data.write;archive/unarchive research.write) | |
-| 数据写操作(data_write.* / etf.*,✅ #137) | ✅(data.write;config_get/review_queue 为 research.read) | |
-| #57 验证实验(validation_experiment.*,✅ #138+#233) | ✅(读 research.read;create/reject/add_trial/delete research.write;run research.run) | |
-| 自选股(watchlist.*,✅ #140) | ✅(读 research.read;写 research.write) | |
-| 报告聚合与导出(report.*,✅ #141) | ✅(report_run/report_backtest research.read;report_export 落盘需 research.write) | |
+| 只读查询(`finboard_run_*` / `finboard_instrument_*` / `finboard_dataset_*` / `finboard_data_*` / `finboard_tushare_*`) | ✅(research.read) | |
+| 研究记忆(`finboard_memory_*`) | ✅(读 research.read;写 research.write) | |
+| 因子实验室(`finboard_factor_*` / `finboard_feature_snapshot_*`,✅ #125) | ✅(读 research.read;建快照/实验 research.write;启动任务 research.run) | |
+| 策略规格(`finboard_strategy_*` / `finboard_preset_*`,✅ #126) | ✅(读 research.read;draft/publish/rollback/preset 写 research.write) | |
+| 回测(`finboard_backtest_*`,✅ #127+#174+#175) | ✅(读 research.read;run/网格提交 research.run;历史删除 research.write) | |
+| 模拟盘(`finboard_sim_*`,✅ #127+#139) | ✅(读 research.read;会话/决策/行情/评估等运行写 research.run;账户创建 research.write) | |
+| ResearchRun 生命周期(`finboard_run_*` 写,✅ #127) | ✅(读 research.read;queue/cancel/replay research.run) | |
+| 课题发起运行(`finboard_topic_run_*`,✅ #515) | ✅(list/get/run_topics research.read;start/retry/cancel research.run；后来关联仅 REST) | |
+| portfolio(`finboard_portfolio_*`,✅ #128) | ✅(纯计算:research.read) | |
+| 后台任务队列(`finboard_job_*`,✅ #136+#221) | ✅(list/get/wait research.read;enqueue/cancel 需 research.run+data.write;archive/unarchive research.write) | |
+| 数据写操作(`finboard_data_*` / `finboard_etf_*`,✅ #137) | ✅(data.write;config_get/review_queue 为 research.read) | |
+| #57 验证实验(`finboard_validation_experiment_*`,✅ #138+#233) | ✅(读 research.read;create/reject/add_trial/delete research.write;run research.run) | |
+| 自选股(`finboard_watchlist_*`,✅ #140) | ✅(读 research.read;写 research.write) | |
+| 报告聚合与导出(`finboard_report_*`,✅ #141) | ✅(report_run/report_backtest research.read;report_export 落盘需 research.write) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
-## finboard.run.*(只读 + ✅ #127 写)
+## finboard_run_*(只读 + ✅ #127 写)
 
 ### finboard_run_list
 列出 ResearchRun。
@@ -245,7 +249,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 - 返回:`{run_id, leaf_trace_id, artifacts: [{artifact_id, stage, trace_id, parent_trace_ids, payload, ...}]}`
 - 错误:`not_found`(trace 不存在)
 
-## finboard.memory.*(研究记忆,自动允许)
+## finboard_memory_*(研究记忆,自动允许)
 
 记忆工具只操作独立 `research_memories` 表,不触及实盘,也不创建 Run/回测/模拟盘,
 因此自动允许。`source_refs` 只引用产物,**不修改产物本身**。
@@ -294,7 +298,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 归档(status=archived)。
 - 参数:`memory_id: str`
 
-## finboard.instrument.* / finboard.dataset.* / finboard.data.* / finboard.tushare.*(✅ #124 只读)
+## finboard_instrument_* / finboard_dataset_* / finboard_data_* / finboard_tushare_*(✅ #124 只读)
 
 数据查询工具,复用现有 repository / domain 类。只读,自动允许。
 
@@ -374,7 +378,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 - 参数:无
 - 返回:`{date, requests_per_minute, daily_limit, used, remaining}`
 
-## finboard.data_catalog.* / finboard.dataset.release.*(✅ #509 只读)
+## finboard_data_catalog_* / finboard_dataset_release_*(✅ #509 只读)
 
 全局数据目录查询,复用 `finboard_backtest.data_catalog.DataCatalogService`
 (与 REST `/api/data/catalog` 同源)。**只读**:不触发 dataset_sync、不发布
@@ -427,7 +431,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
   `deep_link` 为 Web 深链(无对应页面时为 null)
 - 发布不存在 → `not_found`
 
-## finboard.data_scope.*(✅ #510 只读)
+## finboard_data_scope_*(✅ #510 只读)
 
 统一数据范围预览:把一份 `DataScopeSpec` 解析成候选冻结发布 + 执行窗口 +
 缺口 / 阻塞。**只读**:不落库、不触发同步、不发布数据集;写侧不新增工具,
@@ -459,7 +463,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 - 提交 run 时把 `resolution_id` 与同一份 `scope` 一起回填;服务端重算比对,
   数据变了 → `conflict`(重新预览,不静默换最新发布)
 
-## finboard.data_write.* / finboard.etf.*(✅ #137,数据准备闭环)
+## finboard_data_write_* / finboard_etf_*(✅ #137,数据准备闭环)
 
 数据写操作工具(2 只读 + 10 写)。补全 #124 只读数据查询之外的数据准备能力,
 打通「数据→因子→策略」闭环第一步:agent 能拉 K 线、发布数据集、修复质量缺陷、
@@ -612,9 +616,10 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   manually_overridden,默认 needs_review,传 None 查全部)/ `limit?`(1-2000,默认 200)
 - 返回:`list[ETF 元数据 dict]`
 
-## finboard.factor.* / finboard.feature_snapshot.*(✅ #125)
+## finboard_factor_* / finboard_feature_snapshot_*(✅ #125)
 
-因子实验室工具(8 只读 + 4 写,共 12 个)。写操作尊重 `mcp_readonly_only` 开关。
+因子实验室工具(8 只读 + 4 写)。写操作按客户端作用域校验(`research.write` /
+`research.run`);`FINBOARD_MCP_READONLY_ONLY` 只剩兼容期语义,新客户端不要依赖它。
 
 ### finboard_factor_catalog
 查询因子目录(三源,`source` 参数选择,#427):`source` 缺省或 `"lab"` =
@@ -717,7 +722,7 @@ min_history_bars)——「公式即代码」的平台可信因子,**引用名 = 
 - 读取绑定的 validation_experiment_id 的 trial 结果,推进状态机。
 - 返回:`{experiment_id, ..., status, result?}`;冲突返回 `conflict`。
 
-## finboard.validation_experiment.*(✅ #138 + #233)
+## finboard_validation_experiment_*(✅ #138 + #233)
 
 #57 机器验证实验(OOS 样本外验证)元数据 CRUD + 执行入队,暴露 REST
 `/api/research/experiments` 的 6 个端点。与因子实验(登记簿)是**两套独立但
@@ -825,7 +830,7 @@ supported=best trial OOS 门过且揭盲达标;not_supported=best trial OOS 被
 - 场景:#219 晋级链的 OOS 门入口 —— 完成后把 experiment_id 传给
   `finboard_research_code_promote`
 
-## finboard.strategy.* / finboard.preset.*(✅ #126)
+## finboard_strategy_* / finboard_preset_*(✅ #126)
 
 策略规格工具(8 只读 + 8 写)。无代码版本化规格生命周期,写操作尊重
 `mcp_readonly_only` 开关。**不接受 Python 源码 / 模块路径 / 可执行表达式**——
@@ -954,7 +959,7 @@ supported=best trial OOS 门过且揭盲达标;not_supported=best trial OOS 被
 - 参数:`preset_id: int`
 - 返回:`{deleted: true, preset_id}`;未找到 → `not_found`
 
-## finboard.backtest.*(✅ #127 + #174 + #175)
+## finboard_backtest_*(✅ #127 + #174 + #175)
 
 回测引擎(行情回放 + 纸面撮合)。复用 `BacktestEngine` +
 `BacktestRunRepository` + `list_strategy_definitions`;已发布规格回测走
@@ -1164,7 +1169,7 @@ research_run 管线轻路由(#174)。
 - 部分失败不吞错;`complete=false` 时稍后重试;多组合对比择优默认不传
   equity_mode(避免 9 组合 x 200 点 ~100-200KB 响应被截断),确需曲线再显式请求
 
-## finboard.sim.*(✅ #127 + #139)
+## finboard_sim_*(✅ #127 + #139)
 
 持久化模拟盘(独立 `simulation_*` 表,`SIM-` ID)。复用 `SimulationService` +
 `SimulationRepository` + `simulation_schemas`。
@@ -1290,7 +1295,7 @@ research_run 管线轻路由(#174)。
   order_count/fill_count/`simulation_is_not_return_proof=true`/
   `automatic_live_promotion=false`)
 
-## finboard.portfolio.*(✅ #128)
+## finboard_portfolio_*(✅ #128)
 
 组合计算(纯计算,无 DB 写入,无副作用)。复用 `finboard_backtest.portfolio`
 (`build_portfolio` / `solve_sizing` / `evaluate_capital_tiers` /
@@ -1370,7 +1375,7 @@ research_run 管线轻路由(#174)。
 - 错误:`invalid_argument`(weights_history 为空 / 协方差估计失败)、
   `permission_denied`(只读模式)
 
-## finboard.job.*(✅ #136 + #221)
+## finboard_job_*(✅ #136 + #221)
 
 统一后台任务队列监控与提交。复用 `BackgroundJobRepository` + `background_jobs`
 表(`BJ-` ID,与实盘 orders/fills/positions 完全隔离)。**任务队列只服务
@@ -1449,8 +1454,8 @@ SDK fail-fast。
   进入终态(succeeded/failed/cancelled/interrupted)立即返回
   `completed: true`;**超时不抛错**:返回当前快照 + `completed: false`,
   调用方可再次调用续期等待
-- 注意:服务端不主动断开连接,客户端应自带调用超时(OpenCode `mcp.timeout`
-  只管工具列表抓取不管调用时长);服务端 asyncio.sleep 轮询实现,单次调用
+- 注意:服务端不主动断开连接,客户端应自带调用超时(各 Harness 的 MCP 超时
+  配置只管工具列表抓取,不管调用时长);服务端 asyncio.sleep 轮询实现,单次调用
   最长阻塞 `timeout_seconds`,不阻塞服务端事件循环
 - 错误:`not_found`
 
@@ -1515,7 +1520,7 @@ SDK fail-fast。
 - 参数:`job_id: str` → 返回更新后的 `JobOut`
 - 错误:`permission_denied`(只读模式)、`not_found`
 
-## finboard.watchlist.*(✅ #140)
+## finboard_watchlist_*(✅ #140)
 
 自选股标的组(watchlist)—— 用户标的组:保存常用回测标的集合,为回测 / 研究
 准备标的池(前端 Backtest.tsx 已用 watchlist 作为回测标的选择器,#39)。
@@ -1568,7 +1573,7 @@ REST PUT 是全量语义,这里更安全)。
 - 返回:`WatchlistDetailOut`(含最新 symbols)
 - 错误:`permission_denied`(只读模式)、`not_found`
 
-## finboard.report.*(✅ #141)
+## finboard_report_*(✅ #141)
 
 报告聚合与导出(3 只读)。聚合逻辑复用 `ResearchRunRepository` /
 `BacktestRunRepository`,渲染在 `finboard_mcp/reporting.py`(纯标准库 csv +
@@ -1645,7 +1650,7 @@ REST PUT 是全量语义,这里更安全)。
 
 web 通道仍禁代码(无代码规格);仅 MCP agent 通道开放受控代码提交。
 提交的代码进入本地 bare git 仓库(`research_code_repo_path`),git 写操作
-收敛在服务端(本容器文件系统只读)。提交后只登记 `draft/pending`,执行须走
+收敛在服务端(你的工作目录文件系统对研究 Agent 只读)。提交后只登记 `draft/pending`,执行须走
 #216 沙箱(`finboard_research_code_run`,见下节);LLM 产出仍须走 研究→回测→OOS→
 模拟→影子→小资金 完整晋级链。正式 composite/模拟盘只消费
 `status=active` 且 `promotion_status=passed` 的 artifact。
@@ -2017,7 +2022,7 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 
 ### 已有证据归入课题
 
-课题是持续更新的锚点，目录由轮次source_refs与#515运行链接共同构成；`finboard_run_topics` 可反查一个 run 被哪些课题引用。先topic_read检查已有课题，memory_page/原run及实验查询选精确ID，source_check核验，再topic_write create（完整输入见上）和append evidence。不是改原run或记忆的topic_id，原产物可被多课题引用，不能为了归类调用memory_correct。完整流程见 `/workspace/docs/research/topic-organization.md`。
+课题是持续更新的锚点，目录由轮次source_refs与#515运行链接共同构成；`finboard_run_topics` 可反查一个 run 被哪些课题引用。先topic_read检查已有课题，memory_page/原run及实验查询选精确ID，source_check核验，再topic_write create（完整输入见上）和append evidence。不是改原run或记忆的topic_id，原产物可被多课题引用，不能为了归类调用memory_correct。完整流程见 `docs/research/topic-organization.md`。
 
 ```json
 {"operation":"append","topic_id":"RT-<已有ID>","idempotency_key":"historical-evidence-v1-001","payload":{"entry_type":"evidence","goal_version":"<该课题已有目标版本>","objective":"组织历史研究证据","action":"核查选定运行、记忆与实验的精确ID后追加引用","rationale":"保留历史并跨会话续接","outcome":"completed","conclusion":"归档动作完成，策略可信度仍待复核","confidence":"unknown","next_step":"核对冻结版本与OOS结论","source_refs":[{"kind":"research_run","ref_id":"RR-<完整ID>"},{"kind":"memory","ref_id":"RM-<完整ID>"},{"kind":"experiment","ref_id":"<完整实验ID>"}],"branch":"historical-evidence"}}
@@ -2029,7 +2034,7 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 
 课题列表为excerpted摘要（问题/摘要/下一步最多1200字、开放问题最多5项各300字），查精确ID详情才取完整工作目标。目标同版本不可换门槛，轮次goal_version须已归档。记忆refs超过16KiB标refs_truncated且不可验证；说明书冻结manifest限1MiB、因子params限16KiB，超限不退回全量run_get。
 
-## finboard.topic_run.*（✅ #515：3 只读 + 3 写）
+## finboard_topic_run_*（✅ #515：3 只读 + 3 写）
 
 从课题发起 ResearchRun，服务端在同一事务写 run + background_job + 课题链接 +
 审计；链接不可变，实时状态由读取时 join `research_runs` / `background_jobs`
@@ -2052,7 +2057,7 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 `retry` 复用既有 replay 守卫（completed/interrupted 可重放；cancelled/failed 仍按
 原错误处置），因此“失败后重试”应先确认源状态或重新入队新运行。
 
-## finboard.data_backfill.*(✅ #511:2 只读 + 2 写)
+## finboard_data_backfill_*(✅ #511:2 只读 + 2 写)
 
 课题缺口 → 全局补数 → 复用发布。复用 `finboard_backtest.data_backfill`
 (与 REST `/api/data/backfills` 同源):预检纯读,提交写;执行器只编排既有

@@ -32,11 +32,11 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.factor.catalog`(因子目录,数量由注册表返回;含p_预置/u_受控用户因子) | ✅ #125 |
-| `finboard.feature_snapshot.list` / `.get`(查询特征快照) | ✅ #125 |
-| `finboard.feature_snapshot.create` / `.job_start` / `.job_status`(构建快照,含异步轮询) | ✅ #125 |
-| `finboard.factor.signal.list` / `.get`(查询因子信号) | ✅ #125 |
-| `finboard.factor.experiment.list` / `.get` / `.create` / `.sync_validation`(因子实验闭环) | ✅ #125 |
+| `finboard_factor_catalog`(因子目录,数量由注册表返回;含p_预置/u_受控用户因子) | ✅ #125 |
+| `finboard_feature_snapshot_list` / `.get`(查询特征快照) | ✅ #125 |
+| `finboard_feature_snapshot_create` / `.job_start` / `.job_status`(构建快照,含异步轮询) | ✅ #125 |
+| `finboard_factor_signal.list` / `.get`(查询因子信号) | ✅ #125 |
+| `finboard_factor_experiment.list` / `.get` / `.create` / `.sync_validation`(因子实验闭环) | ✅ #125 |
 
 ## 步骤 3:策略规格
 
@@ -48,11 +48,11 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.strategy.registry` / `.template`(注册表 / 模板,只读) | ✅ #126 |
-| `finboard.strategy.validate`(纯计算校验,不持久化) | ✅ #126 |
-| `finboard.strategy.draft_create` / `.supersede` / `.publish` / `.rollback`(版本生命周期) | ✅ #126 |
-| `finboard.strategy.list` / `.history` / `.version_get` / `.diff`(查询 / diff) | ✅ #126 |
-| `finboard.preset.list` / `.get` / `.create` / `.update` / `.delete`(预设 CRUD) | ✅ #126 |
+| `finboard_strategy_registry` / `.template`(注册表 / 模板,只读) | ✅ #126 |
+| `finboard_strategy_validate`(纯计算校验,不持久化) | ✅ #126 |
+| `finboard_strategy_draft_create` / `.supersede` / `.publish` / `.rollback`(版本生命周期) | ✅ #126 |
+| `finboard_strategy_list` / `.history` / `.version_get` / `.diff`(查询 / diff) | ✅ #126 |
+| `finboard_preset_list` / `.get` / `.create` / `.update` / `.delete`(预设 CRUD) | ✅ #126 |
 
 ## 步骤 4:回测
 
@@ -64,9 +64,9 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.run.list` / `.get` / `.artifacts`(查询 ResearchRun) | ✅ 已实现 |
-| `finboard.run.queue` / `.cancel` / `.replay` / `.lineage`(生命周期) | ✅ #127 |
-| `finboard.backtest.strategy_list` / `.run` / `.history_list` / `.history_get` / `.history_delete` | ✅ #127 |
+| `finboard_run_list` / `.get` / `.artifacts`(查询 ResearchRun) | ✅ 已实现 |
+| `finboard_run_queue` / `.cancel` / `.replay` / `.lineage`(生命周期) | ✅ #127 |
+| `finboard_backtest_strategy_list` / `.run` / `.history_list` / `.history_get` / `.history_delete` | ✅ #127 |
 
 ## 步骤 5:模拟盘
 
@@ -80,10 +80,10 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.sim.account_list` / `.account_get` / `.account_create`(账户) | ✅ #127 |
-| `finboard.sim.session_list` / `.session_get` / `.session_create` / `.start` / `.pause` / `.stop` / `.reset`(会话生命周期) | ✅ #127 |
-| `finboard.sim.decision_submit`(结构化目标仓位 → 生成订单,不直接创建订单) | ✅ #127 |
-| `finboard.sim.order_cancel` / `.orders` / `.fills` / `.positions` / `.ledger` / `.audit` / `.report`(订单 / 成交 / 持仓 / 账本 / 审计 / 报告) | ✅ #127 |
+| `finboard_sim_account_list` / `.account_get` / `.account_create`(账户) | ✅ #127 |
+| `finboard_sim_session_list` / `.session_get` / `.session_create` / `.start` / `.pause` / `.stop` / `.reset`(会话生命周期) | ✅ #127 |
+| `finboard_sim_decision_submit`(结构化目标仓位 → 生成订单,不直接创建订单) | ✅ #127 |
+| `finboard_sim_order_cancel` / `.orders` / `.fills` / `.positions` / `.ledger` / `.audit` / `.report`(订单 / 成交 / 持仓 / 账本 / 审计 / 报告) | ✅ #127 |
 
 ## 步骤 6:评估
 
@@ -98,34 +98,35 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.portfolio.allocate`(目标权重分配 + 约束 + 风险报告) | ✅ #128 |
-| `finboard.portfolio.sizing`(离散手数 + 费用 / 保证金) | ✅ #128 |
-| `finboard.portfolio.feasibility`(10万/20万/50万 档位可行性) | ✅ #128 |
-| `finboard.portfolio.attribution`(绩效归因分解,需协方差) | ✅ #128 |
-| `finboard.run.get`(查询 ResearchRun result 含绩效) | ✅ 已实现 |
+| `finboard_portfolio_allocate`(目标权重分配 + 约束 + 风险报告) | ✅ #128 |
+| `finboard_portfolio_sizing`(离散手数 + 费用 / 保证金) | ✅ #128 |
+| `finboard_portfolio_feasibility`(10万/20万/50万 档位可行性) | ✅ #128 |
+| `finboard_portfolio_attribution`(绩效归因分解,需协方差) | ✅ #128 |
+| `finboard_run_get`(查询 ResearchRun result 含绩效) | ✅ 已实现 |
 
 ## 当前 agent 能做什么
 
 agent 的闭环能力(以当前注册schema为准):
 
 1. **数据查询**:标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额
-   (✅ `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`)
+   (✅ `finboard_instrument_*` / `finboard_dataset_*` / `finboard_data_*` /
+   `finboard_tushare_*`)
 2. **因子实验室**:因子目录 / 特征快照(含异步任务)/ 因子信号 / 因子实验闭环
-   (✅ `finboard.factor.*` / `.feature_snapshot.*`)
+   (✅ `finboard_factor_*` / `finboard_feature_snapshot_*`)
 3. **策略规格**:注册表 / 模板 / validate 预览 / draft / supersede / publish /
-   rollback / diff / 预设 CRUD(✅ `finboard.strategy.*` / `.preset.*`,
+   rollback / diff / 预设 CRUD(✅ `finboard_strategy_*` / `finboard_preset_*`,
    无代码版本化生命周期)
 4. **ResearchRun 生命周期**:查询 list/get/artifacts + 冻结 queue / cancel /
-   replay / lineage(✅ `finboard.run.*`)
+   replay / lineage(✅ `finboard_run_*`)
 5. **回测**:可用策略 schema / 同步运行回测(返回 metrics/equity/fills)/
-   历史查询 / 删除(✅ `finboard.backtest.*`)
+   历史查询 / 删除(✅ `finboard_backtest_*`)
 6. **模拟盘**:账户 / 会话生命周期 / 结构化决策提交(→ 生成订单)/
-   订单 / 成交 / 持仓 / 账本 / 审计 / 报告(✅ `finboard.sim.*`)
+   订单 / 成交 / 持仓 / 账本 / 审计 / 报告(✅ `finboard_sim_*`)
 7. **portfolio 计算**:目标权重分配 / 离散手数 sizing / 资金档位可行性 /
-   绩效归因(✅ `finboard.portfolio.*`,纯计算无 DB 写入)
-8. **问答 / 假设**:研究问题与因子假设由 agent 自身(OpenCode LLM)直接分析,
+   绩效归因(✅ `finboard_portfolio_*`,纯计算无 DB 写入)
+8. **问答 / 假设**:研究问题与因子假设由 agent 自身(本 Harness 的模型)直接分析,
    引用项目来源;机器验证走 #57 验证实验 / 因子实验(✅ 不再内置 LLM 工具)
-9. **记忆**:跨会话积累研究上下文(✅ `finboard.memory.*`)
+9. **记忆**:跨会话积累研究上下文(✅ `finboard_memory_*`)
 
 **不能直接做**(触及实盘交易安全红线,永久不注册为 MCP 工具):
 - 下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测
