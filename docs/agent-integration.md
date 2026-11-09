@@ -22,7 +22,7 @@ FinDashboard 仍是数据 / 权限 / 任务 / 审计 / 产物的唯一事实来�
 | 传输 | 端点 | 说明 |
 |---|---|---|
 | `stdio` | `uv run python -m finboard_mcp` 由宿主作为子进程拉起 | **默认传输**(`Settings.mcp_transport` 默认 `stdio`);无 HTTP 鉴权;作用域由 `FINBOARD_MCP_STDIO_SCOPES` 决定,**默认只有 `research.read`** |
-| `streamable-http` | `http://127.0.0.1:8765/mcp` | `finboard api` / `make dev` 在 `mcp_enabled`(默认 true)且有凭据时自动挂载同一端口;独立 `python -m finboard_mcp` 则必须显式 `FINBOARD_MCP_TRANSPORT=streamable-http`。必须有凭据,按客户端 Bearer |
+| `streamable-http` | `http://127.0.0.1:8765/mcp` | **独立入口**:显式 `FINBOARD_MCP_TRANSPORT=streamable-http` 启动 `uv run python -m finboard_mcp`(或 `make mcp-serve-http`)。#520 后 `finboard api` / `make dev` **不再**内嵌或自动挂载 MCP,必须单独启动。必须有凭据,按客户端 Bearer |
 
 > 外部 Harness 场景(Codex / OpenCode 等)用 `streamable-http` + 按客户端凭据;
 > stdio 适合「宿主直接拉起子进程」的客户端,但默认只读,写操作需显式
@@ -91,8 +91,12 @@ provider 模型同步)已于 #520 删除;Web 入口改为 `/research/agent-conne
   外部 OpenCode 可自行把数据目录指向解压后的备份(或直接挂载同一命名卷)继续
   使用原会话 / auth;FinDashboard 不再代管该运行时。
 
-- **回退**:回退到 #520 之前的版本会按旧配置重新创建容器,卷内会话仍在;本版本
-  不会自动启动或删除容器/卷。
+- **演练状态(2026-11-10)**:legacy 配置键启动告警、无 OpenCode 配置启动、
+  深链跳转与网关 404 已实测;**升级(已有容器/卷)与回退未演练**——本机 Docker
+  daemon 不可用,仅由静态守卫保证代码不创建/删除容器或卷。记录见
+  `docs/research/rounds/2026-11-10-retire-opencode-520/`。
+- **回退(预期行为,未演练)**:回退到 #520 之前的版本会按旧配置重新创建容器,
+  卷内会话预期仍在;本版本不会自动启动或删除容器/卷。未实跑,不宣称已验证。
 - **仓库级 OpenCode 配置**:`.opencode/opencode.json` 的 `finboard` URL 已从
   `host.docker.internal:8765` 改为 `127.0.0.1:8765`(外部 OpenCode 从仓库根启动
   即可用;token 仍经 `{env:FINBOARD_MCP_TOKEN}` 注入)。

@@ -1,5 +1,9 @@
 # OpenCode provider 持久化位置与模型目录合并行为
 
+> **历史记录(#520 已退役)**:内置 OpenCode 容器托管与 provider 模型同步已删除;
+> 文中卷/挂载/渲染行为仅存档。`.opencode/opencode.json` 现为外部 OpenCode 的
+> 项目级配置(loopback MCP),服务端不再读写它。
+
 主题:排查「OpenCode Web 提供商/模型设置被重置到之前的时间点」(2026-09-01,issue #242)
 时实测确认的 opencode v1.18.15 配置存储事实。后续排查 OpenCode 配置类问题先读这篇。
 

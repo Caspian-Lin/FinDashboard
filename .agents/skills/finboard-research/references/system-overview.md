@@ -22,7 +22,6 @@ packages/
   finboard-backtest/      — 回测引擎 / 因子实验室 / 策略规格 / ResearchRun / AI 助手  [研究]
   finboard-simulation/    — 模拟盘(独立 simulation_* 表)            [研究]
   finboard-mcp/           — MCP Server(向外部 Harness 暴露研究工具)  [研究-AI 接口]
-  finboard-opencode/      — 内置 OpenCode 托管集成(将退役,#520)      [研究-AI 接口]
   finboard-broker/        — BrokerAdapter / MarketDataAdapter 抽象   [实盘]
   finboard-broker-qmt/    — QMT 适配器(Windows-only)                [实盘]
   finboard-broker-ctp/    — CTP 适配器(期货)                         [实盘]
@@ -79,11 +78,14 @@ packages/
 - 统一信封 `ToolEnvelope` + 审计事件(structlog + `mcp_audit_events`)
 - 接入方式(安装 / 配置 / 排障 / 已验与待验)见 `docs/agent-integration.md`
 
-### 2. 内置 OpenCode 托管(`finboard-opencode`,#109/#118;#520 退役)
-- 当前仍保留:把 OpenCode Web 作为受控研究 Agent 运行时(Docker 容器隔离)
-- `opencode_web_enabled` 默认关闭;退役后研究 Agent 一律走外部 Harness + MCP
+### 2. 内置 OpenCode 托管(#520 已退役)
+- FinDashboard 不再托管 `opencode web` 容器 / iframe / `/api/opencode` 网关;
+  `packages/finboard-opencode` 已删除,也没有 `opencode_*` 配置项
+- 研究 Agent 一律是**外部 Harness**(Codex / DeepSeek Harness / ZCode / 外部
+  OpenCode 等),进程与文件隔离由客户端自己负责;FinDashboard 只提供 MCP 端点
+  与按凭据作用域的服务端强制
 - **研究文档只读**:`docs/research/`(ROADMAP / FINDINGS / rounds,跨会话结论
-  共享的事实源)经 PR 维护;容器内挂载一律 `:ro`,在你的工作目录中同样只读
+  共享的事实源)经 PR 维护;外部客户端按自身配置只读引用,服务端不挂载任何容器
 
 ## 安全红线(对 Agent 的硬约束)
 

@@ -19,6 +19,11 @@ from finboard_app.config import Settings
 _ROOT = Path(__file__).resolve().parents[2]
 _PACKAGES = _ROOT / "packages"
 _WEB_SRC = _ROOT / "web" / "src"
+_MAKEFILE = _ROOT / "Makefile"
+_GITHUB = _ROOT / ".github"
+_SCRIPTS = _ROOT / "scripts"
+#: #504 归档评测脚本仍引用旧容器名(历史证据,不参与现行运维);显式排除。
+_ARCHIVED_EVAL_SCRIPT = "evaluate_research_agent_504.py"
 
 #: 只属于已退役实现 / 网关 / 前端客户端的标识符(泛称 "OpenCode" 的历史文档
 #: 说明不在此列:外部 Harness 章节仍会提到 OpenCode)。
@@ -68,6 +73,48 @@ def test_web_src_has_no_retired_opencode_client() -> None:
             if token in text:
                 hits.append(f"{path.relative_to(_ROOT)}: {token}")
     assert not hits, "退役 OpenCode 前端客户端仍有残留:\n" + "\n".join(hits)
+
+
+def test_makefile_and_ci_have_no_retired_targets() -> None:
+    """Makefile / CI 不得重新引入托管容器或衍生镜像目标(#520)。"""
+    assert "opencode" not in _MAKEFILE.read_text(encoding="utf-8").lower(), (
+        "Makefile 仍有 opencode 相关目标/变量;内置托管已退役"
+    )
+    hits = [
+        str(path.relative_to(_ROOT))
+        for path in _GITHUB.rglob("*.yml")
+        if "opencode" in path.read_text(encoding="utf-8").lower()
+    ]
+    assert not hits, "CI 仍有 OpenCode job/步骤: " + ", ".join(hits)
+
+
+def test_scripts_do_not_reintroduce_retired_runtime() -> None:
+    """scripts/ 不得重建托管镜像/容器;归档 #504 评测脚本除外。"""
+    markers = (
+        "finboard-opencode-web",
+        "opencode-agent-image",
+        "docker/opencode-agent",
+        "opencode-serve",
+        "opencode web",
+        "opencodegatewayapi",
+        "from finboard_opencode",
+        "import finboard_opencode",
+    )
+    hits: list[str] = []
+    for path in _SCRIPTS.rglob("*"):
+        if (
+            not path.is_file()
+            or path.name == _ARCHIVED_EVAL_SCRIPT
+            or path.suffix not in {".py", ".sh"}
+        ):
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        hits.extend(
+            f"{path.relative_to(_ROOT)}: {marker}"
+            for marker in markers
+            if marker in text
+        )
+    assert not hits, "scripts/ 重新引入退役 OpenCode 运行时:\n" + "\n".join(hits)
 
 
 def test_settings_have_no_opencode_fields() -> None:

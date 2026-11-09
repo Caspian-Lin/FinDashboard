@@ -20,9 +20,9 @@ AGENTS.md git 历史承载，仅留档备查；活跃记忆只保留「不读代
 - [本机 akshare 复现实验的 ProxyError 陷阱](akshare-em-proxy-error-repro-trap.md) — 系统代理对 push2his.eastmoney.com 偶发 ProxyError（真股票也失败），接口行为判定以源码+请求 URL secid 参数为准；集成测试一律 mock 网络
 - [多 worktree 并行开发：本机落地参数与坑位（#289）](multi-worktree-parallel-dev.md) — junction 共享 data_cache/data_releases + 独立库/端口；删 junction 禁 rm -rf；vite 端口/代理可环境变量覆盖
 - [里程碑分支别名与 dev/main 集成时点](milestone-alias-and-dev-integration.md) — 「m/opencode-research-mcp」是别名，实名 m/opencode-research-agent；2026-09-17 起 dev/main/里程碑三者同树，先后关系 git fetch + merge-base 现算不凭印象
-- [OpenCode Web 工作台：SPA 状态与容器环境踩坑](opencode-web-state-and-home.md) — 项目/最近会话在浏览器 IndexedDB，服务端无法预置；HOME/XDG 决定文件选择器与数据落点；坏路径会话清理方法
-- [OpenCode provider 持久化与模型目录合并](opencode-provider-persistence-and-model-sync.md) — UI 连接=auth.json（data 卷），config provider=仓库文件；agent 定义以 .opencode/agent/*.md 为准；UI 写配置落 ：ro 挂载必失，重启回落仓库冻结态
-- [OpenCode finboard-researcher：bash 放行 + exa 搜索 MCP](opencode-agent-bash-exa-mcp.md) — 容器无 JS 运行时，local MCP 不可行只能 remote；exa 托管端点匿名可用；改权限须重启容器
+- [OpenCode Web 工作台：SPA 状态与容器环境踩坑](opencode-web-state-and-home.md) — **历史（#520 已退役）**：项目/最近会话在浏览器 IndexedDB，服务端无法预置；HOME/XDG 决定文件选择器与数据落点；坏路径会话清理方法
+- [OpenCode provider 持久化与模型目录合并](opencode-provider-persistence-and-model-sync.md) — **历史（#520 已退役）**：UI 连接=auth.json（data 卷），config provider=仓库文件；agent 定义以 .opencode/agent/*.md 为准；UI 写配置落 ：ro 挂载必失，重启回落仓库冻结态
+- [OpenCode finboard-researcher：bash 放行 + exa 搜索 MCP](opencode-agent-bash-exa-mcp.md) — **历史（#520 已退役）**：容器无 JS 运行时，local MCP 不可行只能 remote；exa 托管端点匿名可用；改权限须重启容器
 - [tushare 因子清单调研：内部因子路线图](tushare-factor-roadmap-survey-20260909.md) — 202 因子 9 类全清单含公式；202≈60-70 算子组合；数据缺口三层；分批方案批次进度以 issue #391 为准
 - [统一数据链路方案：拉取重构+数据类型全景+因子批次整合](unified-data-pipeline-plan-20260909.md) — ≤2000 积分全纳入；SyncSpec 数据集驱动统一框架（dataset_sync）；批次落地状态以 #391 批次地图为准
 - [MCP run 摘要查询 13GB 内存飙升根因与修复（#478）](mcp-run-summary-db-aggregation-478.md) — view=summary 曾全量物化 7203 artifacts 顶到 13.27GB；修复=summarize_artifacts 库内有界聚合（::jsonb 归一化 + jsonb 函数只放 CASE THEN）；新增聚合查询禁走 list_artifacts 全量物化

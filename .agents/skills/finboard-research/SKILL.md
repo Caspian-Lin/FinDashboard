@@ -219,6 +219,6 @@ spec OOS;不支持项明确 `blocked` / `insufficient_evidence`。`finboard_job_
 ## 从旧 Skill 名迁移
 
 本 Skill 原名 `.agents/skills/finboard-opencode-research/`(单一客户端专用命名,
-已弃用)。对任何外部 Harness,统一用 `.agents/skills/finboard-research/`;旧目录
-保留一个版本的弃用提示与迁移映射表,将在 #520 删除。迁移对照见
-`../finboard-opencode-research/SKILL.md`。
+已弃用并由 #520 删除)。对任何外部 Harness,统一用
+`.agents/skills/finboard-research/`;接入步骤与客户端矩阵见
+`docs/agent-integration.md`。

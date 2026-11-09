@@ -1,5 +1,8 @@
 # OpenCode Web 工作台:SPA 状态与容器环境踩坑
 
+> **历史记录(#520 已退役)**:本文描述的 OpenCode Web iframe 工作台、Docker 容器
+> 与挂载行为已随 #520 删除,仅存档供考古;现行接入见 `docs/agent-integration.md`。
+
 主题:FinBoard 研究工作台(iframe 嵌入 Docker 内的 `opencode web`)「读不到 project / 历史会话空白」的根因与修复。
 
 ## 结论 / 事实

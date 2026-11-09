@@ -137,8 +137,9 @@ make test-integration # 需要 PostgreSQL 已就绪
   / `dataset_manifests` 等用户数据。
 - **连接切换**:`FINBOARD_TEST_DB_URL` 优先,回退 `FINBOARD_DB_URL`,再
   回退默认测试库。CI 的 postgres 服务用户是 superuser,自动建库即可。
-- **端口**:`make dev` 的 API(:8000)与内嵌 finboard-mcp(:8765)不会与
-  测试冲突(测试用 ASGITransport,不占端口;MCP bind 失败已容错)。
+- **端口**:`make dev` 只启动 API(:8000)+ 后台 worker + Vite;MCP 是独立进程
+  (`uv run python -m finboard_mcp` / `make mcp-serve*`),不随 `make dev` 内嵌,
+  也不会与测试端口冲突(测试用 ASGITransport 不占端口)。
 - **挂死兜底超时**:pytest-timeout(thread 方式,Windows 无 signal)兜底
   sync 挂死(超时后 dump 堆栈并退出进程);asyncio 挂死由 conftest 的
   `asyncio.timeout` 守卫优雅打断(单测试失败,进程继续)。默认超时
@@ -685,9 +686,17 @@ Makefile 等价入口:`make mcp-serve-http`(loopback)、
 
 ### 升级 / 回退 / 迁移(#520)
 
+**演练状态(2026-11-10)**:实际演练了「legacy `FINBOARD_OPENCODE_*` 环境变量启动
+(告警 + 不崩溃)」「无 OpenCode 配置且无 Docker 时启动并服务研究端点」
+「`/research/workbench` 深链跳转保留 `?topic=`」「`/api/opencode/*` 返回 404」。
+**升级(已有容器/卷)与回退未演练**——本机 Docker daemon 不可用
+(`npipe://./pipe/dockerDesktopLinuxEngine` 不存在),无法创建/验证旧容器与卷;
+回归只覆盖「代码路径不再创建/删除任何容器或卷」的静态守卫。完整记录见
+`docs/research/rounds/2026-11-10-retire-opencode-520/`。
+
 - **命名卷不自动删除**:旧版本可能留下 `opencode-data`(会话 + `auth.json`)与
-  `opencode-config`。FinDashboard 代码**永不删除**这两个卷,升级/回退都不删;
-  需要清理时先只读导出备份:
+  `opencode-config`。FinDashboard 代码**永不删除**这两个卷,升级/回退都不删
+  (由 `test_issue_520_opencode_retirement.py` 守卫);需要清理时先只读导出备份:
 
   ```bash
   docker run --rm -v opencode-data:/d:ro -v "$PWD:/out" alpine \
@@ -704,9 +713,10 @@ Makefile 等价入口:`make mcp-serve-http`(loopback)、
   `.env` / 环境变量删除即可。`FINBOARD_OPENCODE_IMAGE` 等键不再影响任何行为。
 - **旧深链**:`/research/workbench?topic=RT-…` → `/research/agent-connect?...`,
   参数原样保留;不存在 404 或空白页。
-- **回退**:回退到 #520 之前的版本时,旧托管容器会按旧配置重新创建,卷内会话
-  仍在;本版本不会自动启动或删除容器/卷。研究与手工流程不依赖任何 OpenCode
-  进程 —— 缺席时 Web 全功能可用。
+- **回退(预期行为,未演练)**:回退到 #520 之前的版本时,旧托管容器会按旧配置
+  重新创建,卷内会话预期仍在;本版本不会自动启动或删除容器/卷。研究与手工流程
+  不依赖任何 OpenCode 进程 —— 缺席时 Web 全功能可用。回退未实跑(本机 Docker
+  daemon 不可用),不能当作已验证结论。
 
 ### 研究代码沙箱(保留)
 
@@ -733,7 +743,7 @@ Makefile 等价入口:`make mcp-serve-http`(loopback)、
 - 回退 MCP 凭据迁移:`alembic downgrade -1` 删除 `mcp_clients`,可临时回退
   `FINBOARD_MCP_AUTH_TOKEN` 旧共享 token
 - 内置 OpenCode 托管已删除,没有可回退的 `opencode_*` 开关;如确需旧工作台,
-  回退到 #520 之前的版本(命名卷仍在,不会被删除)
+  回退到 #520 之前的版本(预期可用,未演练;命名卷不会被本版本删除)
 - 审计持久化:`FINBOARD_MCP_AUDIT_PERSIST=false`(默认)+ 迁移 downgrade
 - 均不影响现有 REST 入口与研究产物。
 
