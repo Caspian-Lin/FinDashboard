@@ -69,6 +69,17 @@ class ResearchOperationContext:
     #: MCP 的 ``OP-``;REST 由中间件/请求头生成。
     operation_id: str | None = None
     request_id: str | None = None
+    #: MCP 客户端作用域(#517)。``None`` 表示服务端可信通道(Web loopback 人类
+    #: 操作 / worker);MCP 适配层必须传入 ``identity.scopes``,否则按 fail-closed
+    #: 拒绝需要 scope 的动作(#516 per-action 强制)。
+    scopes: frozenset[str] | None = None
+
+    def allows_scope(self, scope: str) -> bool:
+        """是否具备某作用域;``None`` 仅对服务端可信通道放行。"""
+
+        if self.scopes is None:
+            return self.source in {OperationSource.WEB, OperationSource.WORKER}
+        return "*" in self.scopes or scope in self.scopes
 
     @classmethod
     def for_web(
@@ -99,8 +110,13 @@ class ResearchOperationContext:
         operation_id: str | None = None,
         actor: str | None = None,
         request_id: str | None = None,
+        scopes: frozenset[str] | None = None,
     ) -> ResearchOperationContext:
-        """MCP 通道上下文(恒 ``agent``,与 ``requested_by=agent:mcp`` 对齐)。"""
+        """MCP 通道上下文(恒 ``agent``,与 ``requested_by=agent:mcp`` 对齐)。
+
+        ``scopes`` 传入客户端已授予作用域(#517);缺省 ``None`` 时 per-action
+        强制(#516)按 fail-closed 处理,需要作用域的动作一律拒绝。
+        """
 
         return cls(
             actor=actor or (f"agent:{client_id}" if client_id else "agent:mcp"),
@@ -109,6 +125,7 @@ class ResearchOperationContext:
             client_id=client_id,
             operation_id=operation_id,
             request_id=request_id,
+            scopes=scopes,
         )
 
     @classmethod

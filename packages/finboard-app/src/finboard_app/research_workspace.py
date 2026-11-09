@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, literal_column, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,14 @@ class EvidenceRef(WorkspaceInput):
         "factor_series",
         "simulation",
         "backtest",
+        # #516: precise references to the factor/code/validation artifacts. The
+        # eight historical kinds above keep their exact semantics; ``experiment``
+        # remains the alias for validation experiments so old refs stay valid.
+        "factor_experiment",
+        "code_artifact",
+        "code_run",
+        "validation_experiment",
+        "factor_snapshot",
     ]
     ref_id: str = Field(min_length=1, max_length=256)
     version: str | None = Field(default=None, max_length=64)
@@ -79,7 +87,16 @@ class TopicInput(WorkspaceInput):
 
 
 class RoundInput(WorkspaceInput):
-    entry_type: Literal["round", "evidence"] = "round"
+    """One topic entry: an execution round, organised evidence, a plan or a review.
+
+    ``plan`` records the design only (factor formula, window, direction,
+    pre-registered hypothesis, trial budget) and never triggers execution.
+    ``review`` records a formal reviewed conclusion and therefore requires an
+    exact in-repo ``.md`` ``document_ref`` plus its checksum, which keeps it
+    distinct from a human record or an agent interpretation.
+    """
+
+    entry_type: Literal["round", "evidence", "plan", "review"] = "round"
     goal_version: str = Field(min_length=1, max_length=64)
     objective: str = Field(min_length=1, max_length=2000)
     action: str = Field(min_length=1, max_length=4000)
@@ -91,6 +108,57 @@ class RoundInput(WorkspaceInput):
     source_refs: list[EvidenceRef] = Field(default_factory=list, max_length=30)
     supersedes_id: str | None = Field(default=None, max_length=32)
     branch: str = Field(default="main", max_length=100)
+    #: Only ``review`` entries carry this: repo-relative ``.md`` path + checksum.
+    document_ref: EvidenceRef | None = None
+
+    @model_validator(mode="after")
+    def validate_entry_kind(self) -> RoundInput:
+        if self.entry_type == "review":
+            if self.document_ref is None:
+                raise ValueError("review 条目必须提供 document_ref(仓库内 .md 路径 + checksum)")
+            if self.document_ref.kind != "document":
+                raise ValueError("document_ref.kind 必须为 document")
+            path = Path(self.document_ref.ref_id)
+            if (
+                path.suffix != ".md"
+                or path.is_absolute()
+                or self.document_ref.ref_id.startswith(("/", "\\"))
+                or ".." in path.parts
+                or not self.document_ref.checksum
+            ):
+                raise ValueError(
+                    "review 的 document_ref 必须是仓库内相对 .md 路径且带 checksum"
+                )
+        elif self.document_ref is not None:
+            raise ValueError("只有 review 条目可以携带 document_ref")
+        if self.entry_type == "plan" and self.outcome != "completed":
+            # A plan is design intent, not an execution result: recording a
+            # failed/interrupted outcome would misrepresent what was run.
+            raise ValueError("plan 只记录设计,outcome 必须为 completed(执行结果用 round)")
+        return self
+
+
+#: ``entry_type`` -> evidence level shown to readers. Plans are explicit design
+#: intent and reviews are formal reviewed conclusions; both are deliberately not
+#: machine facts. Rounds/evidence keep the historical human/agent split.
+ENTRY_EVIDENCE_LEVELS: dict[str, str] = {
+    "plan": "research_plan",
+    "review": "reviewed_conclusion",
+}
+
+
+def _entry_evidence_level(row: Any) -> str:
+    """Evidence level of one entry; plan/review are distinct from round records."""
+
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    entry_type = payload.get("entry_type")
+    if isinstance(entry_type, str) and entry_type in ENTRY_EVIDENCE_LEVELS:
+        return ENTRY_EVIDENCE_LEVELS[entry_type]
+    return (
+        "agent_interpretation"
+        if str(row.created_by).startswith("agent:")
+        else "human_record"
+    )
 
 
 def record_out(row: Any) -> dict[str, Any]:
@@ -99,9 +167,7 @@ def record_out(row: Any) -> dict[str, Any]:
         result["topic_id"] = row.topic_id
     if hasattr(row, "entry_id"):
         result.update(entry_id=row.entry_id, checksum=row.checksum)
-        result["evidence_level"] = (
-            "agent_interpretation" if row.created_by.startswith("agent:") else "human_record"
-        )
+        result["evidence_level"] = _entry_evidence_level(row)
     else:
         result.update(revision=row.revision, evidence_level="working_summary")
         # Internal creation-mode marker stays in storage for idempotency checks; it
@@ -127,6 +193,9 @@ async def topic_entry(session: AsyncSession, topic_id: str, entry_id: str) -> di
         raise LookupError(f"轮次不存在或不属于该课题: {entry_id}")
     result = record_out(row)
     result["refs"] = row.payload.get("source_refs", [])
+    document_ref = row.payload.get("document_ref")
+    if isinstance(document_ref, dict):
+        result["document_ref"] = document_ref
     result["topic_revision"] = row.payload.get("topic_revision")
     return result
 
@@ -176,9 +245,16 @@ async def topic_refs_check(
     seen: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
         payload = row["payload"] if isinstance(row["payload"], dict) else {}
+        # #516: review document refs are evidence too -- verify their checksum on
+        # the same probe so a reviewed conclusion cannot drift from its document.
+        collected: list[dict[str, Any]] = []
         for ref in payload.get("source_refs") or []:
-            if not isinstance(ref, dict):
-                continue
+            if isinstance(ref, dict):
+                collected.append(ref)
+        document_ref = payload.get("document_ref")
+        if isinstance(document_ref, dict):
+            collected.append(document_ref)
+        for ref in collected:
             key = (ref.get("kind"), ref.get("ref_id"), ref.get("version"), ref.get("checksum"))
             item = seen.get(key)
             if item is None:
@@ -287,6 +363,7 @@ async def topic_context(
 
     excerpted = total_rounds > len(round_rows)
     recent_rounds: list[dict[str, Any]] = []
+    entry_types: dict[str, int] = {}
     for row in round_rows:
         data = row["payload"] if isinstance(row["payload"], dict) else {}
         conclusion, cut_conclusion = _excerpt(data.get("conclusion"), CONTEXT_EXCERPT_CHARS)
@@ -294,19 +371,26 @@ async def topic_context(
         next_step, cut_next_step = _excerpt(data.get("next_step"), CONTEXT_EXCERPT_CHARS)
         # Never truncate silently: every shortened field flips the payload flag.
         excerpted = excerpted or cut_conclusion or cut_objective or cut_next_step
+        entry_type = data.get("entry_type") or "round"
+        entry_types[str(entry_type)] = entry_types.get(str(entry_type), 0) + 1
+        created_by = str(row["created_by"])
         recent_rounds.append(
             {
                 "entry_id": row["entry_id"],
+                "entry_type": entry_type,
                 "branch": data.get("branch") or "main",
                 "outcome": data.get("outcome"),
                 "objective": objective,
                 "conclusion_excerpt": conclusion,
                 "next_step": next_step,
                 "created_at": row["created_at"].isoformat(),
-                "created_by": row["created_by"],
-                "evidence_level": "agent_interpretation"
-                if str(row["created_by"]).startswith("agent:")
-                else "human_record",
+                "created_by": created_by,
+                "evidence_level": ENTRY_EVIDENCE_LEVELS.get(
+                    str(entry_type),
+                    "agent_interpretation"
+                    if created_by.startswith("agent:")
+                    else "human_record",
+                ),
             }
         )
 
@@ -377,6 +461,13 @@ async def topic_context(
                 "goal_version": link_row.link.goal_version,
             }
         )
+    # #516: factor experiments / sandbox runs / OOS experiments linked from this
+    # topic, with oos_outcome first. In-flight links survive reconnects because
+    # the link row is immutable and state is derived from the artifact/job.
+    from finboard_app.research_topic_artifacts import list_topic_artifact_links
+
+    artifact_page = await list_topic_artifact_links(session, topic_id, limit=10)
+    experiment_links = artifact_page["items"]
     context: dict[str, Any] = {
         "topic": {
             "topic_id": topic.topic_id,
@@ -394,6 +485,8 @@ async def topic_context(
         "next_step": payload.get("next_step") or "",
         "recent_rounds": recent_rounds,
         "active_links": active_links,
+        "experiment_links": experiment_links,
+        "entry_types": entry_types,
         "dangling_refs": dangling_refs,
         "dangling_refs_has_more": dangling_has_more,
         "refs_checked": refs_checked,
@@ -440,6 +533,7 @@ async def topic_context(
         context["recent_rounds"] = recent_rounds[:5]
         context["open_questions"] = questions[:10]
         context["dangling_refs"] = context["dangling_refs"][:5]
+        context["experiment_links"] = experiment_links[:5]
         context["topic"]["summary"] = str(context["topic"]["summary"])[:500]
         truncated_sections.append("rounds_and_questions")
         excerpted = True
@@ -447,6 +541,7 @@ async def topic_context(
         context["recent_rounds"] = []
         context["open_questions"] = []
         context["dangling_refs"] = []
+        context["experiment_links"] = []
         truncated_sections.append("sections_dropped")
         excerpted = True
     context["excerpted"] = excerpted
@@ -495,8 +590,14 @@ async def workspace_read(
             offset=offset,
             docs_root=docs_root,
         )
+    if view == "artifacts":
+        if not topic_id:
+            raise ValueError("产物链接须提供 topic_id")
+        from finboard_app.research_topic_artifacts import list_topic_artifact_links
+
+        return await list_topic_artifact_links(session, topic_id, limit=min(limit, 50))
     if view not in (None, "list", "detail"):
-        raise ValueError("view 必须为 context/branches/refs")
+        raise ValueError("view 必须为 context/branches/refs/artifacts")
     if status is not None and status not in TOPIC_STATUSES:
         raise ValueError(f"status 必须为 {'/'.join(TOPIC_STATUSES)}")
     if sort not in {"updated", "created"}:
@@ -771,6 +872,71 @@ async def memory_page(session: AsyncSession, limit: int = 20, offset: int = 0) -
     }
 
 
+TRIAL_SUMMARY_MAX_COUNT = 500
+TRIAL_SUMMARY_MAX_BYTES = 1024 * 1024
+
+
+async def bounded_experiment_oos(
+    session: AsyncSession, experiment_id: str
+) -> dict[str, Any]:
+    """Derive ``oos_outcome`` without ever loading an oversized trial set (#310/#516).
+
+    The guard mirrors the historical ``source_fact`` contract: more than 500
+    trials or more than 1 MiB of trial JSON returns ``unknown`` with a **named**
+    evidence gap instead of guessing from ``status``.
+    """
+
+    size = (
+        (
+            await session.execute(
+                text(
+                    "SELECT count(*) AS count, coalesce(sum(octet_length(row_to_json(t)::text)),0) AS bytes "
+                    "FROM research_trials t WHERE experiment_id=:ref_id"
+                ),
+                {"ref_id": experiment_id},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if size["count"] > TRIAL_SUMMARY_MAX_COUNT or size["bytes"] > TRIAL_SUMMARY_MAX_BYTES:
+        return {
+            "oos_outcome": "unknown",
+            "trial_count": int(size["count"]),
+            "oversized": True,
+            "evidence_gaps": ["trial_summary_oversized"],
+        }
+    from finboard_backtest.validation import derive_oos_outcome
+    from finboard_persistence.validation_repo import (
+        ResearchExperimentRepository,
+        ResearchTrialRepository,
+    )
+
+    exp = await ResearchExperimentRepository(session).get(experiment_id)
+    if exp is None:  # pragma: no cover - 行存在才走到这里
+        return {
+            "oos_outcome": "unknown",
+            "trial_count": int(size["count"]),
+            "oversized": False,
+            "evidence_gaps": ["experiment_missing"],
+        }
+    trials = await ResearchTrialRepository(session).list_by_experiment(experiment_id)
+    outcome = derive_oos_outcome(exp, trials).value
+    gaps: list[str] = []
+    if not trials:
+        gaps.append("no_trials")
+    if not exp.final_test_unsealed:
+        gaps.append("final_test_not_unsealed")
+    if outcome == "inconclusive" and trials and exp.final_test_unsealed:
+        gaps.append("oos_inconclusive")
+    return {
+        "oos_outcome": outcome,
+        "trial_count": len(trials),
+        "oversized": False,
+        "evidence_gaps": gaps,
+    }
+
+
 async def source_fact(
     session: AsyncSession, reference: dict[str, Any], docs_root: Path
 ) -> dict[str, Any]:
@@ -811,6 +977,36 @@ async def source_fact(
         "factor_series": "SELECT content_checksum AS checksum, code_commit AS version, code_artifact FROM research_factor_series WHERE series_id=:ref_id",
         "simulation": "SELECT status, strategy_version AS version FROM simulation_sessions WHERE simulation_session_id=:ref_id",
         "backtest": 'SELECT strategy, start, "end" FROM backtest_runs WHERE id::text=:ref_id',
+        # #516: bounded projections for the factor / code / OOS artifact kinds.
+        # No row here loads unbounded JSON: factor_experiment digests the result
+        # only under a size cap, code_run exposes checksums instead of artifacts.
+        "factor_experiment": (
+            "SELECT status, dataset_release_checksum AS checksum, dataset_release_id, "
+            "feature_snapshot_id, validation_experiment_id, failure_reason, "
+            "octet_length(result::text) AS result_bytes, "
+            "CASE WHEN octet_length(result::text) <= 65536 THEN md5(result::text) END AS result_digest "
+            "FROM factor_experiments WHERE experiment_id=:ref_id"
+        ),
+        "code_artifact": (
+            "SELECT checksum, commit AS version, status, promotion_status, kind, name "
+            "FROM research_code_artifacts WHERE artifact_id=:ref_id"
+        ),
+        "code_run": (
+            "SELECT status, kind, mode, name, commit, code_checksum, "
+            "scores_checksum AS checksum, output_snapshot_id, error_code, "
+            "timed_out, oom_killed FROM research_code_runs WHERE run_id=:ref_id"
+        ),
+        "validation_experiment": (
+            "SELECT status, version_checksum AS checksum, final_test_unsealed, trials_used, "
+            "CASE WHEN (plan::jsonb->>'trial_budget') ~ '^[0-9]+$' "
+            "THEN (plan::jsonb->>'trial_budget')::int END AS trial_budget_limit, "
+            "frozen_at, finalized_at FROM research_experiments WHERE experiment_id=:ref_id"
+        ),
+        "factor_snapshot": (
+            "SELECT checksum, framework_version AS version, code_version, "
+            "symbol_count, observation_count, decision_at, dataset_release_id, "
+            "source_run_id FROM factor_feature_snapshots WHERE snapshot_id=:ref_id"
+        ),
     }
     row = (
         (
@@ -827,40 +1023,26 @@ async def source_fact(
     mismatched = bool(ref.checksum and ref.checksum != facts.get("checksum"))
     if ref.version and ref.version != str(facts.get("version")):
         return {"status": "version_mismatch", "facts": facts}
-    if ref.kind == "experiment":
+    if ref.kind in {"experiment", "validation_experiment"}:
         # Delegate the domain's derived outcome instead of guessing from status.
-        from finboard_backtest.validation import derive_oos_outcome
-        from finboard_persistence.validation_repo import (
-            ResearchExperimentRepository,
-            ResearchTrialRepository,
-        )
-
-        size = (
-            (
-                await session.execute(
-                    text(
-                        "SELECT count(*) AS count, coalesce(sum(octet_length(row_to_json(t)::text)),0) AS bytes FROM research_trials t WHERE experiment_id=:ref_id"
-                    ),
-                    {"ref_id": ref.ref_id},
-                )
-            )
-            .mappings()
-            .one()
-        )
-        if size["count"] > 500 or size["bytes"] > 1048576:
+        oos = await bounded_experiment_oos(session, ref.ref_id)
+        facts["oos_outcome"] = oos["oos_outcome"]
+        if ref.kind == "validation_experiment":
+            facts["evidence_gaps"] = oos["evidence_gaps"]
+            facts["trial_budget"] = {
+                "used": int(facts.get("trials_used") or 0),
+                "limit": facts.get("trial_budget_limit"),
+            }
+            facts["trial_count"] = oos["trial_count"]
+        if oos["oversized"]:
             return {
                 "status": "checksum_mismatch" if mismatched else "matched",
                 "facts": {
                     **facts,
-                    "oos_outcome": "unknown",
                     "evidence_level": "automatic_fact",
                     "notice": "实验trial摘要超限,未加载全部试验,不推断OOS结论",
                 },
             }
-        exp = await ResearchExperimentRepository(session).get(ref.ref_id)
-        if exp:
-            trials = await ResearchTrialRepository(session).list_by_experiment(ref.ref_id)
-            facts["oos_outcome"] = derive_oos_outcome(exp, trials).value
     return {
         "status": "checksum_mismatch" if mismatched else "matched",
         "facts": {
@@ -869,3 +1051,4 @@ async def source_fact(
             "notice": "发布/完成不是OOS支持,历史工作解释须另行复核",
         },
     }
+

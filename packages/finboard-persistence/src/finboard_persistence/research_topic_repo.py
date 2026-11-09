@@ -15,6 +15,13 @@ from finboard_persistence.models import ResearchTopicEntryModel, ResearchTopicMo
 
 TOPIC_STATUSES = ("draft", "active", "paused", "closed")
 
+#: Entry types that make up the topic's working record. #516 adds ``plan`` and
+#: ``review``: both are goal-versioned records (not machine facts), so they are
+#: counted, branched and ref-checked like rounds/evidence while lifecycle and
+#: goal snapshots stay excluded.
+RECORD_ENTRY_TYPES = ("round", "evidence", "plan", "review")
+
+
 
 def checksum(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
@@ -171,7 +178,7 @@ class ResearchTopicRepository:
         topic = await self.get(topic_id, lock=True)
         topic.updated_at = utcnow()
         if (
-            payload.get("entry_type") in {"round", "evidence"}
+            payload.get("entry_type") in RECORD_ENTRY_TYPES
             and await self.goal(topic_id, payload["goal_version"]) is None
         ):
             raise ValueError("本轮目标版本须引用课题已有目标记录")
@@ -257,7 +264,7 @@ class ResearchTopicRepository:
             (
                 await self.session.execute(
                     text(
-                        "SELECT entry_id, payload, checksum, created_by, created_at FROM research_topic_entries WHERE topic_id=:topic_id AND payload::jsonb->>'entry_type' IN ('round','evidence') ORDER BY id DESC LIMIT :limit"
+                        "SELECT entry_id, payload, checksum, created_by, created_at FROM research_topic_entries WHERE topic_id=:topic_id AND payload::jsonb->>'entry_type' IN ('round','evidence','plan','review') ORDER BY id DESC LIMIT :limit"
                     ),
                     {"topic_id": topic_id, "limit": limit},
                 )
@@ -271,7 +278,7 @@ class ResearchTopicRepository:
         value = (
             await self.session.execute(
                 text(
-                    "SELECT count(*) FROM research_topic_entries WHERE topic_id=:topic_id AND payload::jsonb->>'entry_type' IN ('round','evidence')"
+                    "SELECT count(*) FROM research_topic_entries WHERE topic_id=:topic_id AND payload::jsonb->>'entry_type' IN ('round','evidence','plan','review')"
                 ),
                 {"topic_id": topic_id},
             )
@@ -289,7 +296,7 @@ class ResearchTopicRepository:
                         " AS last_outcome"
                         " FROM research_topic_entries"
                         " WHERE topic_id=:topic_id"
-                        " AND payload::jsonb->>'entry_type' IN ('round','evidence')"
+                        " AND payload::jsonb->>'entry_type' IN ('round','evidence','plan','review')"
                         " AND coalesce(payload::jsonb->>'branch','') <> ''"
                         " GROUP BY 1 ORDER BY max(created_at) DESC, 1 LIMIT :limit OFFSET :offset"
                     ),
