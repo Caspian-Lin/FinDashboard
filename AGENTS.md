@@ -70,6 +70,11 @@
 - 策略说明书只用指定版本/冻结manifest；因子实现锚不匹配标记缺证据。日期/标的决策解释必须先SQL投影分页，不拉全量artifact。
 - 工作摘要、agent解释与自动事实分开；canonical结论仍在docs/research经PR维护。
 
+### 研究操作审计（#518）
+- 研究写操作必须经服务端 `ResearchOperationContext` 写 `research_audit_events`（`RA-`）：成功写与审计**同事务**（审计插入失败 → 业务回滚），拒绝/失败用独立会话补记且不掩盖原始错误；`server_observed` 与 `client_declared` 并列展示，后者永不覆盖服务端事实。
+- 只存脱敏摘要（单值 ≤120 字、整包 ≤4 KiB）与 sha256 digest；代码正文、记忆正文、未脱敏对话与凭据永不入库；实盘 `audit_logs` 边界不变，研究审计不是实盘审计。
+- 读侧 `GET /api/research/audit*` 与 MCP `finboard_audit_query` 只对 `audit.read` 开放（不进常规研究预设）；迁移/接入前无记录必须在 `coverage` 如实标示，不能当作「无操作」。保留策略 `FINBOARD_RESEARCH_AUDIT_RETENTION_DAYS`（默认 365）声明式，v1 不自动清理，只有 `finboard research audit purge --before` 显式执行。
+
 ### 确定性复核与正式验证（#501–#505）
 - 区间/逐年数值用 `research_diagnostics` 同源计算（252交易日年化、rf0/ddof1，另列日历年化）；单决策 detail/export 也必须在 SQL 加载前估字节，超限走白名单字段投影分页。
 - 正式规格验证显式 `runner.kind=research_spec`，冻结 completed 发布版本并复用正式组合管线；参数网格、缺覆盖、已使用的最终窗口必须拒绝，不用 registry 策略代验。最终揭盲执行前持久化；中断后已揭盲不可重开。
