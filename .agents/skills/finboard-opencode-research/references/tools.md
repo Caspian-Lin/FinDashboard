@@ -1947,8 +1947,8 @@ def decide(ctx):
 
 | 工具 | 参数 / 返回 | 边界 |
 |---|---|---|
-| `finboard_topic_read` | topic_id?、entries=false、limit=20(1–50)、offset=0(≤100000)；无ID返回课题分页，有ID返回详情，entries=true返回轮次分页 | 先读工作目标/开放问题，再核对 canonical 文档 |
-| `finboard_topic_write` | operation=create/update/append、payload；update需topic_id+expected_revision，append需topic_id+idempotency_key | 研究写，readonly_only拒绝；创建者服务端固定；不运行回测 |
+| `finboard_topic_read` | topic_id?、entries=false、limit=20(1–50)、offset=0(≤100000)、view=context\|branches\|refs、entry_id、status、sort=updated\|created、rounds=10(≤20)、refs=10(≤10)；无ID返回课题分页(可按status筛选)，有ID返回详情，entries=true返回轮次分页，view=context返回≤64KiB续接上下文，view=branches按分支聚合，view=refs逐条核验最近轮次引用(≤20条/次，offset续页)，entry_id读精确RE-ID(跨课题404) | 先读工作目标/开放问题，再核对 canonical 文档；context截断时excerpted=true，next_actions只是服务端建议 |
+| `finboard_topic_write` | operation=create/draft_create/update/activate/transition/append、payload；update需topic_id+expected_revision，append需topic_id+idempotency_key，create/draft_create可带idempotency_key(同键同内容返回原记录created=false)，activate需topic_id+expected_revision+payload.goal，transition需topic_id+expected_revision+payload.action(pause/resume/close/reopen/discard，close/reopen/discard须reason) | 研究写，readonly_only拒绝；创建者服务端固定；非法转移返回conflict(附allowed/current)，版本冲突附current_revision/changed_fields；不运行回测 |
 | `finboard_memory_page` | limit=20、offset；1200字SQL摘录、status/created_by/confirmed_by/supersedes_id/refs | 历史状态不隐藏，unknown/空refs不可验证 |
 | `finboard_source_check` | kind/ref_id、version?、checksum?；status=matched/missing/version_required/version_mismatch/checksum_mismatch，facts自动事实 | matched只证引用，不证盈利/晋级；document根目录内md |
 | `finboard_strategy_explain` | run_id，或strategy_id+version；provenance/spec/factors/effective_policies/overrides/gaps/warnings | 指定冻结运行优先；不读最新版本替代历史；因子commit不匹配就缺证据 |
@@ -1959,6 +1959,39 @@ def decide(ctx):
 {"operation":"create","payload":{"title":"小盘反转复核","question":"净收益是否依赖执行近似？","goal":{"version":"2026-09-01","criteria":"年化>=15%；最大回撤<=20%；后续OOS必须另验","source":{"kind":"document","ref_id":"ROADMAP.md"}},"status":"active","conclusion":"unknown","open_questions":["同策略OOS与成本压力仍缺证据"],"next_step":"核对冻结运行"}}
 ```
 更新传完整同形payload及expected_revision（并发冲突后重新读取，不覆盖）；goal换版本追加目标快照，不改历史验收。
+
+两步建题（先存问题，再补目标激活，保存与执行分离）：
+```json
+{"operation":"draft_create","payload":{"title":"先存问题","question":"哪些证据还没有核验？"},"idempotency_key":"draft-20261109-001"}
+```
+```json
+{"operation":"activate","topic_id":"RT-<草稿ID>","expected_revision":1,"payload":{"goal":{"version":"v1","criteria":"年化>=15%；最大回撤<=20%","source":{"kind":"document","ref_id":"ROADMAP.md"}},"summary":"先整理历史证据","open_questions":["同源OOS是否齐备"],"next_step":"核验并关联历史证据"}}
+```
+回执丢失用同一幂等键重试返回原课题（created=false）；已激活且目标相同为幂等成功，目标不同会被拒绝。
+
+生命周期转移（每次都要最新revision；close/reopen/discard必须写原因）：
+```json
+{"operation":"transition","topic_id":"RT-<ID>","expected_revision":2,"payload":{"action":"pause"}}
+```
+```json
+{"operation":"transition","topic_id":"RT-<ID>","expected_revision":3,"payload":{"action":"close","reason":"门槛已达成，等待新证据"}}
+```
+非法转移返回 conflict（allowed/current），版本冲突返回 current_revision/changed_fields；先重新读取再续接，不覆盖。
+
+续接与精确读取：
+```json
+{"view":"context","topic_id":"RT-<ID>","rounds":10,"refs":10}
+```
+```json
+{"view":"branches","topic_id":"RT-<ID>"}
+```
+```json
+{"view":"refs","topic_id":"RT-<ID>","rounds":10}
+```
+```json
+{"topic_id":"RT-<ID>","entry_id":"RE-<完整ID>"}
+```
+context 含目标、最近生命周期、开放问题、最近轮次摘录、断链引用与 next_actions（服务端建议，不是执行）；总载荷≤64KiB，截断时 excerpted=true。跨课题 entry_id 返回 404。
 
 合法轮次追加：
 ```json

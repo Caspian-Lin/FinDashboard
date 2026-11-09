@@ -22,9 +22,9 @@ ResearchRun 是冻结输入后执行的离线研究回放，不等同所有研�
 
 ## 课题与轮次
 
-课题是跨会话持续更新的研究锚点与逻辑证据目录；当前目录由追加轮次的source_refs组成，尚无单独聚合/反向归属API。已有运行、记忆和实验用 `entry_type=evidence` 引用关联，保留原产物和历史状态，一个产物可被多个课题引用。完整操作见 [课题组织与已有证据归档](topic-organization.md)。
+课题是跨会话持续更新的研究锚点与逻辑证据目录；当前目录由追加轮次的source_refs组成，`#514` 起可用 `/branches` 看分支聚合、`/refs/check` 逐条核验断链、`/context` 一次取回有界续接上下文（仍无 run→topic 反向归属，留待 #515 链接表）。已有运行、记忆和实验用 `entry_type=evidence` 引用关联，保留原产物和历史状态，一个产物可被多个课题引用。完整操作见 [课题组织与已有证据归档](topic-organization.md)。
 
-课题稳定ID `RT-`，含 title/question、goal（version/criteria/source）、status（active/paused/closed）、conclusion（工作结论）、summary/open_questions/next_step。更新需 expected_revision，旧版本冲突返回409；每次更新追加目标快照，历史15%/20%与当次15%/10%门可分别记录，系统不自行决定新门。
+课题稳定ID `RT-`，含 title/question、goal（version/criteria/source）、status（draft/active/paused/closed）、conclusion（工作结论）、summary/open_questions/next_step。`status` 自 #514 起是真实列（`draft|active|paused|closed`，带 CHECK 约束），payload 内同值双写，读取以列为权威。更新需 expected_revision，旧版本冲突返回409；每次更新追加目标快照，历史15%/20%与当次15%/10%门可分别记录，系统不自行决定新门。草稿没有 goal，编辑草稿不会改变生命周期状态。
 
 轮次稳定ID `RE-`，只追加，记录 goal_version/objective/action/rationale/outcome/conclusion/confidence/next_step、source_refs、branch、supersedes_id。同课题幂等键相同且内容相同返回原记录，内容不同拒绝；纠正链仅能引用同课题已有记录。可记录 completed/failed/interrupted/rejected/paused，不抹掉失败与断续过程。引用精确ID，策略版本需补 version；checksum可选，缺失会限制核验强度。用户创建者由REST固定为user:api，agent由MCP固定为agent:mcp，payload不能伪造创建者。
 
@@ -36,11 +36,41 @@ FinDashboard 保存研究结构，OpenCode 保存原对话；不恢复对话流�
 
 记忆列表和完整详情共用有界阅读区及 Markdown 排版；列表只读1200字摘录，关联证据展开时才核查，详情按选定ID读取正文。创建/更新/确认及轮次时间显示人类可读的北京时间，原ISO保留于time.dateTime/title；历史时间缺偏移时明确“时区未记录”，不猜绝对时刻。
 
+## 课题生命周期与续接上下文（#514）
+
+状态机由服务端强制（`finboard_app.research_topic_lifecycle`）：
+
+```text
+draft   --activate(需 goal)--> active
+active  --pause--> paused --resume--> active
+active|paused --close(reason)--> closed --reopen(reason)--> active
+draft   --discard(reason)--> closed
+```
+
+- 非法转移返回 409，body 为 `{"detail": {"code": "illegal_transition", "allowed": [...], "current": "...", "action": "..."}}`；版本不一致返回 `code=topic_revision_conflict`、`current_revision`、`your_revision`、`changed_fields`、`current_summary`。REST 用结构化 `detail`，MCP 映射为 `conflict`。
+- 每次转移要求 `expected_revision`，服务端 `SELECT … FOR UPDATE` + `populate_existing`，revision 不符即拒绝，旧会话不得覆盖新 revision。
+- 每次转移在同一事务追加 `entry_type=lifecycle` 轮次 `{action, from, to, reason, actor, at, topic_revision}`；历史轮次与目标快照不改写、不删除。
+- 被放弃的草稿没有 goal，`reopen` 会被拒绝（不能产生无目标版本的 active 课题）；重开真实课题保留原目标与轮次。
+- `POST /topics`：带 goal 建 active（原行为不变）；只有 title/question 建 draft（`goal=null`）；可选 `idempotency_key`，同键同内容返回原课题（HTTP 200，`created=false`），同键不同内容 409 `idempotency_conflict`。
+- `POST /topics/{id}/activate`：`{goal, expected_revision}`，可附带 summary/open_questions/next_step/conclusion；goal 的 version/criteria/source 必须完整。已 active 且 goal 相同为幂等 200，不增加 revision；goal 不同则 409，不能借激活覆盖目标。
+- `POST /topics/{id}/transitions`：`{action: pause|resume|close|reopen|discard, reason, expected_revision}`；close/reopen/discard 必填原因。
+
+`GET /api/research/topics/{id}/context?rounds=10&refs=10` 返回跨客户端续接载荷：`topic`（含 revision/status/updated_at）、`goal`、`lifecycle`（since + 最近一次转移）、`open_questions`、`next_step`、`recent_rounds`（≤20 条、结论/目标/下一步各 ≤300 字摘录）、`active_links`（#515 前恒为空）、`dangling_refs`（对最近轮次引用逐条 `source_fact`，≤10 条/次）、`evidence_levels`、`next_actions`（服务端派生建议，不代表执行）、`generated_at`、`revision`、`bounds`。总载荷 ≤64 KiB；任何截取都置 `excerpted=true` 并在 `truncated_sections` 具名，绝不静默截断。`rounds` 上限 20，`refs` 上限 10。
+
+精确查询与聚合：
+
+- `GET /topics/{id}/entries/{entry_id}`：单条全文 + checksum + refs；跨课题 entry_id 返回 404。
+- `GET /topics/{id}/branches`：按 `payload.branch` 聚合 `{branch, count, last_at, last_outcome}`，limit ≤50、offset 分页。
+- `GET /topics/{id}/refs/check?rounds=10`：对最近 N 轮（≤20）引用去重后逐条调用既有 `source_fact`，返回 `{ref, status, facts, entry_ids}`；每次最多 20 条，`has_more` + `offset` 续页。
+- `GET /topics?status=&sort=updated|created`：默认按 `updated_at` 倒序（新列），`sort=created` 按插入 id 倒序。
+
+Web 侧：新建课题分两步（保存草稿 → 补齐目标激活），生命周期按钮带原因与二次确认，详情展示续接上下文卡片与断链提示；409 显示结构化冲突（当前 revision、变化字段）并提供“重新加载最新版本”和“仅保留我的说明（追加轮次）”，不静默覆盖。
+
 ## 工具同步、验证与回滚
 
-MCP工具与上述服务共用实现：topic_read、topic_write、memory_page、source_check、strategy_explain、decision_explain。具体参数与完整例子见 Skill references/tools.md。MCP写工具受 readonly_only 拒绝，输入脱敏、审计，不注册任何实盘能力。
+MCP工具与上述服务共用实现：topic_read、topic_write、memory_page、source_check、strategy_explain、decision_explain。`finboard_topic_read` 增加 `view=context|branches|refs` 与 `entry_id`，`finboard_topic_write` 增加 `operation=draft_create|activate|transition`；旧参数与行为不变。具体参数与完整例子见 Skill references/tools.md。MCP写工具受 readonly_only 拒绝，输入脱敏、审计，不注册任何实盘能力。
 
-迁移 `62f8b1e7a905` 创建独立 research_topics/research_topic_entries，无研究产物/实盘外键或级联；回滚前导出这两表，再downgrade。回滚不会删除任何 run、dataset、factor、memory 或模拟账本。执行差异与压力验证仍由 #502/#503 处理。
+迁移 `62f8b1e7a905` 创建独立 research_topics/research_topic_entries，无研究产物/实盘外键或级联；回滚前导出这两表，再downgrade。`a7c41e9b5d32`（#514）为 research_topics 增加 status/updated_at/idempotency_key、部分唯一索引与 (status, updated_at DESC) 索引，并从 payload.status 回填；downgrade 先把列值折回 payload.status 再删列/索引/约束，回滚无损。回滚不会删除任何 run、dataset、factor、memory 或模拟账本。执行差异与压力验证仍由 #502/#503 处理。
 
 本轮测试覆盖日历/OOS旧契约、方向翻转、冻结参数/版本缺证据、同源来源核验、目标与成交不一致、分页/载荷护栏、跨轮目标更新/纠正/幂等、路径包含、权限/创建者边界及迁移往返。phase1_doc.md §3.4 的3–14仅作为研究域产物关联与决策/账本解释映射，不替代实盘恢复/券商验收。
 
