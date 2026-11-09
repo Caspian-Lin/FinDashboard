@@ -56,6 +56,7 @@ validation_experiment_create 的 selection_config.validation_trial_runner 显式
 | 模拟盘(`finboard_sim_*`,✅ #127+#139) | ✅(读 research.read;会话/决策/行情/评估等运行写 research.run;账户创建 research.write) | |
 | ResearchRun 生命周期(`finboard_run_*` 写,✅ #127) | ✅(读 research.read;queue/cancel/replay research.run) | |
 | 课题发起运行(`finboard_topic_run_*`,✅ #515) | ✅(list/get/run_topics research.read;start/retry/cancel research.run；后来关联仅 REST) | |
+| 课题动作(`finboard_topic_action`,✅ #516) | ✅(工具级 research.write;run.submit/replay、code_run.execute、unseal 服务端再按 research.run 强制) | |
 | portfolio(`finboard_portfolio_*`,✅ #128) | ✅(纯计算:research.read) | |
 | 后台任务队列(`finboard_job_*`,✅ #136+#221) | ✅(list/get/wait research.read;enqueue/cancel 需 research.run+data.write;archive/unarchive research.write) | |
 | 数据写操作(`finboard_data_*` / `finboard_etf_*`,✅ #137) | ✅(data.write;config_get/review_queue 为 research.read) | |
@@ -1968,8 +1969,8 @@ def decide(ctx):
 
 | 工具 | 参数 / 返回 | 边界 |
 |---|---|---|
-| `finboard_topic_read` | topic_id?、entries=false、limit=20(1–50)、offset=0(≤100000)、view=context\|branches\|refs、entry_id、status、sort=updated\|created、rounds=10(≤20)、refs=10(≤10)；无ID返回课题分页(可按status筛选)，有ID返回详情，entries=true返回轮次分页，view=context返回≤64KiB续接上下文，view=branches按分支聚合，view=refs逐条核验最近轮次引用(≤20条/次，offset续页)，entry_id读精确RE-ID(跨课题404) | 先读工作目标/开放问题，再核对 canonical 文档；context截断时excerpted=true，next_actions只是服务端建议 |
-| `finboard_topic_write` | operation=create/draft_create/update/activate/transition/append、payload；update需topic_id+expected_revision，append需topic_id+idempotency_key，create/draft_create可带idempotency_key(同键同内容返回原记录created=false，跨创建模式conflict)，activate需topic_id+expected_revision+payload.goal，transition需topic_id+expected_revision+payload.action(pause/resume/close/reopen/discard，close/reopen/discard须reason) | 研究写，readonly_only拒绝；创建者服务端固定；create只支持active(paused/closed先建后转移)；update不能改状态、草稿不能带goal；非法转移返回conflict(message内含allowed/current的JSON details)，版本冲突含current_revision/changed_fields；不运行回测 |
+| `finboard_topic_read` | topic_id?、entries=false、limit=20(1–50)、offset=0(≤100000)、view=context\|branches\|refs\|artifacts、entry_id、status、sort=updated\|created、rounds=10(≤20)、refs=10(≤10)；无ID返回课题分页(可按status筛选)，有ID返回详情，entries=true返回轮次分页，view=context返回≤64KiB续接上下文(含experiment_links与entry_types)，view=branches按分支聚合，view=refs逐条核验最近轮次引用(≤20条/次，offset续页)，view=artifacts读因子实验/沙箱/OOS链接(≤50)，entry_id读精确RE-ID(跨课题404) | 先读工作目标/开放问题，再核对 canonical 文档；context截断时excerpted=true，next_actions只是服务端建议；OOS先看oos_outcome |
+| `finboard_topic_write` | operation=create/draft_create/update/activate/transition/append、payload；update需topic_id+expected_revision，append需topic_id+idempotency_key，create/draft_create可带idempotency_key(同键同内容返回原记录created=false，跨创建模式conflict)，activate需topic_id+expected_revision+payload.goal，transition需topic_id+expected_revision+payload.action(pause/resume/close/reopen/discard，close/reopen/discard须reason) | 研究写，readonly_only拒绝；创建者服务端固定；create只支持active(paused/closed先建后转移)；update不能改状态、草稿不能带goal；非法转移返回conflict(message内含allowed/current的JSON details)，版本冲突含current_revision/changed_fields；append的entry_type=round/evidence/plan/review，plan不执行且outcome须completed，review须document_ref(相对docs/research的.md+checksum)；不运行回测 |
 | `finboard_memory_page` | limit=20、offset；1200字SQL摘录、status/created_by/confirmed_by/supersedes_id/refs | 历史状态不隐藏，unknown/空refs不可验证 |
 | `finboard_source_check` | kind/ref_id、version?、checksum?；status=matched/missing/version_required/version_mismatch/checksum_mismatch，facts自动事实 | matched只证引用，不证盈利/晋级；document根目录内md |
 | `finboard_strategy_explain` | run_id，或strategy_id+version；provenance/spec/factors/effective_policies/overrides/gaps/warnings | 指定冻结运行优先；不读最新版本替代历史；因子commit不匹配就缺证据 |
@@ -2024,6 +2025,8 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 
 课题是持续更新的锚点，目录由轮次source_refs与#515运行链接共同构成；`finboard_run_topics` 可反查一个 run 被哪些课题引用。先topic_read检查已有课题，memory_page/原run及实验查询选精确ID，source_check核验，再topic_write create（完整输入见上）和append evidence。不是改原run或记忆的topic_id，原产物可被多课题引用，不能为了归类调用memory_correct。完整流程见 `docs/research/topic-organization.md`。
 
+#516 起 `source_refs.kind` 还可精确指向 `factor_experiment` / `code_artifact`（version=git commit）/ `code_run`（RCR-，checksum=输出 scores checksum）/ `validation_experiment`（checksum=version_checksum，附 oos_outcome/trial 预算/揭盲状态）/ `factor_snapshot`（version=framework version）；原 9 类语义不变，`experiment` 仍指验证实验。只记设计用 `entry_type=plan`（不执行），复核结论用 `entry_type=review`（必须带 document_ref：**相对 `docs/research`** 的 .md 路径 + checksum，例如 `rounds/2026-11-09-x.md`，证据等级 reviewed_conclusion）。真正执行只走 `finboard_topic_action`。
+
 ```json
 {"operation":"append","topic_id":"RT-<已有ID>","idempotency_key":"historical-evidence-v1-001","payload":{"entry_type":"evidence","goal_version":"<该课题已有目标版本>","objective":"组织历史研究证据","action":"核查选定运行、记忆与实验的精确ID后追加引用","rationale":"保留历史并跨会话续接","outcome":"completed","conclusion":"归档动作完成，策略可信度仍待复核","confidence":"unknown","next_step":"核对冻结版本与OOS结论","source_refs":[{"kind":"research_run","ref_id":"RR-<完整ID>"},{"kind":"memory","ref_id":"RM-<完整ID>"},{"kind":"experiment","ref_id":"<完整实验ID>"}],"branch":"historical-evidence"}}
 ```
@@ -2056,6 +2059,48 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 永远不会自动启动运行；运行状态是机器事实，轮次是人类/agent 解释，不要互相替代。
 `retry` 复用既有 replay 守卫（completed/interrupted 可重放；cancelled/failed 仍按
 原错误处置），因此“失败后重试”应先确认源状态或重新入队新运行。
+
+## finboard_topic_action（✅ #516：1 写，白名单）
+
+课题内**显式执行**入口，与 REST `POST /api/research/topics/{id}/actions` 同一实现。
+工具级作用域 `research.write`；运行类动作在服务端再按 `research.run` 强制。
+`payload` 按 action 校验，未知字段拒绝（`extra="forbid"`），**没有任何代码字段**。
+
+| action | 作用域 | payload | 链接 entity_type |
+|---|---|---|---|
+| `run.submit` | research.run | 同 `finboard_run_queue` 入队字段 | research_run |
+| `run.replay` | research.run | `run_id` + 原 replay 字段{idempotency_key,requested_by}；声明的 `goal_version` 须等于当前目标版本 | research_run |
+| `factor_experiment.create` | research.write | hypothesis/factor_names/dataset_release_id/feature_snapshot_id/plan/comparison_group?/validation_experiment_id? | factor_experiment |
+| `code_run.execute` | research.run | `artifact_id` 或 `name`（二选一）+kind=factor+dataset_release_ids+decision_at(+symbols/params) | code_run |
+| `validation_experiment.create` | research.write | hypothesis/version_stamp/plan/thresholds?/robustness?/strategy_params_space?/supersedes_id? | validation_experiment |
+| `validation_experiment.add_trial` | research.write | experiment_id+parameters+status?+failure_reason? | validation_experiment |
+| `validation_experiment.unseal` | research.run | experiment_id(+idempotency_key?/requested_by?) | validation_experiment |
+
+- 共同前置：课题 `active` 且 `goal_version` 等于当前目标版本（`topic_not_active` /
+  `goal_version_mismatch`）；`operation_id` 是响应丢失锚：**链接唯一键不足以锚定同一
+  产物的第二次动作**，服务端用只追加回执表 `research_topic_action_receipts`
+  （`UNIQUE(topic_id, operation_id)`）保证重放返回原结果、不重复执行；同键用于不同
+  动作返回 conflict（`operation_id_bound`），并发同键返回 conflict
+  （`operation_id_in_flight`，重试即命中回执）。返回 `artifact_created` /
+  `link_created` / `replayed` 区分新建与回放。
+- `code_run.execute` 只能执行 `research_code_artifacts` 已登记条目（draft 可跑，
+  retired 拒绝，active 未晋级拒绝），commit 由服务端固定；要改代码先
+  `finboard_research_code_submit` / `rollback`，不要在 payload 里塞 Python
+  （所有 action 的 `code`/`module`/`expression` 等键一律 `code_channel_forbidden`）。
+- `validation_experiment.unseal` 已揭盲（`final_test_unsealed=true`）返回
+  conflict（`already_unsealed`），揭盲不可重做；同 `operation_id` 重放返回原
+  job，不会误报已揭盲。新证据请新建实验 + `supersedes_id`。
+- 读取：`finboard_topic_read(view=artifacts)` 或 `view=context.experiment_links`；
+  OOS 先看 `oos_outcome`，再看 `status`、`trial_budget{used,limit}`、
+  `final_test_unsealed`，以及 join 出的最近揭盲任务
+  `unseal_job_id/unseal_job_status/unseal_job_error/unseal_job_pending` 与
+  `evidence_gaps`（`no_trials` / `final_test_not_unsealed` / `oos_inconclusive` /
+  `trial_summary_oversized` / `status_not_terminal` / `run_not_created` /
+  `unseal_job_failed|interrupted|cancelled`）。排队中的揭盲任务不要重复入队。
+- `operation_id` 在 run 链接与动作回执之间共享：同一键先绑定运行再用于非 run 动作
+  返回 conflict（`operation_id_bound`），不会落到 `link_conflict`。
+- 失败/拒绝/中断与成功同列展示；动作永不自动触发，保存课题或追加 plan/review
+  轮次不会创建 run/job。
 
 ## finboard_data_backfill_*(✅ #511:2 只读 + 2 写)
 

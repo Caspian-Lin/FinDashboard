@@ -2574,6 +2574,46 @@ class ResearchTopicLinkModel(Base, IdMixin):
     )
 
 
+class ResearchTopicActionReceiptModel(Base, IdMixin):
+    """Topic action receipt -- lost-receipt idempotency for #516 actions.
+
+    A link is unique on ``(topic, entity_type, entity_id)``, so a second action on
+    the *same* artifact (e.g. ``validation_experiment.add_trial`` twice) cannot be
+    anchored on the link's ``operation_id``. This append-only receipt table is the
+    per-request anchor instead: ``UNIQUE(topic_id, operation_id)`` means a replayed
+    ``operation_id`` returns the original result instead of executing again.
+
+    The row is written in the same transaction as the artifact/job, the link and
+    the audit event, so a crash cannot leave a receipt without its artifact (or
+    vice versa). ``result_summary`` stores only the small response projection
+    (ids/status/created flags), never artifact bodies or code.
+    """
+
+    __tablename__ = "research_topic_action_receipts"
+
+    topic_id: Mapped[str] = mapped_column(String(32), index=True)
+    operation_id: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(48))
+    entity_type: Mapped[str] = mapped_column(String(32))
+    entity_id: Mapped[str] = mapped_column(String(64), index=True)
+    job_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    result_code: Mapped[str] = mapped_column(String(64))
+    result_summary: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "topic_id",
+            "operation_id",
+            name="uq_research_topic_action_receipts_topic_operation",
+        ),
+        Index("ix_research_topic_action_receipts_entity", "entity_type", "entity_id"),
+    )
+
+
 class ResearchMemoryModel(Base, IdMixin):
     """研究长期记忆 / 研究笔记持久化(issue #110)。
 

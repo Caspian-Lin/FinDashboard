@@ -100,7 +100,7 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_topic_read",
-        description="分页课题/轮次,默认20最多50;无topic_id列课题(可按status筛选、sort=updated|created),有ID读取详情,entries=true读轮次和引用目录,has_more按offset续页。view=context读有界续接上下文(≤20轮、≤10引用核验、≤64KiB,截断时excerpted=true);view=branches按分支聚合;view=refs逐条核验最近轮次引用(每次≤20条,offset续页);entry_id按精确RE-ID读单条全文与checksum,跨课题404。课题是持续锚点,工作摘要不是canonical结论。",
+        description="分页课题/轮次,默认20最多50;无topic_id列课题(可按status筛选、sort=updated|created),有ID读取详情,entries=true读轮次和引用目录,has_more按offset续页。view=context读有界续接上下文(≤20轮、≤10引用核验、≤64KiB,截断时excerpted=true;含experiment_links与entry_types,轮次带entry_type);view=branches按分支聚合;view=refs逐条核验最近轮次引用(每次≤20条,offset续页);view=artifacts读因子实验/沙箱运行/OOS实验链接(≤50),OOS先看oos_outcome再看status,并列trial_budget/final_test_unsealed/evidence_gaps;entry_id按精确RE-ID读单条全文与checksum,跨课题404。课题是持续锚点,工作摘要不是canonical结论。",
     )
     async def read(
         topic_id: str | None = None,
@@ -134,7 +134,7 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_topic_write",
-        description="结构化课题create/draft_create/update/activate/transition/append。draft_create只需title/question生成draft;activate需topic_id+expected_revision+payload.goal(可带summary/open_questions/next_step)完成draft→active;transition的payload.action=pause/resume/close/reopen/discard,close/reopen/discard须reason,全部需expected_revision。更新需expected_revision,追加需幂等键;create/append可带idempotency_key,同键同内容返回原记录(created=false)。非法状态转移409等价conflict(附allowed/current),版本冲突附current_revision/changed_fields。entry_type=round记录尝试,evidence组织已有运行/记忆/实验的精确source_refs,不改写原产物。只保存记录,不运行研究、不接受正式结论。例子见tools.md与topic-organization.md。",
+        description="结构化课题create/draft_create/update/activate/transition/append。draft_create只需title/question生成draft;activate需topic_id+expected_revision+payload.goal(可带summary/open_questions/next_step)完成draft→active;transition的payload.action=pause/resume/close/reopen/discard,close/reopen/discard须reason,全部需expected_revision。更新需expected_revision,追加需幂等键;create/append可带idempotency_key,同键同内容返回原记录(created=false)。非法状态转移409等价conflict(附allowed/current),版本冲突附current_revision/changed_fields。entry_type=round记录尝试,evidence组织已有运行/记忆/实验的精确source_refs,plan只记录设计(不执行,outcome须completed),review复核结论须带document_ref(相对docs/research的.md路径+checksum)且证据等级为reviewed_conclusion。只保存记录,不运行研究、不接受正式结论;真正执行走finboard_topic_action。例子见tools.md与topic-organization.md。",
     )
     async def write(
         operation: str,

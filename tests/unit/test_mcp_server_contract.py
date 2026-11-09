@@ -67,6 +67,8 @@ _EXPECTED_TOOLS = {
     "finboard_topic_run_retry",
     "finboard_topic_run_cancel",
     "finboard_run_topics",
+    # #516 课题内白名单动作(因子实验 / 沙箱执行 / OOS)
+    "finboard_topic_action",
     # #124 数据查询工具
     "finboard_instrument_list",
     "finboard_instrument_get",

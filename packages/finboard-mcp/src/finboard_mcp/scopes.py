@@ -190,6 +190,9 @@ TOOL_SCOPES: dict[str, frozenset[Scope]] = {
     "finboard_topic_run_retry": _RUN,
     "finboard_topic_run_cancel": _RUN,
     "finboard_run_topics": _READ,
+    # #516:白名单课题动作(工具级需 research.write;运行类动作由服务端再按
+    # research.run 强制,见 research_topic_artifacts.TOPIC_ACTION_SCOPES)。
+    "finboard_topic_action": _WRITE,
     # ---- 模拟盘(#127/#139;simulation_* 隔离表) ----
     "finboard_sim_account_list": _READ,
     "finboard_sim_account_get": _READ,

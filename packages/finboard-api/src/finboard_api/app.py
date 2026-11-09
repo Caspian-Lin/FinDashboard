@@ -50,6 +50,9 @@ from finboard_api.routes import (
 )
 from finboard_api.routes.research_audit import router as research_audit_router
 from finboard_api.routes.research_diagnostics import router as research_diagnostics_router
+from finboard_api.routes.research_topic_actions import (
+    topic_actions_router,
+)
 from finboard_api.routes.research_topic_runs import (
     run_links_router,
     topic_runs_router,
@@ -210,6 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_docs_router)
     app.include_router(research_topics_router)
     app.include_router(topic_runs_router)
+    app.include_router(topic_actions_router)
     app.include_router(run_links_router)
     app.include_router(research_audit_router)
     app.include_router(explanation_router)

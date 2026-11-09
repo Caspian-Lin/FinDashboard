@@ -304,12 +304,15 @@ def _mcp_operation_context(
     """当前 MCP 调用的服务端身份(#518):客户端 ID 来自 #517 凭据解析。
 
     ``operation_id`` 由 #515 课题发起工具显式传入,用于响应丢失后的幂等找回。
+    #516:已授予作用域随上下文下传,供 per-action 强制(``research.write`` /
+    ``research.run``)判断;MCP 通道缺 scopes 时按 fail-closed 拒绝。
     """
 
     identity = getattr(app, "identity", None) or current_identity()
     return ResearchOperationContext.for_mcp(
         client_id=identity.client_id if identity is not None else None,
         operation_id=operation_id,
+        scopes=identity.scopes if identity is not None else None,
     )
 
 

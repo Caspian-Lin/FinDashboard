@@ -35,6 +35,17 @@ draft --discard(原因)--> closed
 5. `finboard_topic_write(operation=append)` 使用 `entry_type=evidence` 归档已有证据；记录为什么有关、哪些仍缺证据，以及原记忆的历史日期/状态。每批最多30个引用，超过时分批，各用稳定幂等键。
 6. `finboard_topic_read(topic_id=...,entries=true)` 或 `entry_id=RE-...` 精确读取单条全文与 checksum（跨课题 ID 返回 404）验证归档；返回 has_more 时按 offset 续页，不只读第一页就声称目录完整。选择与本次问题有关的轮次，不把全量长文塞入上下文。
 7. 后续真实研究追加 `entry_type=round`；目标或工作摘要更新用 `operation=update`，先读最新 revision。`update` 只改内容、**不能改状态**（显式传不同 status 会被拒绝，须走 `transition`）；草稿可用 update 编辑 title/question/summary/open_questions/next_step，但不能带 goal（须走 `activate`）。目标内容改动必须使用新 goal.version，不能覆盖旧门槛。暂停/继续/收束/重开用 `operation=transition` 并写原因。
+8. #516 起课题条目分三层：`entry_type=plan` 只记录设计（因子公式/窗口/方向/预注册假设/试验预算），不执行且 `outcome` 必须 `completed`；`entry_type=round` 记录执行后的尝试；`entry_type=review` 记录复核结论并**必须**带 `document_ref`（**相对 `docs/research`** 的 `.md` 路径，如 `ROADMAP.md` / `rounds/2026-11-09-x.md`，+ sha256 checksum），证据等级为 `reviewed_conclusion`。真正执行只走 `finboard_topic_action`（白名单动作，见下），保存计划/复核不会创建任何 run 或 job。
+
+## 课题内执行动作（#516）
+
+`finboard_topic_action` 与 REST `POST /api/research/topics/{id}/actions` 同源：`factor_experiment.create`（登记因子实验，不执行）、`code_run.execute`（只执行已登记 `research_code_artifacts`，commit 服务端固定）、`validation_experiment.create` / `add_trial`（元数据写）、`validation_experiment.unseal`（一次性揭盲入队）、`run.submit` / `run.replay`（委托 #515）。共同前置是课题 `active` 且 `goal_version` 匹配；每个动作在同一事务写产物/任务 + 不可变 `research_topic_links` + 研究审计，`operation_id` 可找回原链接（跨课题冲突）。
+
+```json
+{"topic_id":"RT-<ID>","action":"code_run.execute","goal_version":"<当前目标版本>","operation_id":"OP-<唯一>","payload":{"kind":"factor","artifact_id":"RC-<已登记>","dataset_release_ids":["<发布ID>"],"decision_at":"2024-06-03T15:00:00+08:00"}}
+```
+
+**不要**在 payload 里传 Python、模块路径或表达式（服务端直接 422 `code_channel_forbidden`）；代码只经 `finboard_research_code_submit` 登记。已揭盲实验再次 `unseal` 返回 conflict（`already_unsealed`），`final_test_unsealed` 不会被改写。分支/复核续接用 `finboard_topic_read(view=context|artifacts)`：OOS 先读 `oos_outcome`，再看 `status`、`trial_budget{used,limit}`、`final_test_unsealed` 与 `evidence_gaps`。
 
 写操作受 MCP readonly_only 拒绝，创建者由服务器固定；创建/追加/更新/转移课题都不启动回测、模拟或实盘。版本冲突先重新读取并合并，Web 侧可“仅保留我的说明”追加轮次，而不是覆盖对方内容。
 
