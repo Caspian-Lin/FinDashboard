@@ -628,6 +628,22 @@ async def test_code_run_execute_requires_registered_artifact(engine: AsyncEngine
         assert link.entity_id == job.job_id
     assert len(await _audit_rows(engine, "topic.action.code_run.execute")) == 1
 
+    # Lost-receipt retry: the same operation_id returns the original link/job.
+    async with session_factory(engine)() as session:
+        replay = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="code_run.execute",
+            goal_version="v1",
+            payload=_code_run_payload(artifact.artifact_id, symbols=["600000.SH"]),
+            ctx=_ctx("OP-516-run"),
+            sandbox_enabled=True,
+        )
+    assert replay["created"] is False
+    assert replay["entity_id"] == result["entity_id"]
+    assert await _count(engine, BackgroundJobModel) == 1
+    assert await _count(engine, ResearchTopicLinkModel) == 1
+
 
 async def test_code_run_execute_rejects_unknown_or_retired_artifact(
     engine: AsyncEngine,

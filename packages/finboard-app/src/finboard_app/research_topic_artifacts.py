@@ -33,7 +33,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_app.background_jobs import enqueue_job_core
+from finboard_app.background_jobs import enqueue_job_core, payload_checksum
 from finboard_app.research_audit import ResearchAuditEvent, research_audit_recorder
 from finboard_app.research_operation import (
     ResearchConflictError,
@@ -458,10 +458,9 @@ async def _execute_code_run(
         job_payload["symbols"] = list(data.symbols)
     if data.params is not None:
         job_payload["params"] = data.params
-    idempotency_key = (
-        f"research_code_run:{artifact.commit[:12]}:"
-        f"{','.join(data.dataset_release_ids)}:{data.decision_at.isoformat()}"
-    )
+    # Content-addressed: symbols/params/artifact/decision_at are all part of the
+    # digest, so two materially different executions never collapse into one job.
+    idempotency_key = f"research_code_run:{payload_checksum(job_payload)[:40]}"
     try:
         job_row, created = await enqueue_job_core(
             session,
