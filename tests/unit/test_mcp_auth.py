@@ -145,3 +145,181 @@ async def test_empty_token_rejects_all(wrapped) -> None:
     responses, called = await _run_request(wrapped, scope)
     assert called is False
     assert responses[0]["status"] == 401
+
+
+# ---------------------------------------------------------------------------
+# issue #517:按客户端凭据解析身份(注入 resolver,不依赖 DB)
+# ---------------------------------------------------------------------------
+
+
+def _identity(client_id: str = "MC-0123456789ab", scopes: tuple[str, ...] = ("research.read",)):
+    from finboard_mcp.identity import McpClientIdentity
+
+    return McpClientIdentity(
+        client_id=client_id, name="pytest", scopes=frozenset(scopes)
+    )
+
+
+async def _run_capture(
+    wrapped: BearerTokenMiddleware, scope: dict[str, object]
+) -> tuple[list[dict[str, object]], dict[str, object], bool]:
+    """发起一次 ASGI 请求,捕获 inner app 收到的 scope state 与是否被调用。"""
+    captured: dict[str, object] = {}
+    called = {"inner": False}
+
+    async def inner_app(scope, receive, send):
+        called["inner"] = True
+        captured.update(scope.get("state") or {})
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    wrapped._app = inner_app
+    responses: list[dict[str, object]] = []
+
+    async def send(msg):
+        responses.append(msg)
+
+    async def receive() -> None:
+        return None
+
+    await wrapped(scope, receive, send)
+    return responses, captured, called["inner"]
+
+
+async def test_resolver_identity_written_to_scope_state() -> None:
+    """resolver 命中的身份写入 scope["state"],工具入口 app_context 可读取。"""
+    expected = _identity()
+
+    async def resolver(token: str):
+        return expected if token == "client-token" else None
+
+    async def _passthrough(scope, receive, send):
+        pass
+
+    wrapped = BearerTokenMiddleware(_passthrough, resolver=resolver)
+    scope = _make_scope("/mcp", [(b"authorization", b"Bearer client-token")])
+    responses, captured, called = await _run_capture(wrapped, scope)
+    assert called is True
+    assert responses[0]["status"] == 200
+    assert captured["mcp_identity"] is expected
+
+
+async def test_resolver_miss_without_legacy_token_returns_401() -> None:
+    async def resolver(token: str):
+        return None
+
+    async def _passthrough(scope, receive, send):
+        pass
+
+    wrapped = BearerTokenMiddleware(_passthrough, resolver=resolver)
+    scope = _make_scope("/mcp", [(b"authorization", b"Bearer unknown")])
+    responses, _, called = await _run_capture(wrapped, scope)
+    assert called is False
+    assert responses[0]["status"] == 401
+
+
+async def test_legacy_token_identity_has_wildcard() -> None:
+    """旧 FINBOARD_MCP_AUTH_TOKEN 兼容:合成 MC-legacy / scopes=["*"]。"""
+    from finboard_mcp.identity import McpClientIdentity
+
+    async def _passthrough(scope, receive, send):
+        pass
+
+    wrapped = BearerTokenMiddleware(_passthrough, token=TOKEN)
+    scope = _make_scope("/mcp", [(b"authorization", f"Bearer {TOKEN}".encode())])
+    _responses, captured, called = await _run_capture(wrapped, scope)
+    assert called is True
+    identity = captured["mcp_identity"]
+    assert isinstance(identity, McpClientIdentity)
+    assert identity.client_id == "MC-legacy"
+    assert identity.scopes == frozenset({"*"})
+
+
+async def test_wrong_and_unknown_tokens_share_401_body() -> None:
+    """错误密钥与不存在的客户端返回完全相同的 401,不泄露客户端存在性。"""
+
+    async def resolver(token: str):
+        return _identity() if token == "right" else None
+
+    async def _passthrough(scope, receive, send):
+        pass
+
+    wrapped = BearerTokenMiddleware(_passthrough, resolver=resolver)
+    wrong, _, _ = await _run_capture(
+        wrapped, _make_scope("/mcp", [(b"authorization", b"Bearer wrong")])
+    )
+    unknown, _, _ = await _run_capture(
+        wrapped, _make_scope("/mcp", [(b"authorization", b"Bearer MC-does-not-exist")])
+    )
+    assert wrong == unknown
+    assert wrong[0]["status"] == 401
+
+
+async def test_resolver_exception_fails_closed_with_401() -> None:
+    """resolver 抛错(DB 不可达等)不得放行,回 401。"""
+
+    async def resolver(token: str):
+        raise RuntimeError("db down")
+
+    async def _passthrough(scope, receive, send):
+        pass
+
+    wrapped = BearerTokenMiddleware(_passthrough, resolver=resolver)
+    responses, _, called = await _run_capture(
+        wrapped, _make_scope("/mcp", [(b"authorization", b"Bearer x")])
+    )
+    assert called is False
+    assert responses[0]["status"] == 401
+
+
+def test_app_context_binds_identity_from_request_state() -> None:
+    """app_context 从 MCP request_context.request.state 取身份并写入 contextvar。"""
+    from types import SimpleNamespace
+
+    from finboard_mcp.context import app_context
+    from finboard_mcp.identity import (
+        current_identity,
+        reset_current_identity,
+        set_current_identity,
+    )
+
+    expected = _identity()
+    fake_app = object()
+    fake_ctx = SimpleNamespace(
+        request_context=SimpleNamespace(
+            lifespan_context=fake_app,
+            request=SimpleNamespace(state=SimpleNamespace(mcp_identity=expected)),
+        )
+    )
+    token = set_current_identity(None)
+    try:
+        result = app_context(fake_ctx)  # type: ignore[arg-type]
+        assert result is fake_app
+        assert current_identity() is expected
+    finally:
+        reset_current_identity(token)
+
+
+def test_app_context_without_request_clears_identity() -> None:
+    """无 HTTP 请求且无默认身份时写 None,不残留上一次调用的身份。"""
+    from types import SimpleNamespace
+
+    from finboard_mcp.context import app_context
+    from finboard_mcp.identity import (
+        current_identity,
+        reset_current_identity,
+        set_current_identity,
+    )
+    from finboard_mcp.scopes import reset_scope_policy
+
+    reset_scope_policy()
+    token = set_current_identity(_identity())
+    fake_ctx = SimpleNamespace(
+        request_context=SimpleNamespace(lifespan_context=object(), request=None)
+    )
+    try:
+        app_context(fake_ctx)  # type: ignore[arg-type]
+        assert current_identity() is None
+    finally:
+        reset_current_identity(token)
+
