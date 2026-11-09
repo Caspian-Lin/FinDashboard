@@ -108,6 +108,19 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 缺失特征与所需发布 kind —— 不再拖到执行期才报「identity 节点缺少数据源」。
 研究数据发布的 manifest 冻结 `derived_features`(可派生特征集合),旧发布
 按 kind 回退判定。
+- 错误码(#513,与 REST `POST /api/research/runs` 共用同一提交服务,按
+  `error.kind` 判定,不要按文本分支):
+  `invalid_argument`(422:门控失败 / 候选池为空 / 快照或序列缺失 /
+  `execution_config`·`validation_config` 非空)、`not_found`(404:策略规格
+  版本不存在)、`conflict`(409:未发布规格 / 同幂等键对应不同 manifest /
+  源 run 不可重放 / data_scope 预览漂移须重新预览)、`permission_denied`
+  (403:只读客户端)、`unavailable`(503,可重试)。细业务码以「(code)」后缀
+  附在 `error.message` 尾部,如 `(scope_release_drift)` /
+  `(strategy_not_published)` / `(universe_empty)` / `(policy_override_invalid)`。
+  完整契约见 `docs/research/run-submission-contract.md`。
+- 幂等(#513):同 `idempotency_key` 必须对应同一份冻结 manifest,命中即返回
+  原 run(已有 job_id 不补建);跨 REST / MCP 同键同样命中同一 `RR-`。终态
+  失败后**不要重用旧键**(普通唯一索引不允许),走 `finboard_run_replay`。
 - 参数:`payload: dict`(JSON 对象,模板与取值来源,必填标 *):
   - `idempotency_key`*: 8-128 字符去重键;重提交返回同一 run
   - `strategy_id`*: 已发布策略规格 id(`finboard_strategy_list` / registry 查询)
