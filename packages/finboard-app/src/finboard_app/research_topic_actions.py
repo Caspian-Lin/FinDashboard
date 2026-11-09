@@ -513,8 +513,8 @@ async def start_topic_run(
             params=params,
             idempotency_key=idempotency_key,
         )
-        await session.commit()
         join = await link_repo.get_run_link(topic_id, run_id)
+        await session.commit()
         return _start_response(
             join,
             topic_id=topic_id,
@@ -750,8 +750,8 @@ async def retry_topic_run(
             idempotency_key=idempotency_key,
             extra_correlation={"replay_of_run_id": run_id},
         )
-        await session.commit()
         join = await link_repo.get_run_link(topic_id, new_run_id)
+        await session.commit()
         return _retry_response(
             join, created=bool(outcome.created or link_created),
             goal_version=original.goal_version,
@@ -840,9 +840,11 @@ async def cancel_topic_run(
             params=params,
             idempotency_key=None,
         )
-        await session.commit()
         fresh = await link_repo.get_run_link(topic_id, run_id)
-        return _link_payload(fresh) if fresh is not None else {}
+        if fresh is None:  # pragma: no cover - 防御性(行不可被本事务删除)
+            raise ResearchNotFoundError("链接不存在", code="link_not_found")
+        await session.commit()
+        return _link_payload(fresh)
     except Exception as exc:
         await _record_failure(
             operation=operation,
@@ -933,10 +935,10 @@ async def link_run_to_topic(
             params=params,
             idempotency_key=None,
         )
-        await session.commit()
         join = await link_repo.get_run_link(topic_id, run_id)
         if join is None:  # pragma: no cover - 防御性
             raise ResearchNotFoundError("链接创建后不可见", code="link_not_found")
+        await session.commit()
         payload = _link_payload(join)
         payload["created"] = created
         return payload

@@ -361,7 +361,7 @@ async def topic_context(
         topic_id, limit=10
     )
     active_links: list[dict[str, Any]] = []
-    for link_row in link_rows:
+    for link_row in link_rows[:10]:
         state = derive_link_state(
             link_row.run.status if link_row.run is not None else None,
             link_row.job.status if link_row.job is not None else None,
