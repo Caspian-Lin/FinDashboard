@@ -1,4 +1,4 @@
-﻿# 03 外部 OpenCode(已实测)
+# 03 外部 OpenCode(已实测)
 
 `opencode v2.0.32`,Windows,独立于 FinBoard 内置托管容器(那是 #520 要退役的
 `finboard-opencode`)。

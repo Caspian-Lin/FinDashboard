@@ -228,7 +228,9 @@ class TestDocumentedCallExamples:
                 schema = tools[tool].input_schema or {}
                 required = set(schema.get("required") or [])
                 for (extra_tool, operation), extra in _EXTRA_REQUIRED.items():
-                    if extra_tool == tool and f'operation="{operation}"' in body:
+                    if extra_tool == tool and re.search(
+                        rf"""operation\s*=\s*['"]{re.escape(operation)}['"]""", body
+                    ):
                         required |= extra
                 missing = sorted(required - present)
                 assert not missing, (

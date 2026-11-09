@@ -52,3 +52,15 @@ POST /mcp HTTP/1.1 200 OK      # OpenCode append → RE-dacddc0cc903469faac1c34d
 
 审计与访问日志只记录工具名 / caller / 参数脱敏摘要(`payload` 被截断),不含
 token、也不含完整正文 —— 与 #518「只存脱敏摘要」一致。
+
+## 分页调用（只读客户端，2026-11-10 01:44）
+
+同一 `MC-308e5eccc3bd`（`codex-readonly`）对 `finboard.workspace.read` 连发三次
+`entries=true, limit=1, offset=0/1/2`，`has_more` 依次 true/true/false。服务端访问
+日志可对上 `caller` 与 `OP-` 组合，证明分页确实走服务端（不是客户端缓存）：
+
+```text
+01:44:29 OP-5796f246f9c5 caller=MC-308e5eccc3bd offset=0 status=ok
+01:44:32 OP-fbc4a6ff614f caller=MC-308e5eccc3bd offset=1 status=ok
+01:44:35 OP-5cfe2b483489 caller=MC-308e5eccc3bd offset=2 status=ok
+```
