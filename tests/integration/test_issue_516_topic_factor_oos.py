@@ -1045,6 +1045,58 @@ async def test_rest_action_surface_has_no_code_channel(
     # is covered by tests/unit/test_issue_516_topic_factor_oos_unit.py.
 
 
+async def test_artifact_links_track_failed_and_interrupted(engine: AsyncEngine) -> None:
+    """Failures/interruptions stay visible on the link instead of being hidden."""
+
+    await _make_snapshot(engine)
+    artifact = await _make_artifact(engine)
+    topic = await _create_topic(engine)
+    async with session_factory(engine)() as session:
+        factor = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="factor_experiment.create",
+            goal_version="v1",
+            payload=_factor_payload(),
+            ctx=_ctx("OP-516-failed"),
+        )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE factor_experiments SET status='failed', failure_reason='boom' "
+                "WHERE experiment_id=:experiment_id"
+            ),
+            {"experiment_id": factor["entity_id"]},
+        )
+    async with session_factory(engine)() as session:
+        code = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="code_run.execute",
+            goal_version="v1",
+            payload=_code_run_payload(artifact.artifact_id),
+            ctx=_ctx("OP-516-interrupted"),
+            sandbox_enabled=True,
+        )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE background_jobs SET status='interrupted', "
+                "error_summary='worker lost' WHERE job_id=:job_id"
+            ),
+            {"job_id": code["job_id"]},
+        )
+    async with session_factory(engine)() as session:
+        page = await workspace_read(
+            session, topic_id=topic["topic_id"], view="artifacts", limit=10
+        )
+    by_type = {item["entity_type"]: item for item in page["items"]}
+    assert by_type["factor_experiment"]["state"] == "failed"
+    assert by_type["factor_experiment"]["failure_reason"] == "boom"
+    assert by_type["code_run"]["state"] == "interrupted"
+    assert by_type["code_run"]["evidence_gaps"] == ["run_not_created"]
+
+
 async def test_actions_never_write_live_tables(engine: AsyncEngine) -> None:
     await _make_snapshot(engine)
     artifact = await _make_artifact(engine)
