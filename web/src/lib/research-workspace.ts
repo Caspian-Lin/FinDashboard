@@ -1,4 +1,5 @@
 import { fetchJSON } from "./api";
+import type { ResearchRunQueueIn } from "./research";
 
 export interface EvidenceRef {
   kind: string;
@@ -116,6 +117,7 @@ export interface ActiveLink {
   entity_id: string;
   job_id?: string | null;
   state: string;
+  goal_version?: string;
 }
 export interface TopicContext {
   topic: {
@@ -259,6 +261,79 @@ export interface ActivateInput {
   next_step?: string;
   reason?: string;
 }
+/** A link from a topic/goal version to a research artifact (#515). */
+export interface TopicRunLink {
+  link_id: number;
+  topic_id: string;
+  goal_version: string;
+  entry_id: string | null;
+  entity_type: string;
+  entity_id: string;
+  run_id: string;
+  job_id: string | null;
+  operation_id: string | null;
+  created_by: string;
+  created_at: string | null;
+  /** Join-derived: queued/running/succeeded/failed/cancelled/interrupted. */
+  state: string;
+  run_status: string | null;
+  job_status: string | null;
+  progress_done: number | null;
+  progress_total: number | null;
+  phase: string | null;
+  job_attempt: number | null;
+  job_max_attempts: number | null;
+  error_code: string | null;
+  error_summary: string | null;
+  result_checksum: string | null;
+  manifest_checksum: string | null;
+  run_created_at: string | null;
+  run_completed_at: string | null;
+  deep_link: string;
+}
+export interface TopicRunPage {
+  items: TopicRunLink[];
+  has_more: boolean;
+  next_cursor: string | null;
+  limit: number;
+}
+export interface TopicRunStartInput extends ResearchRunQueueIn {
+  goal_version: string;
+  operation_id?: string;
+  /** Content-addressed factor series (FS-), optional. */
+  factor_series_ids?: string[];
+}
+export interface TopicRunStartReceipt {
+  topic_id: string;
+  goal_version: string;
+  run_id: string;
+  job_id: string | null;
+  operation_id: string | null;
+  created: boolean;
+  status: string | null;
+  manifest_checksum: string | null;
+  link?: TopicRunLink;
+}
+export interface RunTopicLink {
+  link_id: number;
+  topic_id: string;
+  title: string | null;
+  topic_status: string;
+  topic_revision: number;
+  goal_version: string;
+  entry_id: string | null;
+  operation_id: string | null;
+  created_by: string;
+  created_at: string | null;
+}
+export interface RunTopicPage {
+  run_id: string;
+  items: RunTopicLink[];
+  count: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  limit: number;
+}
 export const workspaceApi = {
   topics: (offset = 0, status?: string, sort = "updated") =>
     fetchJSON<Page<Topic>>(
@@ -329,6 +404,52 @@ export const workspaceApi = {
   decisions: (id: string, params: Record<string, string> = {}) =>
     fetchJSON<Page<DecisionItem>>(
       `/research/explanation/${encodeURIComponent(id)}/decisions?${new URLSearchParams(params)}`,
+    ),
+};
+
+export const topicRunApi = {
+  start: (topicId: string, body: TopicRunStartInput) =>
+    fetchJSON<TopicRunStartReceipt>(`/research/topics/${encodeURIComponent(topicId)}/runs`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  list: (topicId: string, limit = 20, cursor?: string) =>
+    fetchJSON<TopicRunPage>(
+      `/research/topics/${encodeURIComponent(topicId)}/runs?limit=${limit}${
+        cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+      }`,
+    ),
+  get: (topicId: string, runId: string) =>
+    fetchJSON<TopicRunLink>(
+      `/research/topics/${encodeURIComponent(topicId)}/runs/${encodeURIComponent(runId)}`,
+    ),
+  retry: (
+    topicId: string,
+    runId: string,
+    body: { idempotency_key: string; requested_by: string; operation_id: string },
+  ) =>
+    fetchJSON<TopicRunStartReceipt>(
+      `/research/topics/${encodeURIComponent(topicId)}/runs/${encodeURIComponent(runId)}/retry`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  cancel: (topicId: string, runId: string) =>
+    fetchJSON<TopicRunLink>(
+      `/research/topics/${encodeURIComponent(topicId)}/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST" },
+    ),
+  linkRun: (
+    runId: string,
+    body: { topic_id: string; goal_version: string; operation_id?: string },
+  ) =>
+    fetchJSON<TopicRunLink & { created: boolean }>(
+      `/research/runs/${encodeURIComponent(runId)}/link`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  runTopics: (runId: string, limit = 50, cursor?: string) =>
+    fetchJSON<RunTopicPage>(
+      `/research/runs/${encodeURIComponent(runId)}/topics?limit=${limit}${
+        cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+      }`,
     ),
 };
 

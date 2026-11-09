@@ -84,7 +84,7 @@ class ResearchRunStore(Protocol):
 
     async def list_artifact_digests(self, run_id: str) -> list[ArtifactDigest]: ...
 
-    async def checkpoint(self) -> None: ...
+    async def checkpoint(self, *, commit: bool = True) -> None: ...
 
 
 class InMemoryResearchRunStore:
@@ -242,7 +242,7 @@ class InMemoryResearchRunStore:
             for item in await self.list_artifacts(run_id)
         ]
 
-    async def checkpoint(self) -> None:
+    async def checkpoint(self, *, commit: bool = True) -> None:
         return None
 
 

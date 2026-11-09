@@ -291,7 +291,7 @@ class SessionPerOperationResearchRunStore:
 
         return await self._with_store("list_artifact_digests", op)
 
-    async def checkpoint(self) -> None:
+    async def checkpoint(self, *, commit: bool = True) -> None:
         """no-op:逐操作短会话已即时持久化(原批量提交边界消失)。"""
         return None
 

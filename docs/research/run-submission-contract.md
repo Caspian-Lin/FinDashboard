@@ -204,7 +204,31 @@ MCP 的**错误文案 / `code`** 可能变化；HTTP 状态码与 MCP `error.kin
 - 联合发布顺序：`dataset_release_ids` 把研究数据发布排在 bars 前面时，两通道都按
   bars 主发布评估（§7.1）。
 
-## 9. 边界
+## 9. 课题发起（#515）
+
+课题发起不是第二套入队实现：`finboard_app.research_topic_actions.start_topic_run`
+在课题行锁下复用本文件的 `ResearchRunSubmissionService.submit`（只 flush，不
+commit），随后插入不可变的 `research_topic_links` 行并写 `topic.run.start` 审计，
+最后执行**唯一一次** `commit()`。因此 run + background_job + 课题链接 + 审计
+要么一起可见，要么一起回滚；`POST /api/research/runs` 旧入口的行为、manifest
+checksum 与幂等语义零变化。
+
+- 前置条件：课题 `status=active` 且声明的 `goal_version` 等于课题当前目标版本，
+  否则 409 `topic_not_active` / `goal_version_mismatch`；
+- 幂等：请求自带 `operation_id`（部分唯一索引）是响应丢失的找回键，同键重放
+  返回原 `RR-`/`BJ-`（HTTP 200，`created=false`），跨课题复用 409
+  `operation_id_bound`；链接一旦创建不可变，读取状态由 join run/job 派生；
+- 重试：`POST /topics/{id}/runs/{run_id}/retry` 必须换新 `operation_id`，走既有
+  replay（新 `RR-` + `replay_of_run_id` + 新链接）；既有 `REPLAYABLE_SOURCE_STATUSES`
+  守卫不变（completed/interrupted 可重放，cancelled/failed 仍拒绝）；
+- 后来关联：`POST /api/research/runs/{run_id}/link` 幂等追加链接，不修改 run；
+- 课题内取消：`ResearchRunCoordinator.cancel(..., commit=False)` 让 run 状态迁移、
+  job `request_cancel` 与 `topic.run.cancel` 审计共用调用方唯一一次 commit；既有
+  REST/MCP 取消路径仍用默认 `commit=True`，行为不变；
+- 审计：成功写与业务同事务，`correlation` 含 `topic_id`/`goal_version`/`run_id`/
+  `job_id`/`operation_id`；拒绝/失败独立会话补记，不掩盖原错误。
+
+## 10. 边界
 
 - 只写 `research_runs` / `background_jobs`（研究域），不触实盘
   `orders` / `fills` / `positions` / `audit_logs`；

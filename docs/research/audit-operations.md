@@ -64,6 +64,10 @@
 | `topic.activate` | `workspace_write(activate)` | web / mcp | 同上 |
 | `topic.transition` | `workspace_write(transition)` | web / mcp | `result_code=<action>`；非法转移 → `illegal_transition` |
 | `topic.append` | `workspace_write(append)` | web / mcp | `correlation.entry_id` |
+| `topic.run.start` | `research_topic_actions.start_topic_run`（REST `POST /topics/{id}/runs`、MCP `finboard_topic_run_start`） | web / mcp | 与 run+job+link 同事务；`correlation` 含 `topic_id/goal_version/run_id/job_id/operation_id`；拒绝 `rejected` |
+| `topic.run.retry` | `research_topic_actions.retry_topic_run` | web / mcp | 新运行与新链接同事务；`correlation.replay_of_run_id` 指向旧 run |
+| `topic.run.cancel` | `research_topic_actions.cancel_topic_run`（代理既有取消，`checkpoint(commit=False)`） | web / mcp | run 状态迁移 + job `request_cancel` + 审计同一事务；终态 → `rejected` + `run_terminal` |
+| `topic.run.link` | `research_topic_actions.link_run_to_topic`（REST `POST /runs/{id}/link`） | web | 幂等追加链接；不改 run/课题 |
 | `experiment.unseal` | MCP `finboard_validation_experiment_run`（拒绝/入队）+ `ValidationExperimentExecutor`（worker 揭盲） | mcp / worker | 已揭盲 → `rejected` + `already_unsealed`；揭盲成功 → `succeeded` + `unsealed`（worker 侧 `actor=worker:validation_experiment`） |
 | `research_code.submit` | MCP `finboard_research_code_submit` | mcp | 与 artifact 行同事务；`draft_created` |
 | `research_code.promote` | MCP `finboard_research_code_promote` | mcp | 晋级门失败 → `rejected` + `promotion_gate_failed`；成功 `promoted` |

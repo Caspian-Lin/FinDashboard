@@ -98,7 +98,7 @@ def _identity_from_request(ctx: Context) -> McpClientIdentity | None:
 def app_context(ctx: Context) -> McpAppContext:
     """从 MCP ``Context`` 取出 lifespan 组装的依赖,并绑定本次调用的身份。
 
-    每次工具调用都会执行(149 个工具全部经此入口),因此 contextvar 总是被
+    每次工具调用都会执行(155 个工具全部经此入口),因此 contextvar 总是被
     覆盖,不会残留上一次调用的身份:
 
     * HTTP 请求(``request_context.request`` 存在):只信任中间件写入

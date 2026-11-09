@@ -35,10 +35,20 @@ class ResearchTopicRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get(self, topic_id: str, *, lock: bool = False) -> ResearchTopicModel:
+    async def get(
+        self,
+        topic_id: str,
+        *,
+        lock: bool = False,
+        populate_existing: bool = False,
+    ) -> ResearchTopicModel:
         stmt = select(ResearchTopicModel).where(ResearchTopicModel.topic_id == topic_id)
+        # A row lock in a concurrent writer must refresh the identity map; callers
+        # may force the same refresh without a lock (read-modify-write helpers).
+        if populate_existing or lock:
+            stmt = stmt.execution_options(populate_existing=True)
         if lock:
-            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+            stmt = stmt.with_for_update()
         row = (await self.session.execute(stmt)).scalar_one_or_none()
         if row is None:
             raise LookupError(f"研究课题不存在: {topic_id}")

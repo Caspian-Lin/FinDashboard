@@ -30,11 +30,12 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-已实现 149 个工具(注册表一致性由测试校验);schema与实际能力以当前运行时为准,数量不证明研究可靠性。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+已实现 155 个工具(注册表一致性由测试校验);schema与实际能力以当前运行时为准,数量不证明研究可靠性。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
 | 查询 / 管理 ResearchRun | `finboard.run.*`(list/get/artifacts 只读 + queue/cancel/replay/lineage 写,7 个) | ✅ #127+#183 | 3 只读 + 4 自主执行 |
+| 从课题发起 / 关联 ResearchRun | `finboard.topic_run.*` + `finboard_run_topics`(6 个) | ✅ #515 | 3 只读 + 3 自主执行 |
 | 记住 / 查询 / 纠正研究记忆 | `finboard.memory.*`(7 个) | ✅ | 直接执行 |
 | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额 | `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`(9 个) | ✅ #124 | 只读 |
 | 全局数据目录(数据集列表/详情/覆盖报告/发布逐标的/引用反查;只读,不触发 sync/publish) | `finboard.data_catalog.*` / `.dataset.release.*`(5 个) | ✅ #509 | 只读 |
@@ -124,7 +125,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | `references/memory.md` | 研究记忆使用规则与生命周期 |
 | `references/system-overview.md` | FinBoard 系统架构概览(包结构 / 模块职责 / 研究 vs 实盘隔离) |
 
-研究上下文入口：`finboard_topic_read/write` 保存课题、目标版本与追加轮次；`finboard_memory_page` 查看旧笔记与纠正链；`finboard_source_check` 核查引用；`finboard_strategy_explain` 与 `finboard_decision_explain` 有界解释冻结规则和实际决策。完整契约见 `references/tools.md`，不得用完成/发布状态代替 OOS 结论。
+研究上下文入口：`finboard_topic_read/write` 保存课题、目标版本与追加轮次；`finboard_topic_run_*` 从 active 课题发起/重放/取消运行并读取 join 派生状态；`finboard_memory_page` 查看旧笔记与纠正链；`finboard_source_check` 核查引用；`finboard_strategy_explain` 与 `finboard_decision_explain` 有界解释冻结规则和实际决策。完整契约见 `references/tools.md`，不得用完成/发布状态代替 OOS 结论。
 
 课题是持续更新的研究锚点，不等于一次run。组织已有运行/记忆/实验用topic_write append的entry_type=evidence及精确source_refs，原产物不搬动、不改写、可被多个课题引用。完整“核查→创建→归档→分页续接→版本更新”例子见只读挂载 `/workspace/docs/research/topic-organization.md`；缺挂载时见references/tools.md的已有证据归档示例。
 

@@ -143,8 +143,18 @@ class ResearchRunRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def checkpoint(self) -> None:
-        await self._session.commit()
+    async def checkpoint(self, *, commit: bool = True) -> None:
+        """Flush pending run changes; ``commit=False`` keeps the caller's tx.
+
+        #515 topic-initiated cancel needs the state transition, the job cancel
+        request and the research audit event in one transaction; the caller owns
+        the single commit. All other callers keep the historical commit.
+        """
+
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
 
     async def create_or_get(
         self,

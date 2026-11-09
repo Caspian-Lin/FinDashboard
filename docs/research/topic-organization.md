@@ -4,11 +4,11 @@
 
 ## 关联语义
 
-课题通过追加轮次的 `source_refs` 组织运行、研究记忆、实验、精确策略版本和文档。一个产物可以被多个课题引用。原来的运行、记忆或实验仍有原 ID、状态、创建时间和内容；关联不修改冻结输入、checksum 或记忆纠正链。
+课题通过追加轮次的 `source_refs` 组织运行、研究记忆、实验、精确策略版本和文档；`#515` 起课题还经不可变的 `research_topic_links` 显式关联 ResearchRun（从课题发起的运行自动建链，已存在的独立运行可后来关联）。一个产物可以被多个课题引用。原来的运行、记忆或实验仍有原 ID、状态、创建时间和内容；关联不修改冻结输入、checksum 或记忆纠正链。
 
 因此，“把已有证据归入新课题”是创建课题并追加证据引用，不是将所有产物改写成唯一的 topic_id。发现误关联时追加 `supersedes_id` 纠正记录，旧记录仍留审计。研究记忆正文有错误时才走原 `finboard_memory_correct`，不能为了归类而改写旧记忆。
 
-当前目录保存在轮次引用中，`finboard_topic_read(entries=true)` 分页读取；`view=branches` 看分支聚合，`view=refs` 逐条核验断链，`view=context` 一次取回有界续接上下文。仍无 run→topic 反向归属 API（#515 链接表落地后提供）。课题工作结论与自动产物事实、canonical 文档分别保留，不能把“归档动作完成”当作“策略通过验证”。
+当前目录保存在轮次引用与运行链接中，`finboard_topic_read(entries=true)` 分页读取；`view=branches` 看分支聚合，`view=refs` 逐条核验断链，`view=context` 一次取回有界续接上下文（含 `active_links`）。`#515` 起用 `finboard_topic_run_list` 读课题运行、`finboard_run_topics` 反查一个 run 被哪些课题引用；关联元数据独立于 manifest，不写回运行或轮次。课题工作结论与自动产物事实、canonical 文档分别保留，不能把“归档动作完成”当作“策略通过验证”。
 
 ## 生命周期与两步建题（#514）
 
