@@ -2522,6 +2522,58 @@ class ResearchTopicEntryModel(Base, IdMixin):
     __table_args__ = (UniqueConstraint("topic_id", "idempotency_key", name="uq_research_topic_entry_key"),)
 
 
+class ResearchTopicLinkModel(Base, IdMixin):
+    """Immutable topic -> research artifact link (#515).
+
+    A row is an exact reference from a topic/goal version to an existing artifact
+    (currently ``research_run``; #516 reuses the same table for its kinds). It is
+    append-only and deliberately carries **no state/error columns**: live run and
+    job state is derived by joining ``research_runs`` / ``background_jobs`` at
+    read time. That is what makes worker restarts, lease reassignments and
+    duplicate completion events idempotent -- there is no link row to rewrite.
+
+    ``operation_id`` (partial unique) is the lost-receipt idempotency key; a
+    replay returns the original ``RR-``/``BJ-``, while reuse across topics is a
+    conflict. No foreign keys, following the #500 topic tables: deleting a run
+    does not cascade-delete history and vice versa.
+    """
+
+    __tablename__ = "research_topic_links"
+
+    topic_id: Mapped[str] = mapped_column(String(32))
+    goal_version: Mapped[str] = mapped_column(String(64))
+    entry_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entity_type: Mapped[str] = mapped_column(String(32))
+    entity_id: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    operation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "topic_id",
+            "entity_type",
+            "entity_id",
+            name="uq_research_topic_links_topic_entity",
+        ),
+        Index(
+            "uq_research_topic_links_operation",
+            "operation_id",
+            unique=True,
+            postgresql_where=sql_text("operation_id IS NOT NULL"),
+        ),
+        Index("ix_research_topic_links_entity", "entity_type", "entity_id"),
+        Index(
+            "ix_research_topic_links_topic_created",
+            "topic_id",
+            sql_text("created_at DESC"),
+        ),
+    )
+
+
 class ResearchMemoryModel(Base, IdMixin):
     """研究长期记忆 / 研究笔记持久化(issue #110)。
 

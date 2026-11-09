@@ -101,6 +101,7 @@ from finboard_persistence.models import (
     ResearchRunModel,
     ResearchStrategySpecModel,
     ResearchSyncBatchModel,
+    ResearchTopicLinkModel,
     ResearchTrialModel,
     SimulationAccountModel,
     SimulationAuditModel,
@@ -157,6 +158,10 @@ from finboard_persistence.research_run_repo import (
     ResearchRunRepository,
 )
 from finboard_persistence.research_sync import ResearchDataSyncService
+from finboard_persistence.research_topic_link_repo import (
+    ResearchTopicLinkConflictError,
+    ResearchTopicLinkRepository,
+)
 from finboard_persistence.session import session_factory
 from finboard_persistence.strategy_spec_repo import (
     ResearchStrategySpecRepository,
@@ -283,6 +288,9 @@ __all__ = [
     "ResearchSuspensionModel",
     "ResearchSyncBatchModel",
     "ResearchSyncBatchRepository",
+    "ResearchTopicLinkConflictError",
+    "ResearchTopicLinkModel",
+    "ResearchTopicLinkRepository",
     "ResearchTrialModel",
     "ResearchTrialRepository",
     "SimulationAccountModel",
