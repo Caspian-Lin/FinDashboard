@@ -57,7 +57,7 @@ description 为准。工具名一律是真实注册名 `finboard_<family>_<opera
 | 记住 / 查询 / 纠正研究记忆 | `finboard_memory_*`(7 个) | read / write |
 | 标的元数据 / 数据集发布 / 缓存 / 质量 / Tushare 配额 | `finboard_instrument_*` / `finboard_dataset_*` / `finboard_data_*` / `finboard_tushare_*` | read |
 | 全局数据目录(数据集 / 覆盖 / 逐标的 / 引用反查,#509) | `finboard_data_catalog_*` / `finboard_data_coverage_get` / `finboard_dataset_release_*` | read |
-| 统一数据范围预览(#510;提交 run 时回填 `resolution_id`) | `finboard_data_scope_preview` | read |
+| 统一数据范围预览(#510;预览返回 `resolution_id`,提交 run 时回填 `data_scope_resolution_id`) | `finboard_data_scope_preview` | read |
 | 共享补数请求(预检 / 提交 / 列表 / 取消,#511) | `finboard_data_backfill_*` | read / data.write |
 | 数据准备(拉取 / 同步 / 发布 / 修复 / ETF) | `finboard_data_*` / `finboard_etf_*` | data.write |
 | 因子目录 / 特征快照 / 因子信号 / 因子实验 | `finboard_factor_*` / `finboard_feature_snapshot_*` | read / write / run |
@@ -158,13 +158,26 @@ description 为准。工具名一律是真实注册名 `finboard_<family>_<opera
 
 每轮研究结束前,三步收尾:
 
-1. **追加课题轮次** —— `finboard_topic_write(operation="append", topic_id="RT-…")`
-   记录目标 / 动作 / 理由 / 精确证据(`entry_type=evidence` + `source_refs`)/
-   置信度 / 下一步与失败或暂停原因。这是**工作记录**,不自动成为结论;写入不
-   启动任何运行。
+1. **追加课题轮次** —— `finboard_topic_write(operation="append", topic_id="RT-…",
+   idempotency_key="round-YYYYMMDD-<slug>", payload={…})`:`payload` 与
+   `idempotency_key` 都是**必填**;`payload` 至少要给 `goal_version` / `objective` /
+   `action` / `rationale`(其余 `outcome` / `conclusion` / `confidence` /
+   `next_step` / `source_refs[]` 按需)。完整形状:
+
+   ```json
+   {"operation": "append", "topic_id": "RT-…", "idempotency_key": "round-20261110-skill-519",
+    "payload": {"entry_type": "evidence", "goal_version": "v1",
+      "objective": "…", "action": "…", "rationale": "…",
+      "outcome": "completed", "conclusion": "…", "confidence": "medium",
+      "next_step": "…",
+      "source_refs": [{"kind": "research_run", "ref_id": "RR-…"}]}}
+   ```
+
+   这是**工作记录**,不自动成为结论;写入不启动任何运行。
 2. **落一条固定模板记忆** ——
-   `finboard_memory_remember(memory_type=insight, tags=["research-round"])`:
-   目标 / 动作 / 证据(产物 ID 表)/ 结论 + 置信度 / 开放问题清单。
+   `finboard_memory_remember(memory_type="insight", tags=["research-round"],
+   content="目标 / 动作 / 证据(产物 ID 表)/ 结论 + 置信度 / 开放问题清单")`
+   (`memory_type` 与 `content` 必填,`source_refs` 关联产物 ID)。
 3. **最终回答末尾附同模板「轮次摘要」,并声明哪些是 canonical** ——
    `docs/research/` 在你的工作目录里只读;canonical 轮次文档
    (`rounds/YYYY-MM-DD-<slug>.md`)由用户 / 主 coding agent 经 PR 落库。

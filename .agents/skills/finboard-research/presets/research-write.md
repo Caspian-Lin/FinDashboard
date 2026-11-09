@@ -79,13 +79,27 @@ codex exec --ignore-user-config \
 
 ## 场景模板(课题收尾)
 
+`payload` 与 `idempotency_key` 都是必填(`payload` 内部 `goal_version` / `objective`
+/ `action` / `rationale` 必填),完整形状:
+
+```json
+{"operation": "append", "topic_id": "RT-…", "idempotency_key": "round-20261110-<slug>",
+ "payload": {"entry_type": "evidence", "goal_version": "v1",
+   "objective": "…", "action": "…", "rationale": "…",
+   "outcome": "completed", "conclusion": "…", "confidence": "medium",
+   "next_step": "…",
+   "source_refs": [{"kind": "research_run", "ref_id": "RR-…"}]}}
+```
+
+调用顺序(先核验、再读上下文、最后写入):
+
 ```text
-1) finboard_topic_read(topic_id="RT-…", view="context")   # 接课题,看目标/开放问题
-2) finboard_source_check(...)                              # 核验要引用的证据
+1) finboard_source_check(kind="research_run", ref_id="RR-…")   # 先核验要引用的证据
+2) finboard_topic_read(topic_id="RT-…", view="context")        # 接课题,看目标/开放问题
 3) finboard_topic_write(operation="append", topic_id="RT-…",
-     entry_type="evidence",
-     source_refs=[{kind:"research_run", ref_id:"RR-…"}], …)  # 追加轮次
-4) finboard_memory_remember(memory_type="insight", tags=["research-round"], …)
+     idempotency_key="round-20261110-<slug>", payload={…})     # 追加轮次(见上)
+4) finboard_memory_remember(memory_type="insight", tags=["research-round"],
+     content="目标/动作/证据/结论+置信度/开放问题")              # 轮次记忆指针
 ```
 
 `expected_revision` 冲突返回 `current_revision` / `changed_fields`:重新读取后续接,
