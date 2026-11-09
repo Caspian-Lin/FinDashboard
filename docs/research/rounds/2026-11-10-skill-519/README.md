@@ -47,7 +47,10 @@
    `最近轮次=1` 正是 Codex 写入的那条 —— 跨客户端、跨会话**续接**成立;随后追加
    自己的轮次(`entry_id=RE-dacddc0cc903469faac1c34d`)。
 6. **外部 OpenCode(readonly)**:读 `ok`、写 `denied`(同上语义)。
-7. 服务端侧核对:课题最终 3 条 entry(`goal` + 2 条 `round`),readonly 的两次越权
+7. **Codex(readonly)分页演练**:`finboard_topic_read(entries=true, limit=1)` 的
+   `offset=0/1/2` 三页各 1 条,`has_more` 依次 `true / true / false` —— 精确证据按
+   `offset` 续页、翻到最后一页即停,三次都是 `ok`。
+8. 服务端侧核对:课题最终 3 条 entry(`goal` + 2 条 `round`),readonly 的两次越权
    尝试**零业务写入**;structlog 审计行 `caller=MC-… status=denied
    error_kind=permission_denied`。
 
@@ -61,6 +64,7 @@
 | `04-server-log.md` | 服务端启动与越权拒绝日志摘录 |
 | `streams/codex-writer.jsonl` | Codex 写入场景 `--json` 事件流(裁掉无关事件,保留工具调用与回执) |
 | `streams/codex-readonly.jsonl` | Codex 只读越权场景事件流 |
+| `streams/codex-pagination.jsonl` | Codex 只读分页演练(`limit=1` × `offset=0/1/2`,`has_more` 翻转) |
 | `streams/opencode-writer.jsonl` | OpenCode 写入场景 `--format json` 事件流(输出截断到 2000 字符) |
 | `streams/opencode-readonly.jsonl` | OpenCode 只读越权场景事件流 |
 
@@ -76,6 +80,9 @@
 - **断线续接**:证据是「Codex 会话结束 → OpenCode 新进程读到 Codex 的轮次并继续」
   以及「readonly 与 writer 是不同客户端、不同连接」。**没有**在单个客户端内做
   TCP 断链 / 服务端重启演练(未覆盖),需要时另立 issue。
+- **分页**:课题轮次已演练(`limit=1` × `offset=0/1/2`,`has_more` 翻转)见第 7 步与
+  `streams/codex-pagination.jsonl`;**未**演练 `finboard_memory_page` 与
+  `finboard_decision_projection` 的分页/投影上限(需要真实记忆/运行数据)。
 - **原 `BJ-` / `RR-` 续等**:本机 wt4 开发库没有可用的研究运行(`research_runs=0`),
   所以本轮只验证了课题轮次里的 `source_refs` 语义与 `view=context` 的引用核验,
   **没有**真实 `BJ-`/`RR-` 的等待与引用回执。协议字段(documentation 契约)在

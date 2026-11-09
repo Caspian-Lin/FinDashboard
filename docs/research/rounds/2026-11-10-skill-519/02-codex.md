@@ -1,4 +1,4 @@
-﻿# 02 Codex(已实测)
+# 02 Codex(已实测)
 
 `codex-cli 0.163.0`,Windows。凭据从环境变量注入,**token 不落配置文件、不进命令行**。
 
@@ -70,6 +70,25 @@ Codex 总结(原样):
 > 服务端已拒绝写入:凭据仅有 research.read,缺少 research.write。
 
 完整事件流:`streams/codex-readonly.jsonl`。
+
+### C. readonly:分页演练(`offset` / `has_more`)
+
+同一个只读客户端,`entries=true, limit=1` 逐页读课题轮次:
+
+```text
+offset=0 → 1 条, has_more=true,  entry_id=RE-dacddc0cc903469faac1c34d
+offset=1 → 1 条, has_more=true,  entry_id=RE-391bab58c76648a581ed0c6b
+offset=2 → 1 条, has_more=false, 已翻到最后一页
+```
+
+Codex 总结(原样):
+
+> offset=0:1 条,has_more=true,entry_id=RE-dacddc0cc903469faac1c34d。
+> offset=1:1 条,has_more=true,entry_id=RE-391bab58c76648a581ed0c6b。
+> offset=2:1 条,has_more=false,已通过 offset 翻到最后一页;三次均为 ok,没有出现 denied。
+
+结论:精确证据可以按 `offset` 续页,**最后一页 `has_more` 会翻成 `false`**(不需要
+再猜"还有没有")。完整事件流:`streams/codex-pagination.jsonl`。
 
 ## 踩坑(Know-how)
 
