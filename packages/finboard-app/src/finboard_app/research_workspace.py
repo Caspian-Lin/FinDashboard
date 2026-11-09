@@ -101,6 +101,9 @@ def record_out(row: Any) -> dict[str, Any]:
         )
     else:
         result.update(revision=row.revision, evidence_level="working_summary")
+        # Internal creation-mode marker stays in storage for idempotency checks; it
+        # is not part of the public contract (payloads are extra="forbid").
+        result.pop("created_as", None)
         # The column is authoritative; payload.status is kept in sync for old JSON
         # consumers only.
         status = getattr(row, "status", None)

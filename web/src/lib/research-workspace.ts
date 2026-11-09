@@ -177,6 +177,8 @@ export interface TopicConflictDetail {
     title?: string | null;
   };
   allowed?: string[];
+  /** Action names (pause/close/...) when the server offers them. */
+  actions?: string[];
   current?: string;
   action?: string;
   idempotency_key?: string;

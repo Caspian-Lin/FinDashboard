@@ -47,10 +47,11 @@ active|paused --close(reason)--> closed --reopen(reason)--> active
 draft   --discard(reason)--> closed
 ```
 
-- 非法转移返回 409，body 为 `{"detail": {"code": "illegal_transition", "allowed": [...], "current": "...", "action": "..."}}`；版本不一致返回 `code=topic_revision_conflict`、`current_revision`、`your_revision`、`changed_fields`、`current_summary`。REST 用结构化 `detail`，MCP 映射为 `conflict`。
+- 非法转移返回 409，body 为 `{"detail": {"code": "illegal_transition", "allowed": [目标状态...], "actions": [可用动作...], "current": "...", "action": "..."}}`（`allowed` 恒为目标状态，`actions` 为对应动作名）；版本不一致返回 `code=topic_revision_conflict`、`current_revision`、`your_revision`、`changed_fields`、`current_summary`。REST 用结构化 `detail`，MCP 映射为 `conflict`。
 - 每次转移要求 `expected_revision`，服务端 `SELECT … FOR UPDATE` + `populate_existing`，revision 不符即拒绝，旧会话不得覆盖新 revision。
 - 每次转移在同一事务追加 `entry_type=lifecycle` 轮次 `{action, from, to, reason, actor, at, topic_revision}`；历史轮次与目标快照不改写、不删除。
 - 被放弃的草稿没有 goal，`reopen` 会被拒绝（不能产生无目标版本的 active 课题）；重开真实课题保留原目标与轮次。
+- 创建模式内部标记 `created_as` 只存于数据库 payload（供幂等键跨模式校验），公开响应（详情/列表/轮次快照）一律剥离，客户端回传完整 payload 不会因未知字段被拒。
 - `POST /topics`：带 goal 建 active（原行为不变）；只有 title/question 建 draft（`goal=null`）；`status` 只接受 `active`（`paused/closed` 返回 422，须先建后转移，避免跳过生命周期审计）；可选 `idempotency_key`，同键同内容返回原课题（HTTP 200，`created=false`），同键不同内容或跨创建模式（create ↔ draft_create）返回 409 `idempotency_conflict`。
 - `PUT /topics/{id}` 只更新内容，**永不改变状态**：显式携带与当前相同的 `status` 会被忽略（老客户端全量 PUT 仍可用），不同则 409 `illegal_transition`（`allowed` 列出可用的 transitions 动作，提示走 `/transitions`）。非草稿 PUT 必须带 goal（缺失 422）；草稿 PUT 只接受 title/question/conclusion/summary/open_questions/next_step（无 goal，带 goal 返回 422，提示走 `/activate`），revision 乐观锁不变。
 - `POST /topics/{id}/activate`：`{goal, expected_revision}`，可附带 summary/open_questions/next_step/conclusion；goal 的 version/criteria/source 必须完整。已 active 且 goal 相同为幂等 200，不增加 revision；goal 不同则 409，不能借激活覆盖目标。

@@ -384,10 +384,18 @@ function ConflictPanel({
     >
       <h2 className="font-semibold">课题已被其他会话更新，本次修改未保存</h2>
       {conflict.code === "illegal_transition" ? (
-        <p className="text-sm">
-          当前状态 {STATES[conflict.current ?? ""] ?? conflict.current} 不允许该操作；允许的目标状态：
-          {(conflict.allowed ?? []).map((s) => STATES[s] ?? s).join(" / ") || "无"}
-        </p>
+        <>
+          <p className="text-sm">
+            当前状态 {STATES[conflict.current ?? ""] ?? conflict.current} 不允许该操作；允许的目标状态：
+            {(conflict.allowed ?? []).map((s) => STATES[s] ?? s).join(" / ") || "无"}
+          </p>
+          {conflict.actions?.length ? (
+            <p className="text-sm text-muted-foreground">
+              可用动作：{conflict.actions.map((a) => ACTION_LABELS[a] ?? a).join(" / ")}（走
+              POST /transitions，PUT 不能改变状态）
+            </p>
+          ) : null}
+        </>
       ) : conflict.code === "idempotency_conflict" ? (
         <p className="text-sm">幂等键 {conflict.idempotency_key} 已绑定内容不同的课题。</p>
       ) : (

@@ -387,7 +387,8 @@ async def test_put_cannot_change_lifecycle_state(db_session: AsyncSession) -> No
         )
     assert mismatch.value.detail["code"] == "illegal_transition"
     assert mismatch.value.detail["current"] == "closed"
-    assert mismatch.value.detail["allowed"] == ["reopen"]
+    assert mismatch.value.detail["allowed"] == ["active"]
+    assert mismatch.value.detail["actions"] == ["reopen"]
 
     # active -> closed via PUT is rejected too (the reported bypass).
     active = await workspace_write(
@@ -489,6 +490,40 @@ async def test_create_only_accepts_active_and_cross_mode_keys_conflict(
             payload=draft_payload(),
             idempotency_key="k" * 129,
         )
+
+
+async def test_public_topic_payload_hides_creation_mode_marker(
+    db_session: AsyncSession,
+) -> None:
+    full = await workspace_write(
+        db_session, actor="user:api", operation="create", payload=topic_payload()
+    )
+    draft_record = await draft(db_session)
+    activated = await activate(
+        db_session, draft_record["topic_id"], draft_record["revision"]
+    )
+    for record in (full, draft_record, activated):
+        assert "created_as" not in record
+    # The marker stays in storage: idempotency checks read it, clients never see it.
+    stored = await db_session.scalar(
+        select(ResearchTopicModel.payload).where(
+            ResearchTopicModel.topic_id == full["topic_id"]
+        )
+    )
+    assert stored is not None
+    assert stored["created_as"] == "full"
+    stored_draft = await db_session.scalar(
+        select(ResearchTopicModel.payload).where(
+            ResearchTopicModel.topic_id == draft_record["topic_id"]
+        )
+    )
+    assert stored_draft is not None
+    assert stored_draft["created_as"] == "draft"
+    # Goal snapshots embed the topic payload, so they must not leak it either.
+    page = await workspace_read(
+        db_session, topic_id=draft_record["topic_id"], entries=True, limit=50
+    )
+    assert "created_as" not in json.dumps(page, ensure_ascii=False)
 
 
 async def test_entry_lookup_is_topic_scoped(db_session: AsyncSession) -> None:
@@ -903,6 +938,7 @@ async def test_rest_lifecycle_conflict_and_context(db_session: AsyncSession) -> 
         assert created.status_code == 201
         topic = created.json()
         assert topic["status"] == "draft"
+        assert "created_as" not in topic
 
         retry = await client.post(
             "/api/research/topics",
@@ -981,7 +1017,19 @@ async def test_rest_lifecycle_conflict_and_context(db_session: AsyncSession) -> 
         )
         assert put_mismatch.status_code == 409
         assert put_mismatch.json()["detail"]["code"] == "illegal_transition"
-        assert put_mismatch.json()["detail"]["allowed"] == ["close", "resume"]
+        assert put_mismatch.json()["detail"]["allowed"] == ["active", "closed"]
+        assert put_mismatch.json()["detail"]["actions"] == ["close", "resume"]
+
+        # Explicit null status is an input error, not a conflict.
+        null_status = await client.put(
+            f"/api/research/topics/{topic['topic_id']}",
+            json={
+                **topic_payload(),
+                "status": None,
+                "expected_revision": paused.json()["revision"],
+            },
+        )
+        assert null_status.status_code == 422
 
         # A full PUT without status keeps the topic paused and appends no lifecycle.
         entries_before = await client.get(

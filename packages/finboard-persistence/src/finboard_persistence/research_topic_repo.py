@@ -26,6 +26,11 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def public_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop internal markers before embedding a topic snapshot in a public entry."""
+    return {k: v for k, v in payload.items() if k != "created_as"}
+
+
 class ResearchTopicRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -80,7 +85,7 @@ class ResearchTopicRepository:
             {
                 "entry_type": "draft" if status == "draft" else "goal",
                 "topic_revision": 1,
-                "topic": payload,
+                "topic": public_payload(payload),
             },
             actor,
         )
@@ -104,7 +109,7 @@ class ResearchTopicRepository:
         await self.append(
             topic_id,
             f"goal-{row.revision}",
-            {"entry_type": "goal", "topic_revision": row.revision, "topic": payload},
+            {"entry_type": "goal", "topic_revision": row.revision, "topic": public_payload(payload)},
             actor,
         )
         await self.session.flush()

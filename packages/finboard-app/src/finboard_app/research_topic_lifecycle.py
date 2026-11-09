@@ -97,6 +97,8 @@ class TopicRevisionConflictError(TopicWriteConflictError):
 
 
 class IllegalTransitionError(TopicWriteConflictError):
+    """``allowed`` is always the reachable target statuses; ``actions`` names them."""
+
     code = "illegal_transition"
 
     def __init__(
@@ -106,10 +108,14 @@ class IllegalTransitionError(TopicWriteConflictError):
         allowed: list[str],
         action: str,
         message: str | None = None,
+        actions: list[str] | None = None,
     ) -> None:
+        detail: dict[str, Any] = {"allowed": allowed, "current": current, "action": action}
+        if actions is not None:
+            detail["actions"] = actions
         super().__init__(
             message or f"课题状态 {current} 不允许 {action};允许的目标状态:{allowed}",
-            detail={"allowed": allowed, "current": current, "action": action},
+            detail=detail,
         )
 
 
@@ -306,14 +312,22 @@ async def update_topic(
     row = await repo.get(topic_id, lock=True)
     if row.revision != expected_revision:
         raise _revision_conflict(row, expected=expected_revision, incoming=payload)
-    declared_status = str(payload.get("status")) if status_declared else None
+    declared_status: str | None = None
+    if status_declared:
+        raw_status = payload.get("status")
+        if raw_status is None:
+            raise TopicInvalidInputError(
+                "status 不能为 null;省略该字段表示不改变状态,改变状态请走 /transitions"
+            )
+        declared_status = str(raw_status)
     if row.status == "draft":
         if payload.get("goal") is not None:
             raise TopicInvalidInputError("草稿不能直接设置目标;请使用 /activate 补齐目标并激活")
         if declared_status is not None and declared_status != row.status:
             raise IllegalTransitionError(
                 current=row.status,
-                allowed=allowed_actions(row.status),
+                allowed=allowed_transitions(row.status),
+                actions=allowed_actions(row.status),
                 action="update_status",
                 message=(
                     f"PUT 不能改变课题状态({row.status} -> {declared_status});"
@@ -331,7 +345,8 @@ async def update_topic(
         if declared_status is not None and declared_status != row.status:
             raise IllegalTransitionError(
                 current=row.status,
-                allowed=allowed_actions(row.status),
+                allowed=allowed_transitions(row.status),
+                actions=allowed_actions(row.status),
                 action="update_status",
                 message=(
                     f"PUT 不能改变课题状态({row.status} -> {declared_status});"
@@ -372,6 +387,7 @@ async def activate_topic(
         raise IllegalTransitionError(
             current=row.status,
             allowed=allowed_transitions(row.status),
+            actions=allowed_actions(row.status),
             action="activate",
             message="课题已激活且目标不同;目标变更须使用新目标版本更新,不能借激活覆盖",
         )
@@ -379,6 +395,7 @@ async def activate_topic(
         raise IllegalTransitionError(
             current=row.status,
             allowed=allowed_transitions(row.status),
+            actions=allowed_actions(row.status),
             action="activate",
         )
     activated = await repo.apply_transition(
@@ -418,6 +435,7 @@ async def transition_topic(
         raise IllegalTransitionError(
             current=row.status,
             allowed=allowed_transitions(row.status),
+            actions=allowed_actions(row.status),
             action=data.action,
         )
     if data.action == "reopen" and not row.payload.get("goal"):
@@ -426,6 +444,7 @@ async def transition_topic(
         raise IllegalTransitionError(
             current=row.status,
             allowed=allowed_transitions(row.status),
+            actions=allowed_actions(row.status),
             action="reopen",
             message="重开需要已归档目标版本;被放弃的草稿没有目标,请新建课题",
         )
