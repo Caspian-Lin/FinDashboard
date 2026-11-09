@@ -43,7 +43,7 @@ class TopicRunStartIn(ResearchRunSubmitInput):
     """Run submit input plus the topic goal version and optional operation id."""
 
     goal_version: str = Field(min_length=1, max_length=64)
-    operation_id: str | None = Field(default=None, max_length=64)
+    operation_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     def run_payload(self) -> dict[str, Any]:
         return self.model_dump(
@@ -69,7 +69,7 @@ class RunLinkIn(BaseModel):
 
     topic_id: str = Field(min_length=1, max_length=32)
     goal_version: str = Field(min_length=1, max_length=64)
-    operation_id: str | None = Field(default=None, max_length=64)
+    operation_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 def _sandbox_enabled(request: Request) -> bool:

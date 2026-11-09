@@ -95,6 +95,17 @@ _JOB_RUNNING = frozenset(
 )
 
 
+def _valid_operation_id(operation_id: str | None) -> None:
+    """Reject empty/oversized operation ids before they reach the unique index."""
+
+    if operation_id is None:
+        return
+    if not operation_id.strip() or len(operation_id) > 64:
+        raise ResearchInvalidInputError(
+            "operation_id 必须为 1-64 个非空字符", code="invalid_operation_id"
+        )
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -406,6 +417,7 @@ async def start_topic_run(
     run_id: str | None = None
     job_id: str | None = None
     try:
+        _valid_operation_id(ctx.operation_id)
         topic = await _require_topic(session, topic_id, lock=True)
         _require_active_with_goal(topic, goal_version)
 
@@ -648,6 +660,7 @@ async def retry_topic_run(
     new_run_id: str | None = None
     new_job_id: str | None = None
     try:
+        _valid_operation_id(ctx.operation_id)
         topic = await _require_topic(session, topic_id, lock=True)
         original = await link_repo.get(topic_id, RESEARCH_RUN_ENTITY, run_id)
         if original is None:
@@ -878,6 +891,8 @@ async def link_run_to_topic(
         "operation_id": operation_id,
     }
     try:
+        _valid_operation_id(operation_id)
+        _valid_operation_id(ctx.operation_id)
         topic = await _require_topic(session, topic_id, lock=True)
         _require_goal_version(topic, goal_version)
         run = await ResearchRunRepository(session).get(run_id)
