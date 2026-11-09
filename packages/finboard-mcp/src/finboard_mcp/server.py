@@ -132,7 +132,18 @@ data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读�
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(155 个,能力与参数以当前注册schema为准)==
+== 会话交接 ==
+用户给课题 ID(RT-…)或深链(/research/topics?topic=RT-…)时,先
+finboard_topic_read(view="context") 一次取回目标版本/生命周期/开放问题/最近轮次/
+断链引用与 next_actions(截断时 excerpted=true,按 view=refs 或 entry_id 续页)。
+续等原后台任务用 finboard_job_wait(job_id="BJ-…")(超时 completed=false 续同一个
+job,不重新入队);引用原运行用 finboard_run_get(run_id="RR-…")。收尾用
+finboard_topic_write(operation="append") 追加轮次 + finboard_memory_remember
+(tags=["research-round"]);轮次与记忆是工作记录,docs/research/ 才是 canonical。
+通用 Skill、预设与各客户端接入(含已验/待验)见 .agents/skills/finboard-research/
+与 docs/agent-integration.md。
+
+== 当前可用工具(唯一事实源 = finboard_mcp.scopes.TOOL_SCOPES;能力与参数以当前注册 schema 为准)==
 - #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
   另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
   finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。

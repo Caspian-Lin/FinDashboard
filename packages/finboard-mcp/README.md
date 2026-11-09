@@ -13,29 +13,37 @@ Agent 运行时。FinDashboard 仍是业务工具 / 权限 / 任务 / 数据 / �
 - **实盘能力**(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)永久不注册;
 - 每次工具调用统一记录审计事件,不记录 API Key / 原始凭证 / 未脱敏思考内容。
 
-## 工具集(155 个;#160 移除 finboard.ai.* 后 FinBoard 零内置 LLM)
+## 工具集(清单唯一事实源 = `TOOL_SCOPES`;#160 移除 `finboard.ai.*` 后 FinBoard 零内置 LLM)
 
 完整清单与契约见 server `_INSTRUCTIONS` 与 Skill
-`.agents/skills/finboard-opencode-research/references/tools.md`;扩展路线图见
+`.agents/skills/finboard-research/references/tools.md`;扩展路线图见
 `ROADMAP.md`。每个注册工具都必须在 `finboard_mcp/scopes.py` 的 `TOOL_SCOPES`
-登记作用域,未登记即 fail-closed(契约测试比对全部注册名)。
+登记作用域,未登记即 fail-closed(契约测试比对**集合相等**,不锁数量)。下表是
+家族分组与职责,**不是**可引用的工具总数。
 
-| 命名空间 | 数量 | 说明 |
-| --- | --- | --- |
-| `finboard.run.*` | 7 | ResearchRun 查询 + queue/cancel/replay/lineage |
-| `finboard.memory.*` | 7 | 研究长期记忆(`research_memories` 表) |
-| 数据查询 / 目录 / 范围 / 补数 | 20 | 标的元数据 / 发布 / 缓存 / 质量 / 目录 / 补数请求 |
-| `finboard.factor.*` / `.feature_snapshot.*` | 12 | 因子实验室(8 只读 + 4 写) |
-| `finboard.factor_series.*` | 2 | 因子序列工件(读取 / 托管重建) |
-| `finboard.strategy.*` / `.preset.*` | 16 | 无代码策略规格生命周期 |
-| `finboard.backtest.*` | 7 | 同步回测 + 历史 CRUD + 参数网格 |
-| `finboard.sim.*` | 21 | 模拟盘全生命周期(隔离 `simulation_*` 表) |
-| `finboard.portfolio.*` | 4 | 组合计算(allocate/sizing/feasibility/attribution) |
-| `finboard.job.*` | 7 | 统一后台任务队列(研究/数据域) |
-| 数据写操作 | 11 | 拉取 / 批量下载 / 发布 / 修复 / ETF / 配置 |
-| `finboard.validation_experiment.*` | 7 | #57 OOS 机器验证实验 |
-| `finboard.watchlist.*` | 7 | 自选股标的组管理 |
-| 报告 / 诊断 / 课题 / 研究代码 | 20 | 报告聚合导出 / 确定性复核 / 课题读侧 / 研究代码仓库与沙箱 |
+外部 Harness(Codex / DeepSeek Harness / ZCode / 外部 OpenCode)的安装、配置、
+已验 / 待验状态见 [`docs/agent-integration.md`](../../docs/agent-integration.md);
+可复制的客户端配置见 `.agents/skills/finboard-research/presets/`。
+
+| 命名空间(工具名前缀) | 说明 |
+| --- | --- |
+| `finboard_run_*` | ResearchRun 查询 + queue/cancel/replay/lineage |
+| `finboard_memory_*` | 研究长期记忆(`research_memories` 表) |
+| 数据查询 / 目录 / 范围 / 补数 | 标的元数据 / 发布 / 缓存 / 质量 / 目录 / 补数请求 |
+| `finboard_factor_*` / `finboard_feature_snapshot_*` | 因子实验室(`factor_catalog` / 快照 / 信号 / 实验,读写混合) |
+| `finboard_factor_series_*` | 因子序列工件(读取 / 托管重建) |
+| `finboard_strategy_*` / `finboard_preset_*` | 无代码策略规格生命周期 |
+| `finboard_backtest_*` | 同步回测 + 历史 CRUD + 参数网格 |
+| `finboard_sim_*` | 模拟盘全生命周期(隔离 `simulation_*` 表) |
+| `finboard_portfolio_*` | 组合计算(allocate/sizing/feasibility/attribution) |
+| `finboard_job_*` | 统一后台任务队列(研究/数据域) |
+| 数据写操作 | 拉取 / 批量下载 / 发布 / 修复 / ETF / 配置 |
+| `finboard_validation_experiment_*` | #57 OOS 机器验证实验 |
+| `finboard_watchlist_*` | 自选股标的组管理 |
+| 报告 / 诊断 / 课题 / 研究代码 | 报告聚合导出 / 确定性复核 / 课题读侧 / 研究代码仓库与沙箱 |
+
+> 上表只做分组,**不声明数量**:每个家族的规模与所需作用域以 `TOOL_SCOPES` /
+> 运行时注册表为准(之后新增工具不需要改这里)。
 
 所有工具返回统一信封 `ToolEnvelope`(`operation_id` / `status` / `data` / `error` /
 `provenance` / `idempotency_key`)。

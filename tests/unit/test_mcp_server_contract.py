@@ -10,11 +10,32 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from mcp import Client
 
 from finboard_mcp import build_mcp_server
+from finboard_mcp.audit import AuditRecorder
+from finboard_mcp.envelope import ToolEnvelope
+from finboard_mcp.execution import run_tool
 from finboard_mcp.identity import McpClientIdentity
-from finboard_mcp.scopes import SCOPE_PRESETS, TOOL_SCOPES, VALID_SCOPES
+from finboard_mcp.scopes import (
+    SCOPE_PRESETS,
+    TOOL_SCOPES,
+    VALID_SCOPES,
+    arm_scope_enforcement,
+    identity_has_scopes,
+    reset_scope_policy,
+)
+
+#: 只读客户端(readonly 预设)身份。
+_READONLY_IDENTITY = McpClientIdentity(
+    client_id="MC-readonly", name="readonly", scopes=frozenset({"research.read"})
+)
+#: 全权身份(等价旧共享 token;仅用于验证“作用域足够时不会被误拒”)。
+_FULL_IDENTITY = McpClientIdentity(
+    client_id="MC-full", name="full", scopes=frozenset({"*"})
+)
 
 _EXPECTED_TOOLS = {
     "finboard_run_diagnostics", "finboard_run_compare",
@@ -222,9 +243,12 @@ class TestToolExposure:
         assert await _tool_names() == _EXPECTED_TOOLS
 
     async def test_tool_scopes_cover_all_registered_tools(self) -> None:
-        """#517:TOOL_SCOPES 必须与注册工具集一一对应(数量同源)。"""
+        """#517:TOOL_SCOPES 必须与注册工具集一一对应(集合相等,不锁数量)。
+
+        #519:去掉 ``len(names) == 155`` 这类字面量 —— 新增 / 删除工具应改
+        ``scopes.py``,而不是改这里的数字;双向集合相等才是契约本体。
+        """
         names = await _tool_names()
-        assert len(names) == 155
         assert set(TOOL_SCOPES) == names
         for tool_name, scopes in TOOL_SCOPES.items():
             assert scopes, f"{tool_name} 没有声明作用域"
@@ -319,3 +343,119 @@ class TestCallToolContract:
                 return
         # 若未抛错,结果必须标记为错误,不得静默成功
         assert result.is_error
+
+
+def _spy_handler() -> tuple[Any, dict[str, bool]]:
+    """返回 ``(handler, hit)``;``hit`` 记录 handler 是否真的被执行。"""
+    hit = {"called": False}
+
+    async def handler() -> dict[str, bool]:
+        hit["called"] = True
+        return {"written": True}
+
+    return handler, hit
+
+
+class TestPermissionMatrixRegression:
+    """#519:按 ``TOOL_SCOPES`` 全量回归只读客户端不得调用写工具。
+
+    与 ``tests/integration/test_issue_517_mcp_authz.py`` 的分工:那里验证真实
+    HTTP 凭据 / 吊销 / 过期;这里是**不依赖 DB 的全量矩阵**(每个注册工具都过
+    一遍唯一漏斗 ``run_tool``),新增工具自动纳入,不需要改本测试。
+    """
+
+    async def test_readonly_identity_denied_for_every_privileged_tool(self) -> None:
+        names = await _tool_names()
+        arm_scope_enforcement(readonly_only=False)
+        try:
+            for name in sorted(names):
+                required = TOOL_SCOPES[name]
+                handler, hit = _spy_handler()
+                envelope: ToolEnvelope = await run_tool(
+                    audit=AuditRecorder(),
+                    tool_name=name,
+                    arguments={},
+                    handler=handler,
+                    identity=_READONLY_IDENTITY,
+                )
+                read_only_tool = required <= frozenset({"research.read"})
+                if read_only_tool:
+                    assert envelope.status == "ok", f"{name} 只读工具被误拒"
+                    assert hit["called"] is True
+                else:
+                    assert envelope.status == "denied", (
+                        f"{name} 需要 {sorted(required)},只读客户端却未被拒绝"
+                    )
+                    assert envelope.error is not None
+                    assert envelope.error.kind == "permission_denied"
+                    # 越权必须零业务写入:handler 根本没被执行。
+                    assert hit["called"] is False
+        finally:
+            reset_scope_policy()
+
+    async def test_scope_sufficient_identity_is_not_falsely_denied(self) -> None:
+        """作用域足够时不误拒(避免“全部拒绝”式的假绿)。"""
+        names = await _tool_names()
+        arm_scope_enforcement(readonly_only=False)
+        try:
+            for name in sorted(names):
+                handler, hit = _spy_handler()
+                envelope = await run_tool(
+                    audit=AuditRecorder(),
+                    tool_name=name,
+                    arguments={},
+                    handler=handler,
+                    identity=_FULL_IDENTITY,
+                )
+                assert envelope.status == "ok", f"{name} 全权身份被误拒"
+                assert hit["called"] is True
+        finally:
+            reset_scope_policy()
+
+    async def test_unregistered_tool_is_fail_closed(self) -> None:
+        """未登记 ``TOOL_SCOPES`` 的工具 = 契约错误 = 拒绝(不静默放行)。"""
+        arm_scope_enforcement(readonly_only=False)
+        try:
+            handler, hit = _spy_handler()
+            envelope = await run_tool(
+                audit=AuditRecorder(),
+                tool_name="finboard_tool_not_registered_in_scopes",
+                arguments={},
+                handler=handler,
+                identity=_FULL_IDENTITY,
+            )
+        finally:
+            reset_scope_policy()
+        assert envelope.status == "denied"
+        assert envelope.error is not None
+        assert envelope.error.kind == "permission_denied"
+        assert hit["called"] is False
+
+    async def test_legacy_readonly_only_still_blocks_writes(self) -> None:
+        """兼容期 ``FINBOARD_MCP_READONLY_ONLY`` 语义:全权身份也被降级为只读。"""
+        arm_scope_enforcement(readonly_only=True)
+        try:
+            handler, hit = _spy_handler()
+            envelope = await run_tool(
+                audit=AuditRecorder(),
+                tool_name="finboard_topic_write",
+                arguments={},
+                handler=handler,
+                identity=_FULL_IDENTITY,
+            )
+        finally:
+            reset_scope_policy()
+        assert envelope.status == "denied"
+        assert hit["called"] is False
+
+    async def test_presets_are_nested_and_readonly_smallest(self) -> None:
+        """预设偏序:readonly ⊂ topic-writer ⊂ data-operator;audit 不进常规预设。"""
+        readonly = SCOPE_PRESETS["readonly"]
+        writer = SCOPE_PRESETS["topic-writer"]
+        operator = SCOPE_PRESETS["data-operator"]
+        assert readonly < writer < operator
+        assert "audit.read" not in (readonly | writer | operator)
+        # 只读身份对所有非只读工具的判定与 identity_has_scopes 同源。
+        for name, required in TOOL_SCOPES.items():
+            expected = required <= readonly
+            assert identity_has_scopes(_READONLY_IDENTITY, required) is expected, name

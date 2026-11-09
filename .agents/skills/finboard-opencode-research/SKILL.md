@@ -1,134 +1,49 @@
 ---
-description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作流、工具选择、权限边界与来源引用。用于量化研究、因子分析、回测/模拟盘分析、研究记忆。不用于实盘交易或代码编辑。
+description: 【已更名】本 Skill 名为 finboard-opencode-research，已迁移为 .agents/skills/finboard-research/（通用名，适配 Codex / DeepSeek Harness / ZCode / 外部 OpenCode）。请改读新目录；本目录仅保留迁移映射，#520 后删除。
 ---
 
-# FinBoard 研究 Skill
+# ⚠️ 已更名:请使用 `finboard-research`
 
-本 Skill 指导 `finboard-researcher` agent 通过 `finboard.*` MCP 工具进行受控
-量化研究。
+本目录(`.agents/skills/finboard-opencode-research/`)**自 #519 起弃用**。研究
+Skill 的 canonical 位置是:
 
-> **权限由 OpenCode 配置 + FinBoard 服务端策略共同控制,本 Skill 不授予任何
-> 工具权限。** Skill 只描述「应该做什么」,工具是否可调用由
-> `.opencode/agent/finboard-researcher.md`(唯一权威agent permission)与 FinBoard MCP 服务端策略决定。
+```
+.agents/skills/finboard-research/
+```
 
-## 核心原则(HARD RULES)
+新目录不绑定任何客户端(不假定 OpenCode 目录、容器挂载或权限 frontmatter),
+同一套 `finboard_*` 工具名对所有外部 Harness 生效。
 
-1. **只读直接调用** —— 数据 / 因子 / ResearchRun / 模拟盘查询可直接调用。
-2. **研究写操作可自主执行**(#122) —— 创建因子 / 快照 / 策略 / 运行回测 / 发布数据 /
-   启动模拟盘等研究写操作 agent 可通过 MCP **自主执行**,无需人工审批。
-   不触及交易安全红线(不连 broker / 账户 / 订单 / 持仓)。
-   写操作仍受调用凭据作用域约束(#517,`research.write` / `research.run` /
-   `data.write`;readonly 预设只能读,stdio 默认 `research.read`)——越权返回
-   `denied`,不是本 Skill 可绕过的审批门。
-3. **实盘能力永久不可用** —— 下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker /
-   凭证探测不在工具集中。需要它们 = 走错了路。
-4. **代码通道受控** —— 网页/无代码规格禁Python与可执行表达式;MCP research_code_submit可提交白名单策略/因子Python,仅经Docker沙箱执行。用户因子序列只用compute_series;禁止宿主文件编辑、模块路径注入、任意表达式。
-5. **禁止未查索引重测已证伪假设**(#268) —— 会话启动先查结论索引
-   (`/workspace/docs/research/FINDINGS.md` + `finboard_memory_list`,见下节),
-   未查之前不得重跑任何「已证伪」假设;确要重开必须有新证据(新数据域 /
-   新构造 / 新频率)并显式引用旧结论,说明本次与既往证伪的差异。
+**本目录不再维护 references/**:`references/tools.md`、`workflow.md`、
+`memory.md`、`research-workflow.md`、`system-overview.md` 已全部迁到
+`.agents/skills/finboard-research/references/`,旧副本已删除(避免两份文档漂移)。
+`#520` 将删除整个目录。
 
-## 工具选择(快速参考)
+## 迁移映射表
 
-已实现 155 个工具(注册表一致性由测试校验);schema与实际能力以当前运行时为准,数量不证明研究可靠性。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+| 旧位置 / 旧写法 | 新位置 / 新写法 |
+|---|---|
+| `.agents/skills/finboard-opencode-research/SKILL.md` | `.agents/skills/finboard-research/SKILL.md` |
+| `.agents/skills/finboard-opencode-research/references/tools.md` | `.agents/skills/finboard-research/references/tools.md` |
+| `.agents/skills/finboard-opencode-research/references/workflow.md` | `.agents/skills/finboard-research/references/workflow.md` |
+| `.agents/skills/finboard-opencode-research/references/memory.md` | `.agents/skills/finboard-research/references/memory.md` |
+| `.agents/skills/finboard-opencode-research/references/research-workflow.md` | `.agents/skills/finboard-research/references/research-workflow.md` |
+| `.agents/skills/finboard-opencode-research/references/system-overview.md` | `.agents/skills/finboard-research/references/system-overview.md` |
+| 工具名 `finboard.run.list` / `finboard.memory.remember` / `finboard.sim.*`(dotted) | `finboard_run_list` / `finboard_memory_remember` / `finboard_sim_*`(**真实注册名**) |
+| 家族说法 `finboard.workspace.*` | `finboard_topic_read` / `finboard_topic_write` / `finboard_source_check` / `finboard_memory_page` / `finboard_strategy_explain` / `finboard_decision_explain` |
+| 审计事件名 `finboard.research.*` | 审计名保持 dotted(与工具名区分);工具仍用 `finboard_*` |
+| 「OpenCode 研究 Agent」 | 「研究 Agent(外部 Harness)」 |
+| 容器绝对路径 `/workspace/docs/research/…` | 仓库相对路径 `docs/research/…`(以你的工作目录为根) |
+| 「权限由 OpenCode 配置 + FinBoard 服务端策略共同控制」 | 权限由**服务端 Bearer 凭据作用域**决定(`docs/mcp-client-auth.md`);客户端 agent 配置只管本地文件权限 |
+| 依赖 OpenCode `permission:` frontmatter / `skill` 权限 | 通用前置:MCP 端点 + 凭据 + `--preset`(见新目录 `presets/`) |
+| 会话启动先读 `ROADMAP.md` / `FINDINGS.md` | 先 `finboard_topic_read(view="context")` 接课题 + `finboard_source_check` 核证据,再读文档 |
+| 内置 OpenCode Web 工作台(iframe) | 外部 Harness 直连 MCP;客户端配置见 `docs/agent-integration.md` |
 
-| 场景 | 工具 | 状态 | 权限 |
-|------|------|------|------|
-| 查询 / 管理 ResearchRun | `finboard.run.*`(list/get/artifacts 只读 + queue/cancel/replay/lineage 写,7 个) | ✅ #127+#183 | 3 只读 + 4 自主执行 |
-| 从课题发起 / 关联 ResearchRun | `finboard.topic_run.*` + `finboard_run_topics`(6 个) | ✅ #515 | 3 只读 + 3 自主执行 |
-| 记住 / 查询 / 纠正研究记忆 | `finboard.memory.*`(7 个) | ✅ | 直接执行 |
-| 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额 | `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`(9 个) | ✅ #124 | 只读 |
-| 全局数据目录(数据集列表/详情/覆盖报告/发布逐标的/引用反查;只读,不触发 sync/publish) | `finboard.data_catalog.*` / `.dataset.release.*`(5 个) | ✅ #509 | 只读 |
-| 统一数据范围预览(scope → 候选发布/执行窗口/缺口/阻塞;提交 run 时回填 resolution_id 复验) | `finboard.data_scope.*`(1 个) | ✅ #510 | 只读 |
-| 共享补数请求(缺口预检 / 提交 / 列表 / 取消;只产生新发布,不混接异源与复权) | `finboard.data_backfill.*`(4 个) | ✅ #511 | 2 只读 + 2 自主执行 |
-| 数据准备(拉取/同步/发布/修复/ETF/配置) | `finboard.data_write.*` / `.etf.*`(12 个) | ✅ #137 | 2 只读 + 10 自主执行 |
-| 因子目录 / 特征快照 / 因子信号 / 因子实验 | `finboard.factor.*` / `.feature_snapshot.*`(12 个) | ✅ #125 | 8 只读 + 4 自主执行 |
-| 策略规格 / 预设(registry/template/validate/draft/publish/rollback/diff/preset CRUD;feature_graph 可按 `u_<name>` 引用沙箱用户因子,仅 active+promotion_status=passed 可引用,#217/#219) | `finboard.strategy.*` / `.preset.*`(16 个) | ✅ #126 | 8 只读 + 8 自主执行 |
-| 回测(双形态:strategy 事件驱动回测——默认小规模同步,run_async=true 或规模达阈值自动入队后台任务返回 job_id(#189,避免 MCP 30s 超时后响应丢失);strategy_spec 路由已发布规格入队 research_run 多期再平衡回放;benchmark_symbol 显式基准(指数日线 akshare 免积分),基准缺失返回 null 不静默 0.0;selection.factor_version 仅 "v1"(可用因子集=因子目录投影子集,#214);批量网格提交/聚合对比——params 维度(params_list/params_grid 互斥)× selection_grid 选股维度笛卡尔积(#259,可单独做纯选股扫描如因子×窗口,逐组合过 FactorSelectionParams 校验),grid_get 默认不返回曲线,显式 equity_mode=summary/full 才返回,公共字段(含基础 selection)在网格头部只出现一次(#190/#206/#259);history CRUD——history_get fills 默认有界 200 条分页、history_list symbols 前 10 只+计数(#206)) | `finboard.backtest.*`(7 个) | ✅ #127+#174+#175+#183+#184+#189+#190 | 4 只读 + 3 自主执行 |
-| 模拟盘(账户/会话生命周期/决策/行情投递/晋级评估/归档/订单/成交/持仓/账本/审计/报告) | `finboard.sim.*`(21 个) | ✅ #127+#139 | 10 只读 + 11 自主执行 |
-| portfolio 计算(allocate/sizing/feasibility/attribution) | `finboard.portfolio.*`(4 个) | ✅ #128 | 纯计算,自主执行 |
-| 后台任务队列监控与提交/归档/等待 | `finboard.job.*`(list/get/wait 只读 + enqueue/cancel/archive/unarchive 写,7 个) | ✅ #136+#221+#443 | 3 只读 + 4 自主执行 |
-| #57 验证实验(创建/列表/详情/拒绝/登记 trial/删除) | `finboard.validation_experiment.*`(6 个) | ✅ #138 | 2 只读 + 4 自主执行 |
-| 自选股(创建/查询标的组、增删标的) | `finboard.watchlist.*`(7 个) | ✅ #140 | 2 只读 + 5 自主执行 |
-| 报告聚合与导出(ResearchRun/回测报告、导出 CSV/Markdown 文件;report_run 默认 summary 聚合计数、report_backtest fills 分页有界,#206) | `finboard.report.*`(3 个) | ✅ #141+#206 | 3 只读 |
-| 研究代码提交与晋级(agent 策略/因子代码入口;静态校验+draft 版本化存储;screen + #57 OOS 晋级门;web 通道仍禁代码) | `finboard.research_code.*`(5 个) | ✅ #215/#219 | 2 只读 + 3 自主执行 |
-| 研究代码沙箱执行(一次性 Docker 容器跑 factor.compute;PIT 物理隔离挂载、断网/只读/限额/超时 kill;run 三向引用审计;成功输出过质量门后落库为 `u_<name>` 因子快照,可被 research run 引用,run report 携带 factor_screen 筛选指标(#217);需 research_sandbox_enabled + Docker 镜像) | `finboard.research_code_run` / `_get`(2 个) | ✅ #216+#217 | 1 只读 + 1 自主执行 |
-| 用户代码策略执行(agent 编写的策略代码进入回测:spec `strategy_kind=user_code` + `code_artifact` 引用 active+passed artifact;`finboard_run_queue` 声明 `decision_schedule` 走 multi_period(legacy `rebalance_frequency` 仍接受)逐决策日沙箱 `decide(ctx)→目标权重`(当前权重回显 + 约束视图),复用 #91 组合管线;report 附 `sandbox_provenance`(commit+镜像 digest);与 multi_factor 同屏可比;入队门控 active+passed/commit/沙箱开关,#218/#219) | `finboard_run_queue` + `finboard_strategy_*`(复用,无新工具) | ✅ #218/#219 | 复用 run_queue 写权限 |
+## 现在该做什么
 
-> 详细工具契约见 `references/tools.md`;扩展计划见
-> `packages/finboard-mcp/ROADMAP.md`。
+1. 把加载路径改成 `.agents/skills/finboard-research/SKILL.md`(或整体目录)。
+2. 客户端配置按 `.agents/skills/finboard-research/presets/` 选预设
+   (`read-only` / `research-write` / `data-operator`)。
+3. 接入步骤、已验 / 待验客户端清单与排障见 `docs/agent-integration.md`。
 
-## 会话启动协议(#268,每轮会话必做)
-
-理解任何研究问题**之前**,先按序加载前情:
-
-1. **读研究文档**(容器只读挂载 `/workspace/docs/research/`):`ROADMAP.md`
-   (研究目标 / 路线 A-D 状态 / 当前证据门)+ `FINDINGS.md`(结论注册表:
-   结论 / 置信度 / 证据 ID / 失效条件 / 状态)。挂载缺失(目录不存在)则跳过
-   本步,并在最终回答中注明「研究文档不可见」。
-2. **扫记忆**:`finboard_memory_list(status=active)`;量大时按保留 `tag` 过滤
-   (`research-plan` / `research-round` / `finding-confirmed` / `finding-refuted`)。
-3. **检索产物**:按问题域查相关 ResearchRun / 实验(`finboard.run.*` /
-   `finboard.validation_experiment.*`),避免重复造轮子。
-
-1-2 未完成之前,禁止启动任何「重测」类运行(HARD RULES 第 5 条)。
-
-## 研究工作流(简版)
-
-0. **会话启动协议** —— 见上节:读研究文档 + 扫记忆 + 检索产物,先加载前情。
-1. **理解问题** —— 查询相关数据 / ResearchRun / 模拟盘。
-2. **形成假设** —— 你自己(OpenCode LLM)直接分析并给出可检验的研究假设;
-   需要机器验证时创建 #57 验证实验(`finboard.validation_experiment.*`)。
-3. **记忆上下文** —— 用 `finboard.memory.remember` 记住关键发现,关联研究产物。
-4. **引用来源** —— 所有结论引用 ResearchRun / 数据集 / 模拟盘产物 ID。
-
-> 详细工作流与决策树见 `references/workflow.md`;
-> 完整研究流程(数据→因子→策略→回测→模拟→评估)见 `references/research-workflow.md`。
-
-## 来源引用规则
-
-- 金融答案**必须引用项目来源**(ResearchRun ID / 数据集版本 / 模拟盘 ID)。
-- 数据不足时明确声明「数据不足」,**绝不编造数字**。
-
-## 记忆使用规则(简版)
-
-- 用 `finboard.memory.remember` 记住跨会话需要的研究上下文。
-- **保留 tags 约定**(#268):`research-plan`(计划 / 路线变更)、
-  `research-round`(轮次收尾报告,固定模板)、`finding-confirmed`(已确认
-  结论)、`finding-refuted`(已证伪结论)。`finboard_memory_list(tag=...)`
-  按此过滤——这四个 tag 是跨会话结论索引的检索入口,打结论时必带。
-- `source_refs` 关联研究产物(只引用,**不修改产物本身**)。
-- 发现错误用 `finboard.memory.correct`(形成纠正链),**不要直接删除**。
-- 过时但仍有参考价值的记忆用 `finboard.memory.archive`,仅在确需移除时用
-  `finboard.memory.forget`(软删除,保留审计)。
-
-> 详细记忆规则与生命周期见 `references/memory.md`。
-
-## 轮次收尾协议(简版,#268)
-
-每轮研究结束前:
-
-1. 用 `finboard.memory.remember(memory_type=insight, tags=["research-round"])`
-   记一条**固定模板**记忆:目标 / 动作 / 证据(产物 ID 表)/ 结论+置信度 /
-   开放问题清单。
-2. 在最终回答末尾附同模板的「轮次摘要」——容器对 `/workspace/docs/research`
-   只读,canonical 轮次文档(`rounds/YYYY-MM-DD-<slug>.md`)由用户 / 主
-   coding agent 经 PR 落库,你的记忆只是指针;文档与记忆冲突时以文档为准。
-
-## 参考文档索引
-
-| 文档 | 内容 |
-|------|------|
-| `references/tools.md` | MCP 工具完整契约(参数 / 返回 / 场景，以运行时注册表为准) |
-| `references/workflow.md` | 研究工作流决策树 + 标准研究循环 |
-| `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
-| `references/memory.md` | 研究记忆使用规则与生命周期 |
-| `references/system-overview.md` | FinBoard 系统架构概览(包结构 / 模块职责 / 研究 vs 实盘隔离) |
-
-研究上下文入口：`finboard_topic_read/write` 保存课题、目标版本与追加轮次；`finboard_topic_run_*` 从 active 课题发起/重放/取消运行并读取 join 派生状态；`finboard_memory_page` 查看旧笔记与纠正链；`finboard_source_check` 核查引用；`finboard_strategy_explain` 与 `finboard_decision_explain` 有界解释冻结规则和实际决策。完整契约见 `references/tools.md`，不得用完成/发布状态代替 OOS 结论。
-
-课题是持续更新的研究锚点，不等于一次run。组织已有运行/记忆/实验用topic_write append的entry_type=evidence及精确source_refs，原产物不搬动、不改写、可被多个课题引用。完整“核查→创建→归档→分页续接→版本更新”例子见只读挂载 `/workspace/docs/research/topic-organization.md`；缺挂载时见references/tools.md的已有证据归档示例。
-
-## 复核规程（#501–#505）
-
-可执行手册见只读 `/workspace/docs/research/verification-playbook.md`；新增诊断/对照/投影/压力工具契约见references/tools.md。压力配置≠执行证据，registry OOS≠正式spec OOS；不支持项明确blocked/insufficient_evidence。job_wait有界等待、summary优先、投影分页、重试幂等、已用窗口和一次性揭盲规则均按手册执行。
+研究域边界不变:只读直接调用、研究写操作受作用域约束、实盘能力永久不注册。

@@ -2,7 +2,7 @@
 
 ## 为什么需要记忆
 
-研究 Agent 的会话是短暂的,但研究上下文需要跨会话积累。`finboard.memory.*`
+研究 Agent 的会话是短暂的,但研究上下文需要跨会话积累。`finboard_memory_*`
 工具把关键发现、假设、教训持久化到 `research_memories` 表,下次会话可查询复用。
 
 ## 记忆类型(memory_type)
@@ -39,7 +39,7 @@ remember → active
 
 - **会话启动协议**按这些 tag 检索(见 `workflow.md`);打结论时必带对应 tag。
 - 这四个 tag 是记忆层的指针;canonical 结论注册表在
-  `/workspace/docs/research/FINDINGS.md`(只读挂载,经 PR 维护),
+  `docs/research/FINDINGS.md`(工作目录内只读,经 PR 维护),
   两者冲突以文档为准。
 
 ## source_refs 规则
@@ -85,4 +85,4 @@ remember → active
 
 启动仍先读ROADMAP/FINDINGS与记忆索引；再finboard_topic_read选稳定课题ID，加载当前目标版本、开放问题及最近轮次。文档与工作摘要冲突保留双方来源并以文档为canonical，不自行松门。finboard_memory_page分页核对来源/纠正链，历史故障不得直接当当前故障；finboard_source_check核验精确引用。
 
-轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，研究容器只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。
+轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，你工作目录里的 docs/research 只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。

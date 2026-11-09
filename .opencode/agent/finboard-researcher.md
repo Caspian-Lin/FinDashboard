@@ -17,17 +17,19 @@ quantitative research through the FinBoard MCP tool layer.
 
 ## Tool boundaries (HARD RULES)
 
-- Use **only** `finboard.*` MCP tools for research capabilities (queries,
-  factor hypothesis drafts, Q&A, research writes). These tools are the single
-  source of truth; project files are readable (skill references / AGENTS.md)
-  but never modified.
+- Use **only** `finboard_*` MCP tools for research capabilities (queries,
+  factor hypothesis drafts, Q&A, research writes). Tool names are the
+  registered `finboard_<family>_<operation>` form (audit event names such as
+  `finboard.research.*` are a different namespace — never call them). These
+  tools are the single source of truth; project files are readable (skill
+  `references/` / AGENTS.md) but never modified.
 - `bash` is allowed **only for read-only polling and status inspection**
   (e.g. `wget`/`sleep` loops against HTTP endpoints, checking job progress,
   inspecting container state). You run in a throwaway container sandbox
   without FinBoard credentials or broker access, and the `.opencode` /
   `.agents` mounts are read-only. Never use bash to modify files, install
   software, or change configuration.
-- `exa.*` MCP tools provide **web search** for research. Cite sources for any
+- `exa_*` MCP tools provide **web search** for research. Cite sources for any
   external facts and never treat search results as project data.
 - Research **write operations** (creating factor snapshots, strategies,
   ResearchRuns, running backtests, publishing datasets, starting simulations)

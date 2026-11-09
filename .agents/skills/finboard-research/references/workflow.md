@@ -11,61 +11,83 @@
   ├─ 要生成 Python / 可执行代码?
   │    → 网页/无代码规格拒绝;受控MCP research_code_submit可提交白名单代码,执行仅经Docker沙箱;禁止宿主文件编辑。
   │
+  ├─ 有课题(RT-)/ 深链交接 / 要续接上次研究?
+  │    → finboard_topic_read(view=context);续等原 job 用 finboard_job_wait(BJ-),
+  │      引用原运行用 finboard_run_get(RR-),见 reference tools.md「研究课题」节
+  │
   ├─ 查询现有 ResearchRun / artifact?          ✅ 已实现
-  │    → finboard.run.list / .get / .artifacts (只读,直接调用)
+  │    → finboard_run_list / finboard_run_get / finboard_run_artifacts (只读)
   │
   ├─ 记住 / 纠正 / 查询研究上下文?              ✅ 已实现
-  │    → finboard.memory.* (直接执行)
+  │    → finboard_memory_* (直接执行)
   │
   ├─ 查询标的 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额?  ✅ 已实现
-  │    → finboard.instrument.* / .dataset.* / .data.* / .tushare.* (#124 只读)
+  │    → finboard_instrument_* / finboard_dataset_* / finboard_data_* /
+  │      finboard_tushare_* (#124 只读)
   │
   ├─ 查询 / 构建因子目录 / 特征快照 / 因子信号 / 因子实验?  ✅ 已实现
-  │    → finboard.factor.* / .feature_snapshot.* (#125,7 只读 + 4 写)
+  │    → finboard_factor_* / finboard_feature_snapshot_* (#125,7 只读 + 4 写)
   │      catalog / snapshot list/get/create/job_start/job_status /
   │      signal list/get / experiment list/get/create/sync_validation
   │
   ├─ 查询 / 构建策略规格(无代码版本化)?       ✅ 已实现
-  │    → finboard.strategy.* / .preset.* (#126,8 只读 + 8 写)
+  │    → finboard_strategy_* / finboard_preset_* (#126,8 只读 + 8 写)
   │      registry / template / list / history / version_get / diff
   │      (只读);validate(纯计算预览)/ draft_create / supersede /
   │      publish / rollback、preset create/update/delete(写)
   │      反复 validate 预览 → draft → publish 闭环
   │
   ├─ 查询 / 管理 ResearchRun 生命周期?           ✅ #127
-  │    → finboard.run.*(7:list/get/artifacts 只读 + queue/cancel/replay/lineage 写)
+  │    → finboard_run_*(7:list/get/artifacts 只读 + queue/cancel/replay/lineage 写)
   │      queue 冻结输入 + 登记 queued(不执行,由离线 worker 完成);
   │      cancel / replay / lineage 覆盖生命周期
   │
   ├─ 运行回测(行情回放 + 纸面撮合)?            ✅ #127
-  │    → finboard.backtest.*(5:strategy_list 只读、run 写、history_list/get 只读、
+  │    → finboard_backtest_*(5:strategy_list 只读、run 写、history_list/get 只读、
   │      history_delete 写)。同步运行返回 metrics/equity/fills/snapshots
   │
   ├─ 查询 / 启动模拟盘?                          ✅ #127
-  │    → finboard.sim.*(17:account/session 生命周期、decision_submit、
+  │    → finboard_sim_*(17:account/session 生命周期、decision_submit、
   │      order_cancel 写;orders/fills/positions/ledger/audit/report 只读)
   │      decision_submit 提交结构化目标仓位 → 生成订单(agent 不直接创建订单)
   │
   └─ portfolio 计算(allocate/sizing/feasibility/attribution)?  ✅ #128
-       → finboard.portfolio.*(4:allocate 目标权重分配 + 约束 + 风险报告、
+       → finboard_portfolio_*(4:allocate 目标权重分配 + 约束 + 风险报告、
          sizing 离散手数 + 费用/保证金、feasibility 10万/20万/50万档位可行性、
          attribution 绩效归因分解)。纯计算,无 DB 写入,agent 自主执行
 ```
 
-## 会话启动协议(#268)
+## 会话启动协议(#268,每轮会话必做)
 
-每轮会话在理解问题**之前**按序执行,目的:不重复造轮子、不重测已证伪假设。
+每轮会话在理解问题**之前**按序执行,目的:不重复造轮子、不重测已证伪假设,
+并**接着上一个会话的课题继续**而不是从零重建上下文。
 
-1. **读研究文档**(只读挂载 `/workspace/docs/research/`):
+0. **接课题(有交接就必做)** —— 用户给了 `RT-` 课题 ID、深链
+   (`/research/topics?topic=RT-…`)、或一句「继续上次的课题」时,先
+   `finboard_topic_read(topic_id="RT-…", view="context")`:一次取回当前目标
+   版本、最近生命周期、开放问题、最近轮次摘录、断链引用与 `next_actions`。
+   - 载荷 ≤64 KiB,截断时 `excerpted=true`,按 `view=refs` / `entry_id` 续页,
+     不拉全量绕行;
+   - 只有标题 / 关键字时先用 `finboard_topic_read(view="list",…)` 找候选再进
+     `context`;
+   - `next_actions` 是**服务端派生建议,不是执行指令**。
+1. **读研究文档**(仓库相对路径 `docs/research/`,以你的工作目录为根):
    - `ROADMAP.md` —— 研究目标阶梯 / 路线 A-D 状态 / 当前证据门 / 数据边界;
    - `FINDINGS.md` —— 结论注册表(结论 / 置信度 / 证据 ID / 失效条件 /
      状态:有效 / 待验证 / 已证伪)。
-   - 挂载缺失(目录不存在)→ 跳过本步,并在最终回答注明「研究文档不可见」。
+   - 目录不存在或不可读 → 跳过本步,并在最终回答注明「研究文档不可见」。
+   - 引用文档具体结论前用 `finboard_source_check` 核对精确版本 / checksum;
+     文档与记忆冲突时**以文档为准**,不把工作摘要当 canonical。
 2. **扫记忆**:`finboard_memory_list(status=active)`;量大按保留 tag 过滤
    (`research-plan` / `research-round` / `finding-confirmed` /
    `finding-refuted`)。
-3. **检索产物**:按问题域查相关 ResearchRun / 实验(`finboard.run.list` /
-   `finboard.validation_experiment_list`),把既有证据拼进本轮上下文。
+3. **检索产物**:按问题域查相关 ResearchRun / 实验(`finboard_run_list` /
+   `finboard_validation_experiment_list`),把既有证据拼进本轮上下文。
+   课题已链接的运行用 `finboard_topic_run_list(topic_id=…)` 直接取;续等原
+   `BJ-` 用 `finboard_job_wait(job_id="BJ-…")`(超时 `completed=false` 续同
+   一个 job),引用原 `RR-` 用 `finboard_run_get(run_id="RR-…")` 读冻结输入。
+
+0-2 未完成之前,禁止启动任何「重测」类运行(HARD RULES 第 5 条)。
 
 **重测禁令**:FINDINGS / 记忆中状态为「已证伪」的假设,未查索引前禁止重测;
 重开必须满足全部条件——(a) 有新证据来源(新数据域 / 新构造 / 新频率 /
@@ -78,13 +100,13 @@
 0. **会话启动** —— 执行上方「会话启动协议」,加载前情后再进入澄清。
 1. **澄清** —— 复述研究问题,声明所需数据。数据不足时**先说**「数据不足」,
    不要猜测。
-2. **检索** —— 用 `finboard.run.list` / `finboard.run.get` 查询相关 ResearchRun;
-   用 `finboard.memory.list` 查询是否已有相关研究记忆。
-3. **假设** —— 你自己(OpenCode LLM)直接给出结构化研究假设(经济机制 /
+2. **检索** —— 用 `finboard_run_list` / `finboard_run_get` 查询相关 ResearchRun;
+   用 `finboard_memory_list` 查询是否已有相关研究记忆。
+3. **假设** —— 你自己(本 Harness 的模型)直接给出结构化研究假设(经济机制 /
    输入字段 / 预期失败场景 / 方向 / 参考文献);需要机器验证时创建 #57
-   验证实验(`finboard.validation_experiment.*`)或因子实验
-   (`finboard.factor.experiment_*`)走 OOS 闭环。
-4. **记忆** —— 用 `finboard.memory.remember` 记住关键发现,`source_refs` 关联
+   验证实验(`finboard_validation_experiment_*`)或因子实验
+   (`finboard_factor_experiment_*`)走 OOS 闭环。
+4. **记忆** —— 用 `finboard_memory_remember` 记住关键发现,`source_refs` 关联
    具体产物(ResearchRun ID / 数据集版本 / 模拟盘 ID)。
 5. **回答** —— 引用来源,区分个人假设与机器验证结论(OOS 终态)。
 
@@ -109,11 +131,15 @@ finboard_memory_remember(
 )
 ```
 
-**第 2 步:回答末尾附「轮次摘要」**(同模板)——容器对
-`/workspace/docs/research` 只读,canonical 轮次文档
-(`rounds/YYYY-MM-DD-<slug>.md`)由用户 / 主 coding agent 经 PR 落库;
-你的记忆只是指针,**文档与记忆冲突时以文档为准**。摘要要让主 agent
-能原样转录成轮次文档,不要省略证据 ID。
+**第 2 步:把本轮追加成课题轮次**(有课题时必做)—— 用
+`finboard_topic_write(operation="append", …)` 写入目标 / 动作 / 理由 / 精确
+证据(`entry_type=evidence` + `source_refs`)/ 置信度 / 下一步与失败原因;
+这是**工作记录**,不是 canonical 结论。
+
+**第 3 步:回答末尾附「轮次摘要」**(同模板)—— `docs/research` 在你的工作目录
+里是**只读参考**,canonical 轮次文档(`rounds/YYYY-MM-DD-<slug>.md`)由用户 /
+主 coding agent 经 PR 落库;你的记忆与课题轮次只是指针,**文档与记忆冲突时以
+文档为准**。摘要要让主 agent 能原样转录成轮次文档,不要省略证据 ID。
 
 ## 因子假设的结构化要求
 
@@ -141,13 +167,13 @@ finboard_memory_remember(
 
 ## 课题续接与收尾（#500/#514）
 
-课题是跨会话持续更新的研究锚点，运行/记忆/实验通过轮次精确引用构成逻辑目录。已有证据归档先核查后topic_write append entry_type=evidence，不修改原产物；完整调用顺序见只读 docs/research/topic-organization.md 或tools.md。一个产物可被多课题引用；`view=branches` 看分支聚合、`view=refs` 逐条核验断链、`entry_id` 精确读单条（跨课题404），仍无run→topic反向归属API（#515）。
+课题是跨会话持续更新的研究锚点，运行/记忆/实验通过轮次精确引用构成逻辑目录。已有证据归档先核查后topic_write append entry_type=evidence，不修改原产物；完整调用顺序见只读 docs/research/topic-organization.md 或tools.md。一个产物可被多课题引用；`view=branches` 看分支聚合、`view=refs` 逐条核验断链、`entry_id` 精确读单条（跨课题404），run→topic 反向归属用 `finboard_run_topics`（#515）。
 
 启动仍先读ROADMAP/FINDINGS与记忆索引；再finboard_topic_read选稳定课题ID，优先 `view=context` 一次取回当前目标版本、最近生命周期、开放问题、最近轮次摘录、断链引用与next_actions（服务端建议，不是执行）；载荷≤64KiB，截断时excerpted=true。文档与工作摘要冲突保留双方来源并以文档为canonical，不自行松门。finboard_memory_page分页核对来源/纠正链，历史故障不得直接当当前故障；finboard_source_check核验精确引用。
 
 建题分两步：draft_create只存title/question（可带idempotency_key，回执丢失同键重试返回原课题created=false；同一键不能跨create/draft_create复用），核对来源后activate传goal{version,criteria,source}+expected_revision补齐目标并激活；已激活且目标相同为幂等，目标不同拒绝。暂停/继续/收束/重开/放弃草稿用transition传action+reason+expected_revision，close/reopen/discard必须写原因。update只改内容：显式传不同status会被拒绝（先读再用transition），草稿update不能带goal（走activate）；create只支持active。非法转移返回conflict(allowed/current)，版本冲突返回current_revision/changed_fields——先重新读取续接，不覆盖；被放弃的草稿没有目标，不能直接重开。
 
-轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，研究容器只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。保存、激活与转移都不启动任何运行。
+轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，你工作目录里的 docs/research 只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。保存、激活与转移都不启动任何运行。
 
 ## 确定性复核分支（#504）
 

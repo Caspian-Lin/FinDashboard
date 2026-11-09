@@ -23,13 +23,15 @@ agent、OpenCode 研究 agent(容器内只读挂载在 `/workspace/docs/research
 ## 更新流程(canonical 文档走 PR)
 
 - **文档是 canonical**:修改本目录一律走 PR(版本化、人类可审)。
-- **记忆是指针**:OpenCode 研究 agent 对本目录**只读**(容器 `:ro` 挂载,
-  目录缺失时容器跳过挂载)。agent 每轮收尾按固定模板写 `research_memories`
-  (tag `research-round`)并在回答附「轮次摘要」,由用户 / 主 coding agent
-  转录进 `rounds/`。**文档与记忆冲突时,以文档为准。**
+- **记忆是指针**:研究 Agent 对本目录**只读**(容器 / 客户端工作目录都只读,
+  目录缺失时跳过)。agent 每轮收尾按固定模板写 `research_memories`
+  (tag `research-round`)、追加课题轮次,并在回答附「轮次摘要」,由用户 / 主
+  coding agent 转录进 `rounds/`。**文档与记忆冲突时,以文档为准。**
 - 研究侧的会话启动 / 收尾协议见
-  `.agents/skills/finboard-opencode-research/SKILL.md`(启动必读 ROADMAP +
-  FINDINGS + 记忆索引;未查结论索引禁止重测已证伪假设)。
+  `.agents/skills/finboard-research/SKILL.md`(启动先 `finboard_topic_read`
+  接课题 + `finboard_source_check` 核证据,再读 ROADMAP + FINDINGS + 记忆索引;
+  未查结论索引禁止重测已证伪假设)。旧名
+  `.agents/skills/finboard-opencode-research/` 自 #519 起只是弃用 shim。
 
 ## 保留记忆 tags(指针层)
 
