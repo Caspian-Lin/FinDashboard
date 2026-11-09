@@ -39,6 +39,13 @@ _EXPECTED_TOOLS = {
     "finboard_run_lineage",
     # #518 研究操作审计
     "finboard_audit_query",
+    # #515 课题发起运行 / 关联
+    "finboard_topic_run_start",
+    "finboard_topic_run_list",
+    "finboard_topic_run_get",
+    "finboard_topic_run_retry",
+    "finboard_topic_run_cancel",
+    "finboard_run_topics",
     # #124 数据查询工具
     "finboard_instrument_list",
     "finboard_instrument_get",
@@ -217,7 +224,7 @@ class TestToolExposure:
     async def test_tool_scopes_cover_all_registered_tools(self) -> None:
         """#517:TOOL_SCOPES 必须与注册工具集一一对应(数量同源)。"""
         names = await _tool_names()
-        assert len(names) == 149
+        assert len(names) == 155
         assert set(TOOL_SCOPES) == names
         for tool_name, scopes in TOOL_SCOPES.items():
             assert scopes, f"{tool_name} 没有声明作用域"
@@ -244,13 +251,15 @@ class TestToolExposure:
                 assert keyword not in lowered, f"工具 {name} 暴露了禁止能力 {keyword}"
             # 实盘交易动词(order/fill/cancel/buy/sell/trade/position)——模拟盘
             # (``finboard_sim_*``,操作 simulation_* 表与 SIM-* ID)、ResearchRun
-            # (``finboard_run_*``,操作 research_runs 表与 RR- ID)与补数请求
+            # (``finboard_run_*``/``finboard_topic_run_*``,操作 research_runs 表与
+            # RR- ID;topic_run_cancel 是课题内协作式取消,非实盘撤单)与补数请求
             # (``finboard_data_backfill_*``,操作 data_backfill_* 表与 BF- ID;
             # "backfill" 是数据补数,与实盘 fills 无关)豁免;其他工具不得暴露
             # 这些动词。
             if (
                 lowered.startswith("finboard_sim_")
                 or lowered.startswith("finboard_run_")
+                or lowered.startswith("finboard_topic_run_")
                 or lowered.startswith("finboard_job_")
                 or lowered.startswith("finboard_data_backfill_")
             ):
