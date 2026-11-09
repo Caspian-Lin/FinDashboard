@@ -33,10 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from finboard_app.config import Settings, load_settings
 from finboard_mcp.auth import (
     DatabaseIdentityResolver,
-    warn_legacy_auth_token,
     wrap_with_bearer_auth,
 )
 from finboard_mcp.context import build_stdio_identity
+from finboard_mcp.scopes import (
+    arm_scope_enforcement,
+    require_scope_enforcement_armed,
+)
 from finboard_mcp.server import build_mcp_server
 from finboard_persistence import create_async_engine, session_factory
 from finboard_persistence.mcp_client_repo import McpClientRepository
@@ -59,6 +62,23 @@ def main() -> None:
             "FINBOARD_MCP_ENABLED=false:FinBoard MCP server 未启用。"
             "设置 FINBOARD_MCP_ENABLED=true 后重试。"
         )
+    # #517:服务开始前必须装配作用域强制(自检失败即具名退出,不静默 fail-open)。
+    if settings.mcp_transport == "stdio":
+        stdio_identity = build_stdio_identity(settings.mcp_stdio_scopes)
+        arm_scope_enforcement(
+            readonly_only=settings.mcp_readonly_only,
+            default_identity=stdio_identity,
+        )
+    else:
+        # HTTP 无进程级默认身份:每请求由 Bearer 中间件解析,未解析即拒绝。
+        arm_scope_enforcement(
+            readonly_only=settings.mcp_readonly_only, default_identity=None
+        )
+    try:
+        require_scope_enforcement_armed()
+    except RuntimeError as exc:  # pragma: no cover - 防御性自检
+        _exit_named(f"MCP 作用域强制装配失败: {exc}")
+
     mcp = build_mcp_server()
     # stdio 传输:本机子进程接入,无 HTTP 请求,身份由配置的默认作用域决定。
     if settings.mcp_transport == "stdio":
@@ -107,7 +127,8 @@ def _run_http(mcp: Any, settings: Settings) -> None:
             ),
         )
     if legacy_token:
-        warn_legacy_auth_token()
+        # 弃用 warning 由 MCP server lifespan 统一打印一次(此处不重复)。
+        _logger.info("mcp.legacy_token_enabled", note="旧共享 token 兼容期")
 
     engine = create_async_engine(
         settings.db_url,
@@ -143,7 +164,16 @@ def _run_http(mcp: Any, settings: Settings) -> None:
             transport=transport,
             legacy_token=bool(legacy_token),
         )
-        uvicorn.run(app, host=host, port=port)
+        try:
+            uvicorn.run(app, host=host, port=port, loop="none")
+        except SystemExit as exc:
+            # uvicorn bind 失败 = sys.exit(STARTUP_FAILURE=3);转成 FinBoard 具名错误。
+            if exc.code == 3:
+                _exit_named(
+                    f"端口 {host}:{port} 绑定失败(可能已有 MCP 实例在运行)。"
+                    "请停止旧实例或修改 FINBOARD_MCP_PORT;不会静默换端口。"
+                )
+            raise
     finally:
         # uvicorn 正常返回时事件循环已关闭;dispose 由 lifespan 包装兜底,
         # 这里只在从未进入 lifespan(启动即失败)时安全回收。

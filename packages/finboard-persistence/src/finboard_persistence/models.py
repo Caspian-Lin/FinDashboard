@@ -2384,7 +2384,7 @@ class McpClientModel(Base, IdMixin):
 
     client_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    token_hash: Mapped[str] = mapped_column(String(64), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     token_prefix: Mapped[str] = mapped_column(String(16))
     scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_by: Mapped[str] = mapped_column(String(128))

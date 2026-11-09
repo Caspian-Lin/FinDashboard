@@ -17,14 +17,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import socket
 import subprocess
 import sys
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
 import pytest_asyncio
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -57,6 +64,71 @@ from tests.integration.conftest import TEST_DB_URL
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _READ_TOOL = "finboard.run.list"
 _WRITE_TOOL = "finboard.run.queue"
+
+
+def _mcp_env(**overrides: str) -> dict[str, str]:
+    """无 .env / 无 OpenCode 环境的 MCP 子进程环境。"""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("FINBOARD_MCP_", "FINBOARD_OPENCODE_"))
+    }
+    env.update(overrides)
+    return env
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_port(port: int, *, timeout: float = 40.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+@contextmanager
+def _server_process(tmp_path: Path, **env_overrides: str) -> Iterator[subprocess.Popen[str]]:
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "finboard_mcp"],
+        cwd=tmp_path,
+        env=_mcp_env(**env_overrides),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        yield proc
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:  # pragma: no cover - 防御性清理
+            proc.kill()
+            proc.wait(timeout=20)
+
+
+@asynccontextmanager
+async def _http_session(url: str, token: str) -> AsyncIterator[ClientSession]:
+    """带 Bearer header 的 Streamable HTTP MCP 会话(真实走 HTTP)。"""
+    async with httpx2.AsyncClient(
+        headers={"Authorization": f"Bearer {token}"}, timeout=60.0
+    ) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
+            read_stream,
+            write_stream,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                yield session
 
 
 @pytest.fixture
@@ -293,6 +365,33 @@ class TestClientCredentials:
             assert token.rsplit("_", 1)[-1] not in value
 
 
+class TestCli:
+    async def test_list_shows_token_prefix_but_never_plaintext(
+        self, tmp_path: Path, client_smaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        _, token = await _create_client(
+            client_smaker, name="cli-list-smoke", scopes=("research.read",)
+        )
+        # token 格式 fbmc_<client_id>_<secret>;secret 本身可能含 "_"。
+        secret = token.split("_", 2)[2]
+        prefix = secret[:16]
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-m", "finboard_app.cli", "mcp", "client", "list"],
+            cwd=tmp_path,
+            env=_mcp_env(FINBOARD_DB_URL=TEST_DB_URL),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "PREFIX" in result.stdout
+        assert prefix in result.stdout
+        assert token not in result.stdout
+        assert secret not in result.stdout
+
+
 class TestScopeModel:
     async def test_tool_scopes_cover_all_registered_tools(self) -> None:
         names = {tool.name for tool in await build_mcp_server().list_tools()}
@@ -340,22 +439,23 @@ class TestScopeModel:
             parse_scopes("*")
         assert SCOPE_PRESETS["data-operator"] >= SCOPE_PRESETS["topic-writer"]
 
+    async def test_side_effect_tool_scope_classification(self) -> None:
+        """有落盘 / 启动运行副作用的工具不得归入只读作用域。"""
+        assert TOOL_SCOPES["finboard_report_export"] == frozenset({"research.write"})
+        assert TOOL_SCOPES["finboard_factor_series_build"] == frozenset(
+            {"research.run"}
+        )
+
 
 class TestStartupGate:
     def _run_mcp(
         self, tmp_path: Path, **env_overrides: str
     ) -> subprocess.CompletedProcess[str]:
         """在无 .env / 无 OpenCode 环境的空目录启动 ``python -m finboard_mcp``。"""
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("FINBOARD_MCP_", "FINBOARD_OPENCODE_"))
-        }
-        env.update(env_overrides)
         return subprocess.run(
             [sys.executable, "-m", "finboard_mcp"],
             cwd=tmp_path,
-            env=env,
+            env=_mcp_env(**env_overrides),
             input="",
             capture_output=True,
             text=True,
@@ -420,6 +520,85 @@ class TestStartupGate:
         )
         assert result.returncode == 2
         assert "没有可用凭据" in result.stderr
+
+
+class TestHttpEndToEnd:
+    """真实 HTTP 子进程(非 in-process):Windows SelectorEventLoop + psycopg 路径。"""
+
+    async def test_client_token_read_ok_write_denied_over_http(
+        self, tmp_path: Path, client_smaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        port = _free_port()
+        _, token = await _create_client(client_smaker, scopes=("research.read",))
+        env = {
+            "FINBOARD_MCP_ENABLED": "true",
+            "FINBOARD_MCP_TRANSPORT": "streamable-http",
+            "FINBOARD_MCP_HOST": "127.0.0.1",
+            "FINBOARD_MCP_PORT": str(port),
+            "FINBOARD_MCP_AUTH_TOKEN": "",
+            "FINBOARD_DB_URL": TEST_DB_URL,
+        }
+        with _server_process(tmp_path, **env) as proc:
+            assert await asyncio.to_thread(_wait_port, port), "MCP HTTP server 未就绪"
+            assert proc.poll() is None, "MCP HTTP server 提前退出"
+            async with _http_session(
+                f"http://127.0.0.1:{port}/mcp", token
+            ) as session:
+                read = await session.call_tool("finboard_run_list", {"limit": 1})
+                read_payload = read.structured_content
+                assert read_payload is not None
+                assert read_payload["status"] == "ok", read_payload
+
+                write = await session.call_tool(
+                    "finboard_run_queue", {"payload": {}}
+                )
+                write_payload = write.structured_content
+                assert write_payload is not None
+                assert write_payload["status"] == "denied", write_payload
+                assert write_payload["error"]["kind"] == "permission_denied"
+
+    async def test_duplicate_start_gives_named_error(self, tmp_path: Path) -> None:
+        """同端口重复启动 → FinBoard 具名错误(不是 uvicorn 原始 traceback)。"""
+        port = _free_port()
+        env = {
+            "FINBOARD_MCP_ENABLED": "true",
+            "FINBOARD_MCP_TRANSPORT": "streamable-http",
+            "FINBOARD_MCP_HOST": "127.0.0.1",
+            "FINBOARD_MCP_PORT": str(port),
+            "FINBOARD_MCP_AUTH_TOKEN": "legacy-token",
+        }
+        with _server_process(tmp_path, **env):
+            assert await asyncio.to_thread(_wait_port, port), "首个 MCP server 未就绪"
+            second = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, "-m", "finboard_mcp"],
+                cwd=tmp_path,
+                env=_mcp_env(**env),
+                input="",
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        assert second.returncode == 2
+        combined = second.stdout + second.stderr
+        assert "绑定失败" in combined
+        assert "FINBOARD_MCP_PORT" in combined
+
+    async def test_allow_remote_true_starts_non_loopback(self, tmp_path: Path) -> None:
+        """ALLOW_REMOTE=true 正向用例:非 loopback 绑定可启动并监听。"""
+        port = _free_port()
+        env = {
+            "FINBOARD_MCP_ENABLED": "true",
+            "FINBOARD_MCP_TRANSPORT": "streamable-http",
+            "FINBOARD_MCP_HOST": "0.0.0.0",
+            "FINBOARD_MCP_ALLOW_REMOTE": "true",
+            "FINBOARD_MCP_PORT": str(port),
+            "FINBOARD_MCP_AUTH_TOKEN": "legacy-token",
+        }
+        with _server_process(tmp_path, **env) as proc:
+            assert await asyncio.to_thread(_wait_port, port), "非 loopback MCP server 未就绪"
+            assert proc.poll() is None
 
 
 async def test_database_resolver_touches_last_used(

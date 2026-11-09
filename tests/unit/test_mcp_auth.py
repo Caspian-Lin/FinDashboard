@@ -323,3 +323,26 @@ def test_app_context_without_request_clears_identity() -> None:
     finally:
         reset_current_identity(token)
 
+
+def test_app_context_http_without_identity_does_not_fall_back_to_default() -> None:
+    """HTTP 请求缺 mcp_identity → 写 None(拒绝),绝不回退进程默认身份。"""
+    from types import SimpleNamespace
+
+    from finboard_mcp.context import app_context
+    from finboard_mcp.identity import current_identity
+    from finboard_mcp.scopes import arm_scope_enforcement, reset_scope_policy
+
+    # 模拟进程里残留了 stdio 默认身份(即使如此,HTTP 请求也不得使用它)。
+    arm_scope_enforcement(readonly_only=False, default_identity=_identity("*"))
+    try:
+        fake_ctx = SimpleNamespace(
+            request_context=SimpleNamespace(
+                lifespan_context=object(),
+                request=SimpleNamespace(state=SimpleNamespace()),
+            )
+        )
+        app_context(fake_ctx)  # type: ignore[arg-type]
+        assert current_identity() is None
+    finally:
+        reset_scope_policy()
+

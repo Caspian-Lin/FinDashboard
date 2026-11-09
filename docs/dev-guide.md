@@ -651,9 +651,12 @@ uv run uvicorn finboard_api.app:app
 - **MCP 地址可配置**:`FINBOARD_OPENCODE_MCP_REMOTE_URL` 在容器启动时渲染进
   `.opencode/runtime/opencode.json` 并以单文件 bind mount 覆盖容器内配置;
   内嵌 MCP 在容器模式下默认绑 `0.0.0.0`(Bearer 凭据保护)。
-- 也可用 Makefile 独立跑 MCP HTTP server:`make mcp-serve-http MCP_AUTH_TOKEN=<token>`;
-  外部客户端推荐用 `finboard mcp client create --name <n> --preset <preset>` 签发
-  可撤销凭据(#517,见 `docs/mcp-client-auth.md`)。
+- 也可用 Makefile 独立跑 MCP HTTP server:`make mcp-serve-http`(本机 loopback;
+  凭据用 `make mcp-client-create` 签发,或兼容期显式传 `MCP_AUTH_TOKEN=<token>`);
+  容器 / 远程场景用 `make mcp-serve-http-remote`(显式 `ALLOW_REMOTE=true`,
+  必须置于 TLS 反向代理后)。外部客户端推荐用
+  `finboard mcp client create --name <n> --preset <preset>` 签发可撤销凭据
+  (#517,见 `docs/mcp-client-auth.md`)。
 
 外部 serve 模式(向后兼容,`opencode serve` 4096 + `FINBOARD_OPENCODE_ENABLED=true`)
 仍可用,见 `packages/finboard-opencode` 文档。

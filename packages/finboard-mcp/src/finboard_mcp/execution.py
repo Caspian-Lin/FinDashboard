@@ -11,8 +11,9 @@
 * ``TOOL_SCOPES`` 查不到工具条目 = 契约错误 = **拒绝**(fail-closed),不会
   「未声明即放行」;``"*"`` 仅由旧 ``FINBOARD_MCP_AUTH_TOKEN`` 合成;
 * ``FINBOARD_MCP_READONLY_ONLY`` 兼容期:任何需要写作用域的工具一律拒绝;
-* 只有 server lifespan / ``__main__`` 装配了策略后才强制;直接调用 helper 的
-  单元测试保持旧行为(策略未装配)。
+* 只有 server lifespan / ``__main__`` 装配了策略后才强制。**未装配的进程内
+  调用不设作用域边界,仅供测试直接调用 helper**;生产入口(stdio / HTTP /
+  内嵌)启动时装配并在装配失败时具名退出。
 
 异常映射策略:
 

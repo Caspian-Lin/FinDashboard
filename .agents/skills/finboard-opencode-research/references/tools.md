@@ -5,8 +5,23 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-工具数量与参数以当前注册schema为准。所有工具遵守权限边界:研究写操作 agent 自主执行,
-不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
+工具数量与参数以当前注册schema为准。所有工具遵守权限边界:研究写操作由持有
+对应作用域的客户端自主执行,不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
+
+## 身份与作用域(#517,先读)
+
+调用身份由服务端 Bearer 凭据解析(HTTP 按客户端签发、可吊销;旧共享 token 处于
+兼容弃用期),作用域 `research.read` / `research.write` / `research.run` /
+`data.write` / `audit.read` 在唯一漏斗 `run_tool` 强制:
+
+- 只读客户端(readonly 预设)只能调用只读工具;`finboard_report_export` 会落盘,
+  需要 `research.write`;`finboard_factor_series_build` 会入队沙箱构建,需要
+  `research.run`。
+- 越权返回 `status=denied` / `error.kind=permission_denied`,不产生业务写入;
+  未登记作用域的工具默认拒绝(fail-closed)。
+- stdio 本机子进程默认仅 `research.read`;需要写操作必须由宿主显式配置
+  `FINBOARD_MCP_STDIO_SCOPES`(相对旧版本是收紧)。
+- 创建 / 吊销 / 预设 / TLS 边界见 `docs/mcp-client-auth.md`。
 
 ## 确定性复核工具（#501–#504）
 
@@ -25,23 +40,23 @@ validation_experiment_create 的 selection_config.validation_trial_runner 显式
 `final_test_unsealed=true` 明确表示**已揭盲、最终窗口已使用，禁止重做**，不是“未揭盲”。验证实验读侧 `final_test_state` 给出同源中文解释，不改变历史状态/checksum；结论仍先看 `oos_outcome`。
 完整复核payload/收尾结构见docs/research/verification-playbook.md；验证契约见docs/research/formal-validation-contract.md。
 
-## 权限矩阵(#122:研究写操作自主执行)
+## 权限矩阵(#122:研究写操作自主执行;#517 按客户端作用域)
 
 | 类别 | 只读/自主 | 永久不可用 |
 |------|----------|-----------|
-| 只读查询(run.* / instrument.* / dataset.* / data.* / tushare.*) | ✅ | |
-| 研究记忆(memory.*) | ✅ | |
-| 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
-| 策略规格(strategy.* / preset.*,✅ #126) | ✅(含 validate/draft/publish/rollback) | |
-| 回测(backtest.*,✅ #127+#174+#175) | ✅(同步运行 + strategy_spec 路由 research_run + 批量网格提交/聚合 + 历史 CRUD) | |
-| 模拟盘(sim.*,✅ #127+#139) | ✅(账户/会话/决策/行情投递/评估/归档/订单/报告) | |
-| ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
-| portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
-| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get/wait 只读 + enqueue/cancel/archive/unarchive 写) | |
-| 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
-| #57 验证实验(validation_experiment.*,✅ #138+#233) | ✅(create/reject/add_trial/delete/run 写) | |
-| 自选股(watchlist.*,✅ #140) | ✅(create/update/delete/add_symbols/remove_symbol 写) | |
-| 报告聚合与导出(report.*,✅ #141) | ✅(3 只读:聚合 run/backtest + 导出 CSV/Markdown 文件) | |
+| 只读查询(run.* / instrument.* / dataset.* / data.* / tushare.*) | ✅(research.read) | |
+| 研究记忆(memory.*) | ✅(读 research.read;写 research.write) | |
+| 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅(读 research.read;建快照/实验 research.write;启动任务 research.run) | |
+| 策略规格(strategy.* / preset.*,✅ #126) | ✅(读 research.read;draft/publish/rollback/preset 写 research.write) | |
+| 回测(backtest.*,✅ #127+#174+#175) | ✅(读 research.read;run/网格提交 research.run;历史删除 research.write) | |
+| 模拟盘(sim.*,✅ #127+#139) | ✅(读 research.read;会话/决策/行情/评估等运行写 research.run;账户创建 research.write) | |
+| ResearchRun 生命周期(run.* 写,✅ #127) | ✅(读 research.read;queue/cancel/replay research.run) | |
+| portfolio(portfolio.*,✅ #128) | ✅(纯计算:research.read) | |
+| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get/wait research.read;enqueue/cancel 需 research.run+data.write;archive/unarchive research.write) | |
+| 数据写操作(data_write.* / etf.*,✅ #137) | ✅(data.write;config_get/review_queue 为 research.read) | |
+| #57 验证实验(validation_experiment.*,✅ #138+#233) | ✅(读 research.read;create/reject/add_trial/delete research.write;run research.run) | |
+| 自选股(watchlist.*,✅ #140) | ✅(读 research.read;写 research.write) | |
+| 报告聚合与导出(report.*,✅ #141) | ✅(report_run/report_backtest research.read;report_export 落盘需 research.write) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读 + ✅ #127 写)

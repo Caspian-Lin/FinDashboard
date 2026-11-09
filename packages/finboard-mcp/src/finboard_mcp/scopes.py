@@ -114,7 +114,8 @@ TOOL_SCOPES: dict[str, frozenset[Scope]] = {
     "finboard_run_compare": _READ,
     "finboard_decision_projection": _READ,
     # ---- 因子序列(#360) ----
-    "finboard_factor_series_build": _WRITE,
+    # build 会入队沙箱因子构建任务(启动运行),不是纯研究元数据写入。
+    "finboard_factor_series_build": _RUN,
     "finboard_factor_series_get": _READ,
     # ---- 因子实验室(#125) ----
     "finboard_factor_catalog": _READ,
@@ -156,7 +157,8 @@ TOOL_SCOPES: dict[str, frozenset[Scope]] = {
     # ---- 报告(#141) ----
     "finboard_report_run": _READ,
     "finboard_report_backtest": _READ,
-    "finboard_report_export": _READ,
+    # export 会写 CSV / Markdown 文件(落盘副作用),只读客户端不得调用。
+    "finboard_report_export": _WRITE,
     # ---- 研究代码仓库(#215/#219;只存储与版本化) ----
     "finboard_research_code_submit": _WRITE,
     "finboard_research_code_list": _READ,
@@ -343,7 +345,11 @@ def scope_policy() -> ScopePolicy:
 def arm_scope_enforcement(
     *, readonly_only: bool, default_identity: McpClientIdentity | None = None
 ) -> None:
-    """装配强制策略(server lifespan / ``__main__`` 启动时调用)。"""
+    """装配强制策略(server lifespan / ``__main__`` 启动时调用)。
+
+    ``default_identity`` 是 stdio / 进程内调用的默认身份;HTTP 每请求由中间件
+    覆盖。未装配(直接调用 helper 的单元测试)不设边界,仅测试使用。
+    """
     global _policy
     _policy = replace(
         _policy,
@@ -351,6 +357,26 @@ def arm_scope_enforcement(
         readonly_only=readonly_only,
         default_identity=default_identity,
     )
+
+
+def arm_scope_enforcement_preserving_identity(*, readonly_only: bool) -> None:
+    """装配强制策略但保留已设置的默认身份(server lifespan 使用)。
+
+    ``__main__`` 在 stdio 启动前已装配 ``FINBOARD_MCP_STDIO_SCOPES`` 身份;
+    lifespan 只补 ``readonly_only``,不得把 stdio 默认身份覆盖成 ``None``,也
+    不得把 stdio 身份带进 HTTP(HTTP 无默认身份,未解析即拒绝)。
+    """
+    global _policy
+    _policy = replace(_policy, enforce=True, readonly_only=readonly_only)
+
+
+def require_scope_enforcement_armed() -> None:
+    """启动自检:作用域强制未装配即视为配置错误(具名失败,不静默 fail-open)。"""
+    if not _policy.enforce:
+        raise RuntimeError(
+            "MCP 作用域强制未装配:启动路径必须调用 arm_scope_enforcement / "
+            "arm_scope_enforcement_preserving_identity"
+        )
 
 
 def set_default_identity(identity: McpClientIdentity | None) -> None:
@@ -372,9 +398,11 @@ __all__ = [
     "Scope",
     "ScopePolicy",
     "arm_scope_enforcement",
+    "arm_scope_enforcement_preserving_identity",
     "identity_has_scopes",
     "parse_scopes",
     "preset_scopes",
+    "require_scope_enforcement_armed",
     "required_scopes_for",
     "reset_scope_policy",
     "scope_policy",

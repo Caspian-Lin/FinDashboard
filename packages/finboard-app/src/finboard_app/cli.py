@@ -2520,7 +2520,7 @@ def mcp_client_list(ctx: typer.Context) -> None:
         typer.echo("尚无 MCP 客户端。用 `finboard mcp client create` 签发。")
         return
     typer.echo(
-        f"{'CLIENT_ID':<20} {'NAME':<20} {'SCOPES':<45} "
+        f"{'CLIENT_ID':<20} {'NAME':<20} {'PREFIX':<17} {'SCOPES':<45} "
         f"{'CREATED_BY':<12} {'STATE'}"
     )
     for row in rows:
@@ -2528,8 +2528,8 @@ def mcp_client_list(ctx: typer.Context) -> None:
             "expired" if row.expires_at is not None and row.expires_at <= _utcnow() else "active"
         )
         typer.echo(
-            f"{row.client_id:<20} {row.name:<20} {','.join(row.scopes):<45} "
-            f"{row.created_by:<12} {state}"
+            f"{row.client_id:<20} {row.name:<20} {row.token_prefix:<17} "
+            f"{','.join(row.scopes):<45} {row.created_by:<12} {state}"
         )
         typer.echo(
             f"  created_at={_iso(row.created_at)} last_used_at={_iso(row.last_used_at)} "

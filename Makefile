@@ -7,7 +7,8 @@
 .PHONY: help install sync lint format typecheck test test-unit test-integration \
         db-up db-down db-logs migrate migrate-new run serve \
         web-install web-dev web-build web-lint \
-        opencode-serve opencode-web mcp-serve \
+        opencode-serve opencode-web mcp-serve mcp-serve-http mcp-serve-http-remote \
+        mcp-client-create mcp-client-list mcp-client-revoke \
         opencode-agent-image opencode-agent-smoke \
         worker dev clean
 
@@ -104,10 +105,11 @@ OPENCODE_PORT ?= 4097
 OPENCODE_SERVE_PORT ?= 4096
 # iframe 跨源嵌入必须允许 FinBoard 前端源
 OPENCODE_CORS ?= http://localhost:5173
-# HTTP 传输必须有服务端凭据(#517):旧共享 MCP_AUTH_TOKEN,或先
-# `finboard mcp client create` 签发可撤销客户端;空 token 且无客户端时拒绝启动。
-# 用 make mcp-serve-http MCP_AUTH_TOKEN=xxx 覆盖旧共享 token(已弃用)。
-MCP_AUTH_TOKEN ?= change-me
+# HTTP 传输必须有服务端凭据(#517):推荐用 `make mcp-client-create` 签发
+# 按客户端凭据;旧共享 token 仅在兼容期通过 MCP_AUTH_TOKEN 显式传入(默认空)。
+MCP_AUTH_TOKEN ?=
+MCP_CLIENT_NAME ?= codex
+MCP_CLIENT_PRESET ?= readonly
 
 opencode-serve: ## 启动 opencode serve(headless HTTP API,端口 $(OPENCODE_SERVE_PORT))
 	opencode serve --port $(OPENCODE_SERVE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
@@ -115,11 +117,23 @@ opencode-serve: ## 启动 opencode serve(headless HTTP API,端口 $(OPENCODE_SER
 opencode-web: ## 启动 opencode web(带 Web UI,端口 $(OPENCODE_PORT));FinBoard 托管时无需手动启动
 	opencode web --port $(OPENCODE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
 
+mcp-client-create: ## 签发 MCP 客户端凭据(NAME=$(MCP_CLIENT_NAME) PRESET=$(MCP_CLIENT_PRESET);明文 token 只打印一次)
+	$(UV) run finboard mcp client create --name $(MCP_CLIENT_NAME) --preset $(MCP_CLIENT_PRESET)
+
+mcp-client-list: ## 列出 MCP 客户端(不显示 secret / 摘要)
+	$(UV) run finboard mcp client list
+
+mcp-client-revoke: ## 吊销 MCP 客户端(需 CLIENT_ID=MC-xxx)
+	$(UV) run finboard mcp client revoke $(CLIENT_ID)
+
 mcp-serve: ## 启动 finboard-mcp(stdio 传输,本机子进程接入;默认作用域 research.read)
 	FINBOARD_MCP_ENABLED=true $(UV) run python -m finboard_mcp
 
-mcp-serve-http: ## 启动 finboard-mcp(HTTP 传输;0.0.0.0 需 ALLOW_REMOTE,凭据可用 mcp_clients 或 MCP_AUTH_TOKEN)
-	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_ALLOW_REMOTE=true FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN=$(MCP_AUTH_TOKEN) $(UV) run python -m finboard_mcp
+mcp-serve-http: ## 启动 finboard-mcp(本机 loopback HTTP;凭据来自 mcp_clients,或兼容期 MCP_AUTH_TOKEN)
+	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=127.0.0.1 FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN="$(MCP_AUTH_TOKEN)" $(UV) run python -m finboard_mcp
+
+mcp-serve-http-remote: ## 非 loopback HTTP(容器/远程;须 TLS 反向代理 + 凭据;显式 ALLOW_REMOTE)
+	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_ALLOW_REMOTE=true FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN="$(MCP_AUTH_TOKEN)" $(UV) run python -m finboard_mcp
 
 # 衍生镜像 tag:与 Dockerfile ARG BASE_IMAGE 的 opencode 版本同步 bump(#313)。
 OPENCODE_AGENT_IMAGE ?= finboard-opencode-agent:1.18.15

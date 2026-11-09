@@ -39,8 +39,9 @@ from finboard_mcp.identity import (
     set_current_identity,
 )
 from finboard_mcp.scopes import (
-    arm_scope_enforcement,
+    arm_scope_enforcement_preserving_identity,
     parse_scopes,
+    require_scope_enforcement_armed,
     reset_scope_policy,
     scope_policy,
 )
@@ -94,12 +95,19 @@ def app_context(ctx: Context) -> McpAppContext:
     """从 MCP ``Context`` 取出 lifespan 组装的依赖,并绑定本次调用的身份。
 
     每次工具调用都会执行(148 个工具全部经此入口),因此 contextvar 总是被
-    覆盖:HTTP 有身份 → 写入;无身份 → 写 ``None``(清掉同任务上一次调用的
-    残留,避免 fail-open);stdio / 进程内 → 回退进程级默认身份。
+    覆盖,不会残留上一次调用的身份:
+
+    * HTTP 请求(``request_context.request`` 存在):只信任中间件写入
+      ``request.state.mcp_identity`` 的身份;缺失即写 ``None`` → 作用域检查
+      直接拒绝(fail-closed,不回退进程默认身份);
+    * stdio / 进程内(``request is None``):使用进程级默认身份
+      (``FINBOARD_MCP_STDIO_SCOPES``),未配置则 ``None`` → 拒绝。
     """
     app = cast(McpAppContext, ctx.request_context.lifespan_context)
-    identity = _identity_from_request(ctx)
-    if identity is None:
+    request = getattr(ctx.request_context, "request", None)
+    if request is not None:
+        identity = _identity_from_request(ctx)
+    else:
         identity = scope_policy().default_identity
     # 不 reset:身份在工具调用任务内有效,下一调用会再次覆盖;HTTP session
     # 任务与客户端一一对应,stdio / 进程内为固定默认身份。
@@ -112,16 +120,14 @@ async def app_lifespan(_server: MCPServer) -> AsyncIterator[McpAppContext]:
     settings = load_settings()
     log = structlog.get_logger("finboard.mcp.lifespan")
 
-    # #517:启动即装配作用域强制;未装配状态只用于直接调用 helper 的单元测试。
-    stdio_identity = (
-        build_stdio_identity(settings.mcp_stdio_scopes)
-        if settings.mcp_transport == "stdio"
-        else None
+    # #517:启动即装配作用域强制。默认身份(stdio)由 `__main__` 在启动前设置;
+    # lifespan 只补 readonly 开关并保留它,绝不从 FINBOARD_MCP_STDIO_SCOPES
+    # 推导 HTTP 默认身份(HTTP 无身份必须拒绝)。未装配状态只用于直接调用
+    # helper 的单元测试。
+    arm_scope_enforcement_preserving_identity(
+        readonly_only=settings.mcp_readonly_only
     )
-    arm_scope_enforcement(
-        readonly_only=settings.mcp_readonly_only,
-        default_identity=stdio_identity,
-    )
+    require_scope_enforcement_armed()
     if settings.mcp_readonly_only:
         log.warning(
             "mcp.readonly_only_deprecated",
@@ -154,12 +160,15 @@ async def app_lifespan(_server: MCPServer) -> AsyncIterator[McpAppContext]:
         feature_snapshot_jobs=FeatureSnapshotJobManager(),
     )
 
+    default_identity = scope_policy().default_identity
     log.info(
         "mcp.starting",
         readonly_only=settings.mcp_readonly_only,
         audit_persist=settings.mcp_audit_persist,
         transport=settings.mcp_transport,
-        stdio_scopes=sorted(stdio_identity.scopes) if stdio_identity else None,
+        default_identity=(
+            default_identity.client_id if default_identity is not None else None
+        ),
     )
     try:
         yield context

@@ -51,7 +51,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_mcp_clients_client_id", "mcp_clients", ["client_id"], unique=True)
     op.create_index("ix_mcp_clients_name", "mcp_clients", ["name"], unique=True)
-    op.create_index("ix_mcp_clients_token_hash", "mcp_clients", ["token_hash"])
+    op.create_index("ix_mcp_clients_token_hash", "mcp_clients", ["token_hash"], unique=True)
 
 
 def downgrade() -> None:

@@ -35,9 +35,9 @@ in-memory / stdio 任务不会继承外层 ContextVar)。stdio 无 HTTP 请求�
 
 | 作用域 | 覆盖能力 |
 | --- | --- |
-| `research.read` | 研究域只读(数据查询、因子、ResearchRun、策略、模拟盘查询、报告、诊断、课题读侧) |
-| `research.write` | 研究域结构化写入(课题 / 记忆 / 策略规格 / 因子与验证实验元数据 / 自选股 / 研究代码提交) |
-| `research.run` | 启动 / 取消 / 重放研究运行、回测、参数网格、模拟盘会话、沙箱执行 |
+| `research.read` | 研究域只读(数据查询、因子、ResearchRun、策略、模拟盘查询、报告聚合、诊断、课题读侧) |
+| `research.write` | 研究域结构化写入(课题 / 记忆 / 策略规格 / 因子与验证实验元数据 / 自选股 / 研究代码提交 / 报告导出落盘) |
+| `research.run` | 启动 / 取消 / 重放研究运行、回测、参数网格、模拟盘会话、沙箱执行(含 `finboard_factor_series_build` 入队构建) |
 | `data.write` | 全局数据操作(拉取 / 批量下载 / 发布 / 修复 / ETF / 配置 / 补数) |
 | `audit.read` | 审计读取(保留给运维 / 审计客户端) |
 
@@ -51,6 +51,10 @@ in-memory / stdio 任务不会继承外层 ContextVar)。stdio 无 HTTP 请求�
 
 `audit.read` 不进入常规研究预设。也可用 `--scopes a,b,c` 显式组合。
 
+注意:`finboard_report_export` 有落盘副作用,归入 `research.write`;
+`finboard_factor_series_build` 会入队沙箱构建,归入 `research.run`;readonly
+客户端不能调用这两个工具。
+
 ## 3. 创建 / 列出 / 吊销
 
 ```bash
@@ -59,7 +63,8 @@ uv run finboard mcp client create --name codex --preset readonly
 uv run finboard mcp client create --name harness --scopes research.read,research.write,research.run
 uv run finboard mcp client create --name ops --scopes research.read,audit.read --expires-in-days 30
 
-# 列出(不显示 secret / 摘要;state=active|expired|revoked)
+# 列出(不显示 secret / token 摘要;显示 client_id / name / scopes / token_prefix /
+# state=active|expired|revoked)
 uv run finboard mcp client list
 
 # 吊销(幂等;已吊销保留首次吊销时间)
@@ -89,8 +94,8 @@ uv run finboard mcp client revoke MC-0123456789ab
 
 | 场景 | 默认 | 规则 |
 | --- | --- | --- |
-| 本机 stdio | `--transport stdio` | 可信本机子进程;无 HTTP 鉴权,身份由 stdio 作用域决定 |
-| 本机 HTTP | `streamable-http` @ `127.0.0.1:8765` | 必须有凭据(env token 或至少一个有效客户端) |
+| 本机 stdio | **默认传输**(`FINBOARD_MCP_TRANSPORT=stdio`) | 可信本机子进程;无 HTTP 鉴权,身份由 stdio 作用域决定 |
+| 本机 HTTP | `FINBOARD_MCP_TRANSPORT=streamable-http` @ `127.0.0.1:8765` | 必须有凭据(env token 或至少一个有效客户端) |
 | 非 loopback 绑定 | 拒绝 | 必须 `FINBOARD_MCP_ALLOW_REMOTE=true`;前置 TLS 反向代理 |
 
 - MCP server 自身**不终结 TLS**,也不提供多用户隔离;对外暴露必须置于
@@ -99,6 +104,10 @@ uv run finboard mcp client revoke MC-0123456789ab
   有效客户端 → 具名拒绝启动(退出码 2)。
 - `FINBOARD_MCP_ENABLED=false` → 具名拒绝启动(退出码 2);未设置默认启用。
 - 独立启动不读取任何 `FINBOARD_OPENCODE_*` 变量。
+- Make 目标:`make mcp-serve-http`(本机 loopback,凭据用 `mcp_clients` 或兼容期
+  `MCP_AUTH_TOKEN`)、`make mcp-serve-http-remote`(非 loopback,显式
+  `ALLOW_REMOTE=true`)、`make mcp-client-create`(签发客户端)。
+- 重复启动(端口占用)→ FinBoard 具名错误并退出码 2,不会静默换端口。
 
 ## 6. 运维检查清单
 

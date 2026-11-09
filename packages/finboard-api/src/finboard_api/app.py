@@ -71,6 +71,16 @@ from finboard_simulation import SimulationRepository, SimulationService
 logger = structlog.get_logger(__name__)
 
 
+def _is_loopback_host(host: str) -> bool:
+    """loopback 判定(与 finboard_mcp.__main__ 同一口径)。"""
+    normalized = host.strip().lower()
+    return (
+        normalized in {"localhost", "::1"}
+        or normalized == "127.0.0.1"
+        or normalized.startswith("127.")
+    )
+
+
 async def _start_embedded_mcp_server(
     app: FastAPI, settings: Settings, *, host: str | None = None
 ) -> None:
@@ -93,11 +103,24 @@ async def _start_embedded_mcp_server(
     bind_host = host if host is not None else settings.mcp_host
     from finboard_mcp.auth import (
         DatabaseIdentityResolver,
-        warn_legacy_auth_token,
         wrap_with_bearer_auth,
     )
     from finboard_mcp.server import build_mcp_server
     from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    # #517:内嵌入口同样尊重 mcp_enabled / mcp_allow_remote(不再隐式放宽网络边界)。
+    if not getattr(settings, "mcp_enabled", True):
+        logger.warning("api.opencode_mcp_skipped", reason="mcp_disabled")
+        return
+    if not _is_loopback_host(bind_host) and not getattr(
+        settings, "mcp_allow_remote", False
+    ):
+        logger.warning(
+            "api.opencode_mcp_skipped",
+            reason="non_loopback_requires_allow_remote",
+            host=bind_host,
+        )
+        return
 
     components = getattr(app.state, "components", None)
     smaker = getattr(components, "session_maker", None)
@@ -114,8 +137,6 @@ async def _start_embedded_mcp_server(
                 "api.opencode_mcp_skipped", reason="no_active_mcp_clients"
             )
             return
-    else:
-        warn_legacy_auth_token()
 
     mcp = build_mcp_server()
     starlette_app = mcp.streamable_http_app(host=bind_host)
@@ -341,13 +362,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if settings.opencode_embed_mcp:
                 mcp_bind_host = settings.mcp_host
                 if mcp_bind_host == "127.0.0.1":
-                    mcp_bind_host = "0.0.0.0"
-                    logger.info(
-                        "api.opencode_mcp_host_widened",
-                        reason="container_needs_host_docker_internal",
-                        host=mcp_bind_host,
-                        port=settings.mcp_port,
-                    )
+                    # #517:跨容器访问要求非 loopback 绑定,必须显式 ALLOW_REMOTE;
+                    # 未放行时保持 loopback(容器连不上 MCP,但网络边界不被隐式放宽)。
+                    if settings.mcp_allow_remote:
+                        mcp_bind_host = "0.0.0.0"
+                        logger.info(
+                            "api.opencode_mcp_host_widened",
+                            reason="container_needs_host_docker_internal",
+                            host=mcp_bind_host,
+                            port=settings.mcp_port,
+                        )
+                    else:
+                        logger.warning(
+                            "api.opencode_mcp_loopback_only",
+                            reason="non_loopback_bind_requires_allow_remote",
+                            host=mcp_bind_host,
+                            port=settings.mcp_port,
+                        )
                 await _start_embedded_mcp_server(app, settings, host=mcp_bind_host)
                 # 确认端口完成 bind 再创建容器;超时只告警不阻断(#118 降级风格)。
                 await _wait_embedded_mcp_ready(settings.mcp_port)

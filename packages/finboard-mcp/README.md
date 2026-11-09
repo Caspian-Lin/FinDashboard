@@ -85,6 +85,10 @@ HTTP 请求的 `Authorization: Bearer <token>` 由服务端解析为
 | `topic-writer` | `research.read` + `research.write` + `research.run` |
 | `data-operator` | 上述 + `data.write` |
 
+注意:`finboard_report_export` 有落盘副作用,归入 `research.write`;
+`finboard_factor_series_build` 会入队沙箱构建,归入 `research.run`;readonly
+客户端不能调用这两个工具。
+
 ```bash
 # 签发(明文 token 只打印一次;库里只存 sha256 摘要)
 uv run finboard mcp client create --name codex --preset readonly
