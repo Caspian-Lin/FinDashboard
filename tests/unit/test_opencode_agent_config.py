@@ -12,8 +12,9 @@
    不得被放行。md 也不得钉死 ``model``(#242:默认模型跟随 OpenCode 选择)。
 2. **#122 语义**:agent 定义不得再包含「只读 / 写操作需人工审批」过期措辞,
    必须声明研究写操作可自主执行、实盘能力永久拒绝。
-3. **#123 文档同步**:MCP 工具注册表总数 == server ``_INSTRUCTIONS`` 宣称数 ==
-   Skill ``SKILL.md`` 宣称数;因子实验室分类数精确一致(#157 修正 11→12)。
+3. **#123 文档同步**:工具清单唯一事实源 = ``TOOL_SCOPES`` / 注册表;**文档不得
+   写死工具总数**(#519 去掉 ``_INSTRUCTIONS`` / Skill 里的数字断言,改为
+   "不出现总量字面量 + 文档必须指向唯一事实源" + 家族工具集合覆盖)。
 """
 
 from __future__ import annotations
@@ -29,9 +30,10 @@ _SKILL_MD = (
     _REPO_ROOT
     / ".agents"
     / "skills"
-    / "finboard-opencode-research"
+    / "finboard-research"
     / "SKILL.md"
 )
+_SKILL_TOOLS_MD = _SKILL_MD.parent / "references" / "tools.md"
 _MCP_TOOLS_DIR = (
     _REPO_ROOT / "packages" / "finboard-mcp" / "src" / "finboard_mcp" / "tools"
 )
@@ -60,11 +62,6 @@ def _registered_tool_names() -> set[str]:
     for module in _MCP_TOOLS_DIR.glob("*.py"):
         names.update(re.findall(r'name="(finboard_[a-z0-9_]+)"', module.read_text(encoding="utf-8")))
     return names
-
-
-def _factor_tool_count() -> int:
-    source = (_MCP_TOOLS_DIR / "factors.py").read_text(encoding="utf-8")
-    return len(re.findall(r'name="finboard_', source))
 
 
 def _extract_permission(source: str) -> dict[str, str]:
@@ -157,43 +154,38 @@ def test_agent_md_description_mentions_write_autonomy() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. #123 文档同步(工具总数 / 分类数精确一致)
+# 3. #123 文档同步(不锁数量:唯一事实源 = TOOL_SCOPES / 注册表)
 # ---------------------------------------------------------------------------
 
 
-def test_instructions_tool_total_matches_registry() -> None:
-    source = _MCP_SERVER_PY.read_text(encoding="utf-8")
-    match = re.search(r"当前可用工具\((\d+) 个", source)
-    assert match is not None, "_INSTRUCTIONS 缺少工具总数声明"
-    declared = int(match.group(1))
-    actual = len(_registered_tool_names())
-    assert declared == actual, (
-        f"_INSTRUCTIONS 宣称 {declared} 个工具,注册表实际 {actual} 个;"
-        "新增/删除工具必须同步 _INSTRUCTIONS(#123)"
+def test_docs_do_not_hardcode_tool_totals() -> None:
+    """#519:``_INSTRUCTIONS`` 与 Skill 不再写死工具总数。
+
+    历史做法是"_INSTRUCTIONS 写 N 个工具,测试断言 N == 注册数",每加一个工具就要
+    改两处数字,并且 #516 这类并行 issue 会互相踩。现在改为:文档必须指向唯一
+    事实源,数量由 ``TOOL_SCOPES`` / ``list_tools()`` 决定。
+    """
+    instructions = _MCP_SERVER_PY.read_text(encoding="utf-8")
+    skill = _SKILL_MD.read_text(encoding="utf-8")
+    assert not re.search(r"当前可用工具\(\d+\s*个", instructions), (
+        "_INSTRUCTIONS 不要写死工具总数,改为「唯一事实源 = TOOL_SCOPES」"
     )
+    assert not re.search(r"已实现\s*\d+\s*个工具", skill), (
+        "SKILL.md 不要写死工具总数,改为「当前注册工具见 TOOL_SCOPES」"
+    )
+    # 反过来:必须显式指向唯一事实源,否则读者无处查清单。
+    assert "TOOL_SCOPES" in instructions
+    assert "TOOL_SCOPES" in skill
 
 
-def test_skill_md_tool_total_matches_registry() -> None:
-    source = _SKILL_MD.read_text(encoding="utf-8")
-    match = re.search(r"已实现 (\d+) 个工具", source)
-    assert match is not None, "SKILL.md 缺少工具总数声明"
-    declared = int(match.group(1))
-    actual = len(_registered_tool_names())
-    assert declared == actual, (
-        f"SKILL.md 宣称 {declared} 个工具,注册表实际 {actual} 个;"
-        "新增/删除工具必须同步 SKILL.md(#123)"
-    )
-
-
-def test_skill_md_factor_category_count_matches_registry() -> None:
-    """#157 修正:Skill 因子实验室行(12 个)必须与 factors.py 注册数精确一致。"""
-    source = _SKILL_MD.read_text(encoding="utf-8")
-    match = re.search(r"\.feature_snapshot\.。\*\`(\d+) 个\)", source) or re.search(
-        r"feature_snapshot.*?\((\d+) 个\)", source
-    )
-    assert match is not None, "SKILL.md 缺少因子实验室分类计数"
-    declared = int(match.group(1))
-    actual = _factor_tool_count()
-    assert declared == actual, (
-        f"SKILL.md 因子实验室宣称 {declared} 个,注册表实际 {actual} 个"
-    )
+def test_skill_tools_md_documents_every_factor_tool() -> None:
+    """因子实验室家族:注册的每个工具都必须在 Skill 工具契约里出现(集合覆盖)。"""
+    registered = {
+        name
+        for name in _registered_tool_names()
+        if name.startswith(("finboard_factor_", "finboard_feature_snapshot_"))
+    }
+    assert registered, "因子工具注册表为空,测试前提失效"
+    tools_md = _SKILL_TOOLS_MD.read_text(encoding="utf-8")
+    missing = sorted(name for name in registered if name not in tools_md)
+    assert not missing, f"Skill tools.md 缺少因子工具契约: {missing}"
