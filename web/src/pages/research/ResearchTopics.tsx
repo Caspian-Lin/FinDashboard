@@ -554,6 +554,7 @@ function TopicRunsCard({ topic }: { topic: Topic }) {
   };
 
   const mutationError = start.error ?? retry.error ?? cancel.error;
+  const runItems = runsQuery.data?.items ?? [];
   return (
     <section aria-label="课题研究运行" className="space-y-3 rounded-lg border border-border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -683,11 +684,11 @@ function TopicRunsCard({ topic }: { topic: Topic }) {
         <LoadingState />
       ) : runsQuery.isError ? (
         <ErrorState message={String(runsQuery.error)} onRetry={() => runsQuery.refetch()} />
-      ) : (runsQuery.data?.items.length ?? 0) === 0 ? (
+      ) : runItems.length === 0 ? (
         <p className="text-sm text-muted-foreground">尚未发起运行；轮次记录不能替代运行事实。</p>
       ) : (
         <ul className="space-y-3">
-          {runsQuery.data?.items.map((run) => (
+          {runItems.map((run) => (
             <li key={run.link_id} className="rounded-md border border-border p-3 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 <Link className="font-mono text-primary underline" to={run.deep_link}>
