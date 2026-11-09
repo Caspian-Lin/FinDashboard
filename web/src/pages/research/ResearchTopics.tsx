@@ -13,11 +13,14 @@ import { TopicDataCard } from "@/components/data/TopicDataCard";
 import {
   workspaceApi,
   topicRunApi,
+  topicActionApi,
   evidenceUrl,
   conflictDetail,
   type ActivateInput,
   type EvidenceRef,
   type Topic,
+  type TopicActionName,
+  type TopicArtifactLink,
   type TopicConflictDetail,
   type TopicDraftInput,
   type TopicDraftUpdate,
@@ -51,6 +54,15 @@ const STATES: Record<string, string> = {
   factor_series: "因子序列",
   simulation: "模拟盘",
   backtest: "探索回测",
+  factor_experiment: "因子实验",
+  code_artifact: "代码产物",
+  code_run: "沙箱运行",
+  validation_experiment: "OOS 验证实验",
+  factor_snapshot: "因子快照",
+  plan: "计划（未执行）",
+  round: "执行记录",
+  evidence: "证据整理",
+  review: "复核结论",
   draft: "草稿",
   active: "研究中",
   paused: "已暂停",
@@ -96,6 +108,66 @@ const NEXT_ACTION_LABELS: Record<string, string> = {
   review_open_questions: "复核开放问题",
   review: "复核证据",
 };
+
+/** #516: every evidence kind the API accepts, in display order. */
+const EVIDENCE_KINDS = [
+  "research_run",
+  "strategy",
+  "dataset",
+  "experiment",
+  "memory",
+  "document",
+  "factor_series",
+  "simulation",
+  "backtest",
+  "factor_experiment",
+  "code_artifact",
+  "code_run",
+  "validation_experiment",
+  "factor_snapshot",
+] as const;
+
+const ENTRY_TYPE_LABELS: Record<string, string> = {
+  plan: "计划（只保存，不执行）",
+  round: "执行记录",
+  evidence: "证据整理",
+  review: "复核结论",
+  lifecycle: "生命周期",
+  goal: "目标快照",
+  draft: "初始草稿",
+};
+
+/** #516: oos_outcome is the primary conclusion; status is only diagnostic. */
+const OOS_OUTCOME_LABELS: Record<string, string> = {
+  supported: "样本外获支持",
+  not_supported: "样本外未获支持",
+  inconclusive: "样本外无法判定",
+  unknown: "样本外未知（证据受限）",
+};
+
+const ARTIFACT_STATES: Record<string, string> = {
+  queued: "排队中",
+  running: "运行中",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+const EVIDENCE_GAP_LABELS: Record<string, string> = {
+  no_trials: "尚无 trial",
+  final_test_not_unsealed: "尚未揭盲",
+  oos_inconclusive: "OOS 无可判定证据",
+  trial_summary_oversized: "trial 摘要超限，不推断 OOS",
+  status_not_terminal: "实验未到终态",
+  run_not_created: "沙箱运行尚未生成记录",
+  timed_out: "运行超时",
+  oom_killed: "内存不足被终止",
+};
+
+function gapLabel(gap: string): string {
+  return EVIDENCE_GAP_LABELS[gap] ?? gap;
+}
 
 function lifecycleActions(status: string): string[] {
   if (status === "draft") return ["discard"];
@@ -337,8 +409,39 @@ function ContextCard({ topicId }: { topicId: string }) {
           </ul>
         </div>
       )}
+      {context.experiment_links.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium">因子与OOS（以 oos_outcome 优先）</h4>
+          <ul className="list-disc space-y-1 pl-5 text-sm">
+            {context.experiment_links.map((link) => (
+              <li key={`${link.entity_type}-${link.entity_id}`} className="break-all">
+                {STATES[link.entity_type] ?? link.entity_type}：{link.entity_id} ·{" "}
+                {ARTIFACT_STATES[link.state] ?? link.state}
+                {link.entity_type === "validation_experiment"
+                  ? ` · ${OOS_OUTCOME_LABELS[link.oos_outcome ?? "unknown"] ?? "样本外未知"} · ${
+                      link.final_test_unsealed ? "已揭盲，不可重做" : "未揭盲"
+                    } · 预算 ${link.trial_budget?.used ?? 0}/${link.trial_budget?.limit ?? "?"}`
+                  : link.status
+                    ? ` · ${link.status}`
+                    : ""}
+                {link.evidence_gaps.length > 0
+                  ? ` · 缺口：${link.evidence_gaps.map(gapLabel).join("、")}`
+                  : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div>
         <h4 className="text-sm font-medium">最近轮次（{context.recent_rounds.length}）</h4>
+        {Object.keys(context.entry_types ?? {}).length > 0 && (
+          <p className="text-xs text-muted-foreground">
+            条目结构：
+            {Object.entries(context.entry_types)
+              .map(([type, count]) => `${ENTRY_TYPE_LABELS[type] ?? type} ${count}`)
+              .join(" · ")}
+          </p>
+        )}
         {context.recent_rounds.length === 0 ? (
           <p className="text-sm text-muted-foreground">尚无轮次记录；下一步动作还没有留痕。</p>
         ) : (
@@ -347,9 +450,16 @@ function ContextCard({ topicId }: { topicId: string }) {
               <li key={round.entry_id} className="border-t border-border pt-2">
                 <p className="text-xs text-muted-foreground">
                   <ResearchTimestamp value={round.created_at} /> · {round.branch} ·{" "}
+                  {round.entry_type ? `${ENTRY_TYPE_LABELS[round.entry_type] ?? round.entry_type} · ` : ""}
                   {STATES[round.outcome ?? ""] ?? round.outcome ?? "未记录结果"} ·{" "}
-                  {round.evidence_level === "agent_interpretation" ? "agent 解释" : "人工记录"} ·{" "}
-                  {round.entry_id}
+                  {round.evidence_level === "agent_interpretation"
+                    ? "agent 解释"
+                    : round.evidence_level === "reviewed_conclusion"
+                      ? "经复核结论"
+                      : round.evidence_level === "research_plan"
+                        ? "计划（未执行）"
+                        : "人工记录"}{" "}
+                  · {round.entry_id}
                 </p>
                 <p className="whitespace-pre-wrap">
                   {round.conclusion_excerpt || "本轮尚无工作结论"}
@@ -370,6 +480,190 @@ function ContextCard({ topicId }: { topicId: string }) {
           </ul>
         </div>
       )}
+    </section>
+  );
+}
+
+function TopicArtifactsCard({ topic }: { topic: Topic }) {
+  const qc = useQueryClient();
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const goalVersion = topic.goal?.version ?? "";
+  const artifacts = useQuery({
+    queryKey: ["topic-artifacts", topic.topic_id],
+    queryFn: () => topicActionApi.artifacts(topic.topic_id),
+  });
+  const refresh = () => {
+    void artifacts.refetch();
+    void qc.invalidateQueries({ queryKey: ["topic-context", topic.topic_id] });
+  };
+  const unseal = useMutation({
+    mutationFn: (link: TopicArtifactLink) =>
+      topicActionApi.act(topic.topic_id, {
+        action: "validation_experiment.unseal" as TopicActionName,
+        goal_version: goalVersion,
+        payload: { experiment_id: link.entity_id },
+        operation_id: newOperationId("topic-unseal"),
+      }),
+    onSuccess: (receipt) => {
+      setError(null);
+      setNotice(
+        `已提交一次性揭盲执行（${String(receipt.job_id ?? receipt.entity_id)}）；揭盲后不可重做。`,
+      );
+      refresh();
+    },
+    onError: (err) => {
+      const detail = conflictDetail(err);
+      setNotice("");
+      setError(
+        detail?.code === "already_unsealed"
+          ? "该实验已揭盲（final_test_unsealed=true），不可重做。"
+          : String(err),
+      );
+    },
+  });
+  const items = artifacts.data?.items ?? [];
+  const ordered = [...items].sort((a, b) =>
+    a.entity_type === "validation_experiment" ? -1 : b.entity_type === "validation_experiment" ? 1 : 0,
+  );
+  return (
+    <section
+      aria-label="课题因子与OOS产物"
+      className="space-y-3 rounded-lg border border-border p-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-semibold">因子实验 / 沙箱运行 / OOS 实验</h3>
+        <span className="text-xs text-muted-foreground">
+          精确引用 · 状态读取时派生 · 代码只在 MCP 登记后按 artifact 引用
+        </span>
+      </div>
+      {artifacts.isLoading && <LoadingState />}
+      {artifacts.isError && (
+        <ErrorState message={String(artifacts.error)} onRetry={() => artifacts.refetch()} />
+      )}
+      {!artifacts.isLoading && !artifacts.isError && ordered.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          尚无因子实验 / 沙箱运行 / OOS 实验链接。先在课题内登记实验或执行已登记 artifact，
+          服务端会在同一事务写入链接与研究审计。
+        </p>
+      )}
+      {notice && <p className="text-sm text-primary">{notice}</p>}
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      <ul className="space-y-3">
+        {ordered.map((link) => (
+          <li key={`${link.entity_type}-${link.entity_id}`} className="rounded-md border border-border p-3">
+            <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span className="rounded bg-muted px-1.5 py-0.5 font-medium text-foreground">
+                {STATES[link.entity_type] ?? link.entity_type}
+              </span>
+              <span>{link.entity_id}</span>
+              <span>{ARTIFACT_STATES[link.state] ?? link.state}</span>
+              {link.job_id ? <span>任务 {link.job_id}</span> : null}
+              <span>目标 {link.goal_version}</span>
+            </p>
+            {link.entity_type === "validation_experiment" ? (
+              <div className="mt-2 space-y-1 text-sm">
+                <p className="font-medium">
+                  OOS 结论：
+                  <span
+                    className={
+                      link.oos_outcome === "supported"
+                        ? "text-success"
+                        : link.oos_outcome === "not_supported"
+                          ? "text-destructive"
+                          : ""
+                    }
+                  >
+                    {OOS_OUTCOME_LABELS[link.oos_outcome ?? "unknown"] ?? "样本外未知"}
+                  </span>
+                </p>
+                <p className="text-muted-foreground">
+                  流程状态：{link.diagnostic_status ?? link.status ?? "未知"} · 试验预算{" "}
+                  {link.trial_budget?.used ?? 0}/{link.trial_budget?.limit ?? "?"} ·{" "}
+                  {link.final_test_unsealed ? "已揭盲，不可重做" : "尚未揭盲（一次性门）"}
+                </p>
+                {link.checksum && (
+                  <p className="break-all text-xs text-muted-foreground">
+                    version checksum：{link.checksum}
+                  </p>
+                )}
+                {link.evidence_gaps.length > 0 && (
+                  <p className="text-xs text-warning">
+                    证据缺口：{link.evidence_gaps.map(gapLabel).join("、")}
+                  </p>
+                )}
+                {link.final_test_unsealed ? (
+                  <p className="text-xs text-muted-foreground">
+                    已揭盲的实验不能再次执行；如需新证据请新建实验并用 supersedes_id 关联。
+                  </p>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={unseal.isPending || !goalVersion || topic.status !== "active"}
+                    onClick={() => unseal.mutate(link)}
+                  >
+                    显式执行一次性揭盲
+                  </Button>
+                )}
+              </div>
+            ) : link.entity_type === "factor_experiment" ? (
+              <div className="mt-2 space-y-1 text-sm">
+                <p>
+                  因子实验状态：{link.status ?? "未知"} · 数据发布 checksum：{" "}
+                  <span className="break-all">{link.checksum ?? "未记录"}</span>
+                </p>
+                <p className="text-muted-foreground">
+                  特征快照：{link.feature_snapshot_id ?? "—"}
+                  {link.validation_experiment_id ? ` · 关联 OOS：${link.validation_experiment_id}` : ""}
+                </p>
+                {link.failure_reason && (
+                  <p className="text-xs text-destructive">失败原因：{link.failure_reason}</p>
+                )}
+                {link.evidence_gaps.length > 0 && (
+                  <p className="text-xs text-warning">
+                    证据缺口：{link.evidence_gaps.map(gapLabel).join("、")}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="mt-2 space-y-1 text-sm">
+                <p>
+                  沙箱运行：{link.kind ?? "factor"}
+                  {link.mode ? ` / ${link.mode}` : ""} · commit{" "}
+                  <span className="break-all">{link.commit ?? "—"}</span>
+                </p>
+                <p className="text-muted-foreground">
+                  输出 checksum：<span className="break-all">{link.checksum ?? "尚未产出"}</span>
+                  {link.output_snapshot_id ? ` · 快照 ${link.output_snapshot_id}` : ""}
+                </p>
+                {link.error_summary && (
+                  <p className="text-xs text-destructive">{link.error_summary}</p>
+                )}
+                {link.evidence_gaps.length > 0 && (
+                  <p className="text-xs text-warning">
+                    证据缺口：{link.evidence_gaps.map(gapLabel).join("、")}
+                  </p>
+                )}
+              </div>
+            )}
+            {link.deep_link && (
+              <Link className="mt-1 inline-block text-xs text-primary underline" to={link.deep_link}>
+                打开详情
+              </Link>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs text-muted-foreground">
+        读取与执行严格分开：本卡片不会自动发起任何运行；只有显式提交动作才会入队，
+        服务端会要求课题 active 且目标版本匹配。
+      </p>
     </section>
   );
 }
@@ -949,10 +1243,10 @@ export default function ResearchTopics() {
     setForm((f) => (f ? { ...f, [name]: value } : f));
   const setRoundValue = <K extends keyof RoundInput>(name: K, value: RoundInput[K]) =>
     setRound((r) => (r ? { ...r, [name]: value } : r));
-  const startRound = (conclusion = "") => {
+  const startRound = (conclusion = "", entryType: RoundInput["entry_type"] = "round") => {
     setKey(crypto.randomUUID());
     setRound({
-      entry_type: "round",
+      entry_type: entryType,
       goal_version: topic.data?.goal?.version ?? "",
       objective: "",
       action: "",
@@ -964,6 +1258,8 @@ export default function ResearchTopics() {
       source_refs: [],
       supersedes_id: null,
       branch: "main",
+      document_ref:
+        entryType === "review" ? { kind: "document", ref_id: "", checksum: "" } : null,
     });
   };
   const openDraftForm = () => {
@@ -1303,7 +1599,15 @@ export default function ResearchTopics() {
                   <p className="text-sm">下一步：{topic.data.next_step || "尚未记录"}</p>
                   <div className="flex flex-wrap gap-2">
                     {topic.data.status !== "draft" && (
-                      <Button onClick={() => startRound()}>记录新轮次</Button>
+                      <>
+                        <Button onClick={() => startRound()}>记录新轮次（执行后）</Button>
+                        <Button variant="outline" onClick={() => startRound("", "plan")}>
+                          只保存计划（不执行）
+                        </Button>
+                        <Button variant="outline" onClick={() => startRound("", "review")}>
+                          记录复核结论
+                        </Button>
+                      </>
                     )}
                     {topic.data.status === "draft" ? (
                       <>
@@ -1587,6 +1891,7 @@ export default function ResearchTopics() {
                 )}
                 <ContextCard topicId={topic.data.topic_id} />
                 <TopicRunsCard topic={topic.data} />
+                <TopicArtifactsCard topic={topic.data} />
                 {round && (
                   <form
                     className="space-y-4 rounded-lg border border-border p-4"
@@ -1595,7 +1900,75 @@ export default function ResearchTopics() {
                       append.mutate();
                     }}
                   >
-                    <h3 className="font-semibold">追加轮次，保留本次结果</h3>
+                    <h3 className="font-semibold">
+                      {round.entry_type === "plan"
+                        ? "只保存计划（设计意图，不执行）"
+                        : round.entry_type === "review"
+                          ? "记录复核结论（需正式文档与 checksum）"
+                          : "追加轮次，保留本次结果"}
+                    </h3>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <Choice
+                        label="条目类型"
+                        value={round.entry_type}
+                        values={["round", "evidence", "plan", "review"]}
+                        onChange={(v) => {
+                          setRoundValue("entry_type", v as RoundInput["entry_type"]);
+                          setRoundValue(
+                            "document_ref",
+                            v === "review"
+                              ? { kind: "document", ref_id: "", checksum: "" }
+                              : null,
+                          );
+                        }}
+                      />
+                      {round.entry_type !== "plan" && (
+                        <Choice
+                          label="尝试结果"
+                          value={round.outcome}
+                          values={["completed", "failed", "interrupted", "rejected", "paused"]}
+                          onChange={(v) => setRoundValue("outcome", v)}
+                        />
+                      )}
+                    </div>
+                    {round.entry_type === "plan" && (
+                      <p className="text-xs text-muted-foreground">
+                        计划只记录设计（因子公式、窗口、方向、预注册假设、试验预算），永远不会启动运行；
+                        真正执行请使用上方“发起研究运行”或 OOS 卡片中的显式按钮。
+                      </p>
+                    )}
+                    {round.entry_type === "review" && (
+                      <div className="space-y-2 rounded-md border border-border p-3">
+                        <p className="text-xs text-muted-foreground">
+                          复核结论必须指向仓库内相对 .md 文件与 checksum，证据等级记为
+                          reviewed_conclusion，区别于人工记录与 agent 解释。
+                        </p>
+                        <Field
+                          label="正式文档路径（仓库相对 .md）"
+                          required
+                          value={round.document_ref?.ref_id ?? ""}
+                          onChange={(v) =>
+                            setRoundValue("document_ref", {
+                              kind: "document",
+                              ref_id: v,
+                              checksum: round.document_ref?.checksum ?? "",
+                            })
+                          }
+                        />
+                        <Field
+                          label="文档 checksum（sha256）"
+                          required
+                          value={round.document_ref?.checksum ?? ""}
+                          onChange={(v) =>
+                            setRoundValue("document_ref", {
+                              kind: "document",
+                              ref_id: round.document_ref?.ref_id ?? "",
+                              checksum: v,
+                            })
+                          }
+                        />
+                      </div>
+                    )}
                     <Field
                       label="本轮目标版本"
                       required
@@ -1623,12 +1996,6 @@ export default function ResearchTopics() {
                       onChange={(v) => setRoundValue("rationale", v)}
                     />
                     <div className="grid gap-4 md:grid-cols-2">
-                      <Choice
-                        label="尝试结果"
-                        value={round.outcome}
-                        values={["completed", "failed", "interrupted", "rejected", "paused"]}
-                        onChange={(v) => setRoundValue("outcome", v)}
-                      />
                       <Choice
                         label="解释置信度"
                         value={round.confidence}
@@ -1663,17 +2030,7 @@ export default function ResearchTopics() {
                         <Choice
                           label={`产物类型${i + 1}`}
                           value={r.kind}
-                          values={[
-                            "research_run",
-                            "strategy",
-                            "dataset",
-                            "experiment",
-                            "memory",
-                            "document",
-                            "factor_series",
-                            "simulation",
-                            "backtest",
-                          ]}
+                          values={[...EVIDENCE_KINDS]}
                           onChange={(v) =>
                             setRoundValue(
                               "source_refs",
@@ -1956,3 +2313,4 @@ function Pager({
     </div>
   );
 }
+

@@ -263,6 +263,8 @@ describe("研究解释与课题的可核验界面", () => {
         },
       ],
       active_links: [],
+      experiment_links: [],
+      entry_types: {},
       dangling_refs: [
         {
           ref: { kind: "research_run", ref_id: "RR-missing" },

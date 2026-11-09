@@ -48,7 +48,7 @@ export interface Topic extends Omit<TopicInput, "goal"> {
   created?: boolean;
 }
 export interface RoundInput {
-  entry_type: "round" | "evidence";
+  entry_type: "round" | "evidence" | "plan" | "review";
   goal_version: string;
   objective: string;
   action: string;
@@ -60,6 +60,8 @@ export interface RoundInput {
   source_refs: EvidenceRef[];
   supersedes_id: string | null;
   branch: string;
+  /** Only review entries carry this: repo-relative .md path + checksum. */
+  document_ref?: EvidenceRef | null;
 }
 export interface EntryTopic extends Omit<TopicInput, "goal"> {
   goal: Goal | null;
@@ -73,8 +75,10 @@ export interface Entry extends Omit<Partial<RoundInput>, "entry_type"> {
   topic?: EntryTopic;
   topic_revision?: number;
   evidence_level: string;
-  /** round/evidence, plus goal snapshots, initial drafts and lifecycle audits. */
-  entry_type?: "round" | "evidence" | "goal" | "draft" | "lifecycle";
+  /** round/evidence/plan/review, plus goal snapshots, initial drafts and lifecycle audits. */
+  entry_type?: "round" | "evidence" | "plan" | "review" | "goal" | "draft" | "lifecycle";
+  /** Only review entries carry this (repo-relative .md path + checksum). */
+  document_ref?: EvidenceRef | null;
   // Lifecycle entries (entry_type=lifecycle) carry the transition audit.
   from?: string;
   to?: string;
@@ -94,6 +98,7 @@ export interface LifecycleTransition {
 }
 export interface ContextRound {
   entry_id: string;
+  entry_type?: "round" | "evidence" | "plan" | "review";
   branch: string;
   outcome?: string | null;
   objective?: string;
@@ -119,6 +124,66 @@ export interface ActiveLink {
   state: string;
   goal_version?: string;
 }
+/** Immutable topic -> factor experiment / sandbox run / OOS experiment link. */
+export interface TopicArtifactLink {
+  link_id: number;
+  topic_id: string;
+  goal_version: string;
+  entity_type: "factor_experiment" | "code_run" | "validation_experiment";
+  entity_id: string;
+  job_id: string | null;
+  operation_id: string | null;
+  created_by: string;
+  created_at: string | null;
+  /** Derived at read time: queued/running/succeeded/failed/cancelled/interrupted. */
+  state: string;
+  status: string | null;
+  checksum: string | null;
+  evidence_gaps: string[];
+  deep_link: string;
+  // OOS experiments: oos_outcome is the primary fact, status is diagnostic.
+  oos_outcome?: "supported" | "not_supported" | "inconclusive" | "unknown" | null;
+  trial_budget?: { used: number; limit: number | null } | null;
+  final_test_unsealed?: boolean | null;
+  diagnostic_status?: string | null;
+  run_id?: string | null;
+  kind?: string | null;
+  mode?: string | null;
+  name?: string | null;
+  commit?: string | null;
+  code_checksum?: string | null;
+  output_snapshot_id?: string | null;
+  feature_snapshot_id?: string | null;
+  validation_experiment_id?: string | null;
+  failure_reason?: string | null;
+  error_summary?: string | null;
+}
+export interface TopicArtifactPage {
+  topic_id: string;
+  items: TopicArtifactLink[];
+  has_more: boolean;
+  limit: number;
+}
+export type TopicActionName =
+  | "run.submit"
+  | "run.replay"
+  | "factor_experiment.create"
+  | "code_run.execute"
+  | "validation_experiment.create"
+  | "validation_experiment.add_trial"
+  | "validation_experiment.unseal";
+export interface TopicActionReceipt {
+  action: TopicActionName;
+  topic_id: string;
+  goal_version: string;
+  entity_type: string;
+  entity_id: string;
+  job_id: string | null;
+  operation_id: string | null;
+  created: boolean;
+  result?: Record<string, unknown>;
+  link?: TopicArtifactLink;
+}
 export interface TopicContext {
   topic: {
     topic_id: string;
@@ -136,6 +201,10 @@ export interface TopicContext {
   next_step: string;
   recent_rounds: ContextRound[];
   active_links: ActiveLink[];
+  /** #516: factor experiments / sandbox runs / OOS experiments linked from the topic. */
+  experiment_links: TopicArtifactLink[];
+  /** #516: record counts per entry_type (plan vs executed vs reviewed). */
+  entry_types: Record<string, number>;
   dangling_refs: DanglingRef[];
   evidence_levels: Record<string, string>;
   next_actions: NextAction[];
@@ -453,6 +522,37 @@ export const topicRunApi = {
     ),
 };
 
+/**
+ * Whitelisted topic actions (#516). The Web channel can only reference an
+ * already-registered artifact; it never accepts Python / module paths.
+ */
+export const topicActionApi = {
+  act: (
+    topicId: string,
+    body: {
+      action: TopicActionName;
+      goal_version: string;
+      payload?: Record<string, unknown>;
+      operation_id?: string;
+    },
+  ) =>
+    fetchJSON<TopicActionReceipt & Record<string, unknown>>(
+      `/research/topics/${encodeURIComponent(topicId)}/actions`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  artifacts: (topicId: string, limit = 20) =>
+    fetchJSON<TopicArtifactPage>(
+      `/research/topics/${encodeURIComponent(topicId)}/artifacts?limit=${limit}`,
+    ),
+  catalog: (topicId: string) =>
+    fetchJSON<{
+      topic_id: string;
+      actions: { action: string; entity_type: string }[];
+      code_channel: string;
+      notice: string;
+    }>(`/research/topics/${encodeURIComponent(topicId)}/artifacts/actions`),
+};
+
 /** Extract the structured 409 body without importing the ApiError class. */
 export function conflictDetail(error: unknown): TopicConflictDetail | null {
   const detail = (error as { detail?: unknown } | null)?.detail;
@@ -480,6 +580,11 @@ export function evidenceUrl(ref: EvidenceRef): string | null {
         factor_series: `/research/topics?source_kind=factor_series&source_id=${id}`,
         simulation: `/research/topics?source_kind=simulation&source_id=${id}`,
         backtest: `/research/topics?source_kind=backtest&source_id=${id}`,
+        factor_experiment: `/research/factors?experiment=${id}`,
+        code_artifact: `/research/factors?artifact=${id}`,
+        code_run: `/research/factors?run=${id}`,
+        validation_experiment: `/research/experiments?experiment=${id}`,
+        factor_snapshot: `/research/factors?snapshot=${id}`,
       } as Record<string, string>
     )[ref.kind] ?? null
   );
