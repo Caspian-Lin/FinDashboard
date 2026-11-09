@@ -222,6 +222,9 @@ checksum 与幂等语义零变化。
   replay（新 `RR-` + `replay_of_run_id` + 新链接）；既有 `REPLAYABLE_SOURCE_STATUSES`
   守卫不变（completed/interrupted 可重放，cancelled/failed 仍拒绝）；
 - 后来关联：`POST /api/research/runs/{run_id}/link` 幂等追加链接，不修改 run；
+- 课题内取消：`ResearchRunCoordinator.cancel(..., commit=False)` 让 run 状态迁移、
+  job `request_cancel` 与 `topic.run.cancel` 审计共用调用方唯一一次 commit；既有
+  REST/MCP 取消路径仍用默认 `commit=True`，行为不变；
 - 审计：成功写与业务同事务，`correlation` 含 `topic_id`/`goal_version`/`run_id`/
   `job_id`/`operation_id`；拒绝/失败独立会话补记，不掩盖原错误。
 

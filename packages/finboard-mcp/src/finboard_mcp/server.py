@@ -158,10 +158,12 @@ data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读�
   后者永不覆盖前者。迁移/接入前的写操作没有审计行,空结果表示「此前无审计记录」,
   不代表没有发生操作;实盘审计仍走独立账本,不在此工具范围。
 - finboard.topic_run.*(6,#515) —— 从课题发起运行:start(写,run+job+链接+
-  审计同一事务)/ list / get / retry(新 RR-,replay_of_run_id)/ cancel;
-  finboard_run_topics 反查引用某个 run 的课题。链接不可变,state 由 join
+  审计同一事务)/ list / get / retry(仅 completed/interrupted;新 RR-,
+  replay_of_run_id;必须换新 operation_id)/ cancel(queued/running/interrupted;
+  终态 conflict);finboard_run_topics 反查引用某个 run 的课题(limit/cursor
+  分页,has_more 续页)。链接不可变,state 由 join
   research_runs/background_jobs 派生;同 operation_id 重放返回原 RR-/BJ-,
-  跨课题复用 conflict;retry 必须换新 operation_id。旧 finboard_run_queue
+  跨课题复用 conflict。旧 finboard_run_queue
   独立入口不变,已存在 run 可后来关联。契约见 docs/research/
   workspace-contract.md。
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;

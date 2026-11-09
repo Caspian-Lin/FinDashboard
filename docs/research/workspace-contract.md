@@ -80,9 +80,9 @@ REST：
 - `GET /api/research/topics/{topic_id}/runs?limit≤50&cursor`：链接 + 派生 `state`（queued/running/succeeded/failed/cancelled/interrupted）、`progress_done/progress_total/phase`、`error_code/error_summary`、`result_checksum`；`next_cursor` 续页。
 - `GET /api/research/topics/{topic_id}/runs/{run_id}`：单条链接详情 + `/research/runs?run=RR-` 深链。
 - `POST /api/research/topics/{topic_id}/runs/{run_id}/retry`：走既有 replay 生成新 `RR-`（`replay_of_run_id` 指向旧 run）与新链接，原链接保留；必须提供新的 `operation_id`，`goal_version` 继承原链接且仍须匹配当前目标。既有 replay 守卫不变：completed/interrupted 可重放，cancelled/failed 仍按原错误处置。
-- `POST /api/research/topics/{topic_id}/runs/{run_id}/cancel`：代理既有协作式取消（非实盘撤单）；completed/failed/cancelled 已终态返回 409 `run_terminal`。
-- `POST /api/research/runs/{run_id}/link`：`{topic_id, goal_version, operation_id}` 后来关联一个已存在的独立运行，幂等；同一课题/运行重复关联返回原链接（200）。
-- `GET /api/research/runs/{run_id}/topics`：反向查询引用该 run 的全部课题。
+- `POST /api/research/topics/{topic_id}/runs/{run_id}/cancel`：代理既有协作式取消（非实盘撤单）；run 状态迁移、job `request_cancel` 与 `topic.run.cancel` 审计在同一事务（coordinator checkpoint 以 `commit=False` 延迟提交）；completed/failed/cancelled 已终态返回 409 `run_terminal`。
+- `POST /api/research/runs/{run_id}/link`：`{topic_id, goal_version, operation_id}` 后来关联一个已存在的独立运行，幂等；同一课题/运行重复关联且 `operation_id` 相同返回原链接（200）；请求带不同/未绑定 `operation_id` 返回 409 `link_operation_id_conflict`，不静默丢弃该 id。
+- `GET /api/research/runs/{run_id}/topics?limit≤100&cursor`：反向查询引用该 run 的全部课题，分页返回 `has_more` / `next_cursor`，不静默截断。
 
 事务与审计：
 

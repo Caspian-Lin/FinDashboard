@@ -2041,9 +2041,9 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 | finboard_topic_run_start | research.run | topic_id, goal_version, payload, operation_id? | 201 新建 / 同 operation_id 重放返回原 RR-/BJ-（created=false）；payload 与 finboard_run_queue 同构 |
 | finboard_topic_run_list | research.read | topic_id, limit=20(1–50), cursor? | items[link + state/progress/error/result_checksum], next_cursor |
 | finboard_topic_run_get | research.read | topic_id, run_id | 单条链接 + join 状态 + `/research/runs?run=RR-` 深链；跨课题 not_found |
-| finboard_topic_run_retry | research.run | topic_id, run_id, payload{idempotency_key,requested_by}, operation_id | 新 RR-（replay_of_run_id）+ 新链接；必须换新 operation_id |
-| finboard_topic_run_cancel | research.run | topic_id, run_id | 代理既有协作式取消；completed/failed/cancelled → conflict |
-| finboard_run_topics | research.read | run_id | 反查引用该 run 的课题列表；一个 run 可被多课题引用 |
+| finboard_topic_run_retry | research.run | topic_id, run_id, payload{idempotency_key,requested_by}, operation_id | 仅 completed/interrupted 重放；新 RR-（replay_of_run_id）+ 新链接；failed/cancelled → conflict（run_not_replayable）；必须换新 operation_id |
+| finboard_topic_run_cancel | research.run | topic_id, run_id | 代理既有协作式取消；queued/running/interrupted 可取消，completed/failed/cancelled → conflict（run_terminal） |
+| finboard_run_topics | research.read | run_id, limit=50(1–100), cursor? | 反查引用该 run 的课题列表；has_more/next_cursor 分页，不静默截断；一个 run 可被多课题引用 |
 
 `topic_run_start` 前置：课题 `status=active` 且 `goal_version` 等于当前目标版本，
 否则 conflict（`topic_not_active` / `goal_version_mismatch`）；同 `operation_id`
