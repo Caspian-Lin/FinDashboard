@@ -330,7 +330,8 @@ function ContextCard({ topicId }: { topicId: string }) {
             {context.active_links.map((link) => (
               <li key={`${link.entity_type}-${link.entity_id}`} className="break-all">
                 {link.entity_type}：{link.entity_id}
-                {link.job_id ? ` · ${link.job_id}` : ""} · {link.state}
+                {link.job_id ? ` · ${link.job_id}` : ""}
+                {link.goal_version ? ` · 目标 ${link.goal_version}` : ""} · {link.state}
               </li>
             ))}
           </ul>

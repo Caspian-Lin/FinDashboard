@@ -117,6 +117,7 @@ export interface ActiveLink {
   entity_id: string;
   job_id?: string | null;
   state: string;
+  goal_version?: string;
 }
 export interface TopicContext {
   topic: {
