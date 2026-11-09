@@ -284,7 +284,8 @@ async def _run_via_strategy_spec(
     不把 no-code 规格编译进事件驱动 BacktestEngine(与 research_run 组合流水线
     重复建设且绕开 #91 冻结/校验语义);只做轻路由(issue #174)。
     """
-    from finboard_mcp.tools.runs import enqueue_research_run, parse_queue_payload
+    from finboard_app.research_run_submission import ResearchRunSubmitInput
+    from finboard_mcp.tools.runs import enqueue_research_run
     from finboard_persistence import ResearchStrategySpecRepository
 
     spec_id = strategy_spec.get("strategy_id")
@@ -308,7 +309,7 @@ async def _run_via_strategy_spec(
     payload = dict(queue_payload)
     payload["strategy_id"] = spec_id
     payload["strategy_version"] = version
-    body = parse_queue_payload(payload)
+    body = ResearchRunSubmitInput.from_json_payload(payload)
     ack = await enqueue_research_run(app, body)
     # 返回可跟踪指针(run_id + job_id),不阻塞等待完成
     from finboard_backtest.research_run.contracts import execution_mode_for

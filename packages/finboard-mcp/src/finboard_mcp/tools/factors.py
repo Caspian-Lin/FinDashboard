@@ -418,7 +418,8 @@ async def feature_snapshot_job_start(
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
-        from finboard_api.job_helpers import enqueue_job
+        from finboard_api.job_schemas import JobOut
+        from finboard_app.background_jobs import enqueue_job_core
         from finboard_persistence.background_job_repo import (
             BackgroundJobPersistenceConflictError,
         )
@@ -437,9 +438,8 @@ async def feature_snapshot_job_start(
                 f"feature_snapshot:{release.release_id}:{normalized_dt.date().isoformat()}"
             )
             try:
-                job = await enqueue_job(
+                row, _created = await enqueue_job_core(
                     session,
-                    None,
                     kind="feature_snapshot",
                     queue="research",
                     idempotency_key=idempotency_key,
@@ -450,6 +450,7 @@ async def feature_snapshot_job_start(
             except BackgroundJobPersistenceConflictError as exc:
                 await session.rollback()
                 raise McpToolError("conflict", str(exc)) from exc
+            job = JobOut.model_validate(row)
             return cast(
                 dict[str, Any],
                 to_jsonable(job.model_dump(mode="json")),

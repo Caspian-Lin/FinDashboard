@@ -403,14 +403,22 @@ async def _noop_progress(done: int, total: int, phase: str) -> None:
 
 
 def _patch_trading_days(monkeypatch: pytest.MonkeyPatch) -> None:
-    """合成交易日历(不入库不落盘;覆盖检查只用于决策日推导)。"""
+    """合成交易日历(不入库不落盘;覆盖检查只用于决策日推导)。
 
-    async def _fake(primary: Any) -> list[date]:
-        del primary
+    issue #513:日历读取已下沉到提交服务,按服务内引用的实现打桩。
+    """
+
+    async def _fake(
+        *,
+        bars_release_id: str,
+        bars_release_checksum: str,
+        release_root: Any,
+    ) -> list[date]:
+        del bars_release_id, bars_release_checksum, release_root
         return [date(2023, 8, 1) + timedelta(days=i) for i in range(61)]
 
     monkeypatch.setattr(
-        "finboard_api.routes.research_runs._enqueue_trading_days", _fake
+        "finboard_app.research_run_submission.enqueue_trading_days", _fake
     )
 
 

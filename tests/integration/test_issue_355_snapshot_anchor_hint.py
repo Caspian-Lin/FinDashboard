@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from finboard_api.deps import get_db_session
 from finboard_api.routes.research_runs import router as research_runs_router
 from finboard_api.routes.strategy_specs import router as strategy_specs_router
+from finboard_app.research_run_submission import ResearchRunSubmitInput
 from finboard_backtest.research_sandbox.factor_publish import (
     build_factor_snapshot,
     check_output_quality,
@@ -488,7 +489,7 @@ class TestMcpEnqueueAnchorGate:
 
         spec = _u_factor_spec("issue355_mcp", NEW_RELEASE)
         app = _make_app(engine)
-        body = run_tools.parse_queue_payload(
+        body = ResearchRunSubmitInput.from_json_payload(
             _queue_payload(spec, [snapshot_id], "issue355-mcp")
         )
         with pytest.raises(McpToolError) as exc_info:

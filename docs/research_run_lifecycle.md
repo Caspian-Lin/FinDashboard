@@ -145,17 +145,40 @@ long-only 研究 worker 必须使用 `PortfolioPipelineAdapter`。它只接收�
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `POST` | `/api/research/runs` | 冻结输入并登记 `queued`;不执行 |
+| `POST` | `/api/research/runs` | 冻结输入并登记 `queued`;不执行（与 MCP `finboard_run_queue` 同一服务） |
 | `GET` | `/api/research/runs` | 按状态/策略列历史 |
 | `GET` | `/api/research/runs/{run_id}` | manifest、状态、错误和报告 |
 | `GET` | `/api/research/runs/{run_id}/artifacts` | 顺序读取全部阶段 |
 | `GET` | `/api/research/runs/{run_id}/lineage/{trace_id}` | 读取上游血缘 |
 | `POST` | `/api/research/runs/{run_id}/cancel` | 取消 queued/running/interrupted/failed |
-| `POST` | `/api/research/runs/{run_id}/replay` | 复制冻结清单为新 queued run |
+| `POST` | `/api/research/runs/{run_id}/replay` | 复制冻结清单为新 queued run（与 MCP `finboard_run_replay` 同一服务） |
 
 API 刻意没有同步执行端点。受控离线 worker/CLI 通过
 `ResearchRunCoordinator.execute(manifest, registered_adapter)` 执行。网页只提交
 结构化策略规格和参数，不接受 Python 策略代码。
+
+## 提交服务与事务所有权（#513）
+
+入队 / 重放的编排只有一份实现：
+`finboard_app.research_run_submission.ResearchRunSubmissionService`。REST
+（`routes/research_runs.py`）与 MCP（`tools/runs.py`，含
+`finboard_backtest_run(strategy_spec=…)`）都只是薄适配层 —— 解析输入、调用服务、
+把统一业务错误映射成 HTTP / `McpToolError`。
+
+- **服务不 commit**：调用方（REST 路由 / MCP handler / #515 的课题动作）持有唯一
+  一次 `commit()`，失败 `rollback()`。这样课题链接 + run + job + 审计才能进同一事务。
+- **冻结字节不变**：`ResearchRunManifest` 字段顺序、取值与 None 省略规则原样保留；
+  `tests/unit/test_research_run_manifest_golden.py` 锁定 7 组代表性 payload 的
+  `run_id` + `manifest_checksum`。
+- **错误分类统一**：业务层只抛 `ResearchOperationError`（`invalid_input` /
+  `not_found` / `conflict` / `precondition_failed` / `permission_denied` /
+  `payload_too_large` / `unavailable`），REST 用 `exc.http_status` +
+  `detail={"code", "message", **details}`，MCP 用 `exc.mcp_kind`。
+- **身份来自服务端上下文**：REST `for_web`（默认 human，可显式 agent），MCP
+  `for_mcp`（恒 agent，#312），worker `for_worker`。payload 不能覆盖。
+
+精确契约（输入字段、错误码表、幂等语义、等值测试矩阵）见
+`docs/research/run-submission-contract.md`。
 
 主要错误码:
 

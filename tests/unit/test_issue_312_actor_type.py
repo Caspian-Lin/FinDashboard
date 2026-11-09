@@ -7,8 +7,8 @@
 * 契约层:``ResearchActorType`` 扩 ``agent``;llm 仍被 fail-closed 拒绝
   (红线不变);manifest 序列化 / ``manifest_from_json`` 对新枚举值往返一致,
   历史 ``"human"`` 载荷不受影响;
-* MCP 通道:queue(``_build_queued_manifest``)与 replay 的 run 归属
-  ``agent``;
+* MCP 通道:queue(``ResearchRunSubmissionService.preflight``)与 replay 的 run
+  归属 ``agent``;
 * REST 通道:schema 默认 human 不变、放开 human|agent 二选一,llm 在
   schema 层即 422;replay 缺省(不带 actor_type)保持 human。
 """
@@ -29,15 +29,16 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-import finboard_backtest.research_code as _research_code_mod
-import finboard_persistence
+import finboard_app.research_run_submission as _submission_mod
 from finboard_api.deps import get_db_session
 from finboard_api.research_run_schemas import (
     ResearchRunQueueIn,
     ResearchRunReplayIn,
 )
 from finboard_api.routes import research_runs_router
+from finboard_app.research_operation import ResearchOperationContext
 from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+from finboard_app.research_run_submission import ResearchRunSubmissionService
 from finboard_backtest.research_run import (
     FrozenArtifactRef,
     ResearchActorType,
@@ -206,7 +207,7 @@ class TestRestSchemaActorType:
 
 
 # ---------------------------------------------------------------------------
-# MCP queue:_build_queued_manifest → actor_type=agent
+# MCP queue:ResearchRunSubmissionService.preflight → actor_type=agent
 # ---------------------------------------------------------------------------
 
 
@@ -274,12 +275,8 @@ def _release_312() -> ResearchDatasetRelease:
 
 
 def _patch_queue_repos(monkeypatch: pytest.MonkeyPatch) -> None:
-    """把 ``_build_queued_manifest`` 在调用期导入的持久化仓储替换为桩。
-
-    函数体在调用时 ``from finboard_persistence import ...`` / ``from
-    finboard_backtest.research_code import ...``,因此 monkeypatch 模块属性
-    即可生效,无需真实 DB。
-    """
+    """把提交服务模块级引用的仓储 / 门控函数替换为桩(issue #513 起服务在
+    ``finboard_app.research_run_submission`` 内直接引用,故 patch 该模块属性)。"""
     spec = build_strategy_template(
         "ma_cross",
         strategy_id="ma_cross_research_312",
@@ -332,19 +329,17 @@ def _patch_queue_repos(monkeypatch: pytest.MonkeyPatch) -> None:
         return frozenset()
 
     monkeypatch.setattr(
-        finboard_persistence, "ResearchStrategySpecRepository", _FakeSpecRepo
+        _submission_mod, "ResearchStrategySpecRepository", _FakeSpecRepo
     )
     monkeypatch.setattr(
-        finboard_persistence, "ResearchDatasetReleaseRepository", _FakeReleaseRepo
+        _submission_mod, "ResearchDatasetReleaseRepository", _FakeReleaseRepo
     )
     monkeypatch.setattr(
-        finboard_persistence, "FeatureSnapshotRepository", _FakeFeatureRepo
+        _submission_mod, "FeatureSnapshotRepository", _FakeFeatureRepo
     )
+    monkeypatch.setattr(_submission_mod, "resolve_screen_bindings", _no_bindings)
     monkeypatch.setattr(
-        _research_code_mod, "resolve_screen_bindings", _no_bindings
-    )
-    monkeypatch.setattr(
-        _research_code_mod, "active_user_factor_names", _no_user_factors
+        _submission_mod, "active_user_factor_names", _no_user_factors
     )
 
 
@@ -356,11 +351,13 @@ async def test_mcp_queue_manifest_actor_is_agent(
     body = ResearchRunQueueIn.model_validate(_queue_payload())
     session = AsyncMock()
 
-    manifest, _ = await runs._build_queued_manifest(body, session)
+    report = await ResearchRunSubmissionService(session).preflight(
+        body, ResearchOperationContext.for_mcp()
+    )
 
     # MCP 通道归属 agent(与 requested_by 同源 #122 语义对齐)。
-    assert manifest.actor_type is ResearchActorType.AGENT
-    assert manifest.requested_by == "user:312"
+    assert report.manifest.actor_type is ResearchActorType.AGENT
+    assert report.manifest.requested_by == "user:312"
 
 
 # ---------------------------------------------------------------------------

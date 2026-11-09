@@ -353,8 +353,10 @@ class TestRestReplayInterrupted:
         )
         assert response.status_code == 409
         detail = response.json()["detail"]
-        assert "interrupted" in detail
-        assert "finboard_run_replay" in detail
+        # issue #513:统一错误分类后 detail 为结构化体(code + message)。
+        assert detail["code"] == "run_not_replayable"
+        assert "interrupted" in detail["message"]
+        assert "finboard_run_replay" in detail["message"]
 
     def test_interrupted_accepted_and_inherits_frozen_inputs(
         self, rest_client: TestClient, monkeypatch: pytest.MonkeyPatch

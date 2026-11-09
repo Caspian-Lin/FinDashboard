@@ -150,6 +150,17 @@ FinBoard 研究 MCP —— 量化研究工具集
   strategy_spec 形态)actor_type=agent,与 requested_by=agent:mcp 语义对齐
   (#122 agent 自主执行);REST 默认 human 不变,schema 放开 human|agent,
   llm 仍 fail-closed 拒绝(红线不变)。
+  REST 与 MCP 同语义(#513):两条通道共用同一提交服务(run_queue /
+  run_replay / backtest_run 的 strategy_spec 形态),同一输入的冻结输入
+  checksum、幂等与事务语义完全一致;失败一律按统一错误码映射,不要靠
+  文本区分 —— invalid_input→invalid_argument(422,门控/候选池/快照/死分区)、
+  not_found(404,策略版本/源 run 不存在)、conflict(409,未发布规格/幂等键
+  内容冲突/不可重放状态)、precondition_failed→conflict(409,data_scope
+  预览漂移,须重新预览)、permission_denied(403,只读客户端)、
+  payload_too_large(413)、unavailable(503,可重试)。细业务码以
+  「(code)」后缀附在 message 尾部,如 (scope_release_drift) /
+  (strategy_not_published) / (universe_empty);契约见
+  docs/research/run-submission-contract.md。
   replay 放开 interrupted(#305):interrupted run 一条命令按冻结输入恢复,
   新 run 自动继承原 manifest 全部冻结输入(含 factor_snapshots 全部 ID,
   零手工),血缘标注 replay_of_run_id + replay_source_status;cancelled

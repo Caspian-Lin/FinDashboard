@@ -486,11 +486,10 @@ class TestFeatureSnapshotJobStart:
             lambda self, rid: _async_return(_release),
         )
 
-        # patch enqueue_job 返回一个 duck-typed JobOut
-        async def _fake_enqueue(session: Any, response: Any, **kw: Any) -> Any:
-            from finboard_api.job_schemas import JobOut
-
-            return JobOut.model_validate(
+        # patch 队列核心(issue #513:MCP 不再 import finboard_api.job_helpers)
+        async def _fake_enqueue_core(session: Any, **kw: Any) -> Any:
+            del session
+            return (
                 SimpleNamespace(
                     job_id="BJ-NEW",
                     kind="feature_snapshot",
@@ -516,11 +515,12 @@ class TestFeatureSnapshotJobStart:
                     started_at=None,
                     finished_at=None,
                     updated_at=datetime(2026, 1, 15, tzinfo=UTC),
-                )
+                ),
+                True,
             )
 
         monkeypatch.setattr(
-            "finboard_api.job_helpers.enqueue_job", _fake_enqueue
+            "finboard_app.background_jobs.enqueue_job_core", _fake_enqueue_core
         )
         env = await factor_tools.feature_snapshot_job_start(
             app,
