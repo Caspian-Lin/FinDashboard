@@ -2402,6 +2402,84 @@ class McpClientModel(Base, IdMixin):
     )
 
 
+class ResearchAuditEventModel(Base, IdMixin):
+    """研究操作审计事件(issue #518,只追加)。
+
+    研究域统一操作账本:Web(REST)/ MCP / worker 三处写操作在同一条契约上留痕
+    (操作者、来源、课题/轮次、实体与关联 ID、服务端结果、脱敏参数摘要)。
+
+    * ``trust='server_observed'`` —— 服务端观察到的事实。成功路径与业务写入
+      **同一事务**插入(审计失败即业务回滚);拒绝/失败路径用独立会话补记。
+    * ``trust='client_declared'`` —— 外部 Harness 经
+      ``POST /api/research/audit/client-events`` 上报,``client_event_id`` 复用
+      ``idempotency_key`` 列去重,永不覆盖 ``server_observed`` 行。
+
+    无外键、无级联;不触碰实盘 ``audit_logs``。
+    """
+
+    __tablename__ = "research_audit_events"
+
+    audit_id: Mapped[str] = mapped_column(String(32))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    actor: Mapped[str] = mapped_column(String(128))
+    actor_type: Mapped[str] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(16))
+    client_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    topic_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entry_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    operation: Mapped[str] = mapped_column(String(64))
+    entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(16))
+    result_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    correlation: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    params_summary: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    params_digest: Mapped[str] = mapped_column(String(64))
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    trust: Mapped[str] = mapped_column(
+        String(16), default="server_observed", server_default="server_observed"
+    )
+    __table_args__ = (
+        Index("ix_research_audit_events_audit_id", "audit_id", unique=True),
+        Index(
+            "ix_research_audit_events_occurred",
+            sql_text("occurred_at DESC"),
+        ),
+        Index(
+            "ix_research_audit_events_topic_occurred",
+            "topic_id",
+            sql_text("occurred_at DESC"),
+        ),
+        Index(
+            "ix_research_audit_events_client_occurred",
+            "client_id",
+            sql_text("occurred_at DESC"),
+        ),
+        Index("ix_research_audit_events_entity", "entity_type", "entity_id"),
+        Index("ix_research_audit_events_outcome", "outcome"),
+        Index(
+            "uq_research_audit_client_event",
+            "client_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sql_text(
+                "trust = 'client_declared' AND idempotency_key IS NOT NULL"
+            ),
+        ),
+        CheckConstraint(
+            "outcome IN ('succeeded', 'failed', 'rejected', 'denied')",
+            name="ck_research_audit_events_outcome",
+        ),
+        CheckConstraint(
+            "trust IN ('server_observed', 'client_declared')",
+            name="ck_research_audit_events_trust",
+        ),
+    )
+
+
 class ResearchTopicModel(Base, IdMixin):
     """Research metadata only; never owns or deletes evidence (#500/#514)."""
 

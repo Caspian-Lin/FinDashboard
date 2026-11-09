@@ -81,6 +81,7 @@ from finboard_persistence.models import (
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    ResearchAuditEventModel,
     ResearchBalanceSheetModel,
     ResearchCashflowStatementModel,
     ResearchCodeArtifactModel,
@@ -129,6 +130,7 @@ from finboard_persistence.repo import (
     StrategyPresetRepository,
     WatchlistRepository,
 )
+from finboard_persistence.research_audit_repo import ResearchAuditRepository
 from finboard_persistence.research_code_repo import (
     ResearchCodeArtifact,
     ResearchCodeArtifactRepository,
@@ -242,6 +244,8 @@ __all__ = [
     "ReconciliationLogRepository",
     "ReleaseInstrumentCatalogRepository",
     "ReleaseSymbolSourceError",
+    "ResearchAuditEventModel",
+    "ResearchAuditRepository",
     "ResearchBalanceSheetModel",
     "ResearchCashflowStatementModel",
     "ResearchCodeArtifact",
