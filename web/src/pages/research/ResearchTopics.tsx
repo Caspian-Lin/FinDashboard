@@ -19,6 +19,7 @@ import {
   type Topic,
   type TopicConflictDetail,
   type TopicDraftInput,
+  type TopicDraftUpdate,
   type TopicInput,
   type RoundInput,
   type MemoryDetail,
@@ -364,11 +365,13 @@ function ContextCard({ topicId }: { topicId: string }) {
 
 function ConflictPanel({
   conflict,
+  canKeepNote,
   onReload,
   onKeepNote,
   onClose,
 }: {
   conflict: TopicConflictDetail;
+  canKeepNote: boolean;
   onReload: () => void;
   onKeepNote: () => void;
   onClose: () => void;
@@ -407,9 +410,11 @@ function ConflictPanel({
       )}
       <div className="flex flex-wrap gap-2">
         <Button onClick={onReload}>重新加载最新版本</Button>
-        <Button variant="outline" onClick={onKeepNote}>
-          仅保留我的说明（追加轮次）
-        </Button>
+        {canKeepNote && (
+          <Button variant="outline" onClick={onKeepNote}>
+            仅保留我的说明（追加轮次）
+          </Button>
+        )}
         <Button variant="outline" onClick={onClose}>
           关闭
         </Button>
@@ -438,12 +443,16 @@ export default function ResearchTopics() {
     );
   const [draftForm, setDraftForm] = useState<TopicDraftInput | null>(null);
   const [draftKey, setDraftKey] = useState("");
+  const [draftEdit, setDraftEdit] = useState<TopicDraftUpdate | null>(null);
   const [activation, setActivation] = useState<ActivateInput | null>(null);
   const [lifecycle, setLifecycle] = useState<{ action: string; reason: string } | null>(null);
   const [conflict, setConflict] = useState<TopicConflictDetail | null>(null);
   const [form, setForm] = useState<TopicInput | null>(null);
   const [round, setRound] = useState<RoundInput | null>(null);
   const [key, setKey] = useState("");
+  // Base revision is pinned when a form opens: a background refetch must not
+  // silently upgrade it, otherwise the stale-write 409 never surfaces.
+  const [pinnedRevision, setPinnedRevision] = useState<number | null>(null);
   const qc = useQueryClient();
   const topics = useQuery({
     queryKey: ["topics", offset, statusFilter, sort],
@@ -490,9 +499,14 @@ export default function ResearchTopics() {
   });
   const activateTopic = useMutation({
     mutationFn: () =>
-      workspaceApi.activate(topicId!, activation!, topic.data?.revision ?? 1),
+      workspaceApi.activate(
+        topicId!,
+        activation!,
+        pinnedRevision ?? topic.data?.revision ?? 1,
+      ),
     onSuccess: () => {
       setActivation(null);
+      setPinnedRevision(null);
       refreshTopic();
     },
     onError: onConflict,
@@ -503,10 +517,25 @@ export default function ResearchTopics() {
         topicId!,
         lifecycle!.action,
         lifecycle!.reason,
-        topic.data?.revision ?? 1,
+        pinnedRevision ?? topic.data?.revision ?? 1,
       ),
     onSuccess: () => {
       setLifecycle(null);
+      setPinnedRevision(null);
+      refreshTopic();
+    },
+    onError: onConflict,
+  });
+  const saveDraftEdit = useMutation({
+    mutationFn: () =>
+      workspaceApi.updateDraft(
+        topicId!,
+        draftEdit!,
+        pinnedRevision ?? topic.data?.revision ?? 1,
+      ),
+    onSuccess: () => {
+      setDraftEdit(null);
+      setPinnedRevision(null);
       refreshTopic();
     },
     onError: onConflict,
@@ -514,10 +543,11 @@ export default function ResearchTopics() {
   const save = useMutation({
     mutationFn: () =>
       topicId && topic.data
-        ? workspaceApi.update(topicId, form!, topic.data.revision)
+        ? workspaceApi.update(topicId, form!, pinnedRevision ?? topic.data.revision)
         : workspaceApi.create(form!),
     onSuccess: (t) => {
       setForm(null);
+      setPinnedRevision(null);
       setParams({ topic: t.topic_id });
       refreshTopic();
     },
@@ -558,16 +588,20 @@ export default function ResearchTopics() {
     setDraftKey(crypto.randomUUID());
     setForm(null);
     setActivation(null);
+    setDraftEdit(null);
     setRound(null);
     setLifecycle(null);
     setConflict(null);
+    setPinnedRevision(null);
     saveDraft.reset();
   };
   const reloadLatest = () => {
     setConflict(null);
     setForm(null);
     setActivation(null);
+    setDraftEdit(null);
     setLifecycle(null);
+    setPinnedRevision(null);
     refreshTopic();
   };
   return (
@@ -621,12 +655,14 @@ export default function ResearchTopics() {
       {conflict && (
         <ConflictPanel
           conflict={conflict}
+          canKeepNote={Boolean(topic.data?.goal) && topic.data?.status !== "draft"}
           onReload={reloadLatest}
           onKeepNote={() => {
-            const note = form?.summary ?? activation?.summary ?? "";
+            const note = form?.summary ?? activation?.summary ?? draftEdit?.summary ?? "";
             setConflict(null);
             setForm(null);
             setActivation(null);
+            setDraftEdit(null);
             startRound(note);
           }}
           onClose={() => setConflict(null)}
@@ -816,8 +852,10 @@ export default function ResearchTopics() {
                     setEntryOffset(0);
                     setRound(null);
                     setActivation(null);
+                    setDraftEdit(null);
                     setLifecycle(null);
                     setConflict(null);
+                    setPinnedRevision(null);
                   }}
                 >
                   <p className="font-medium">{t.title}</p>
@@ -880,21 +918,46 @@ export default function ResearchTopics() {
                   </ul>
                   <p className="text-sm">下一步：{topic.data.next_step || "尚未记录"}</p>
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={() => startRound()}>记录新轮次</Button>
+                    {topic.data.status !== "draft" && (
+                      <Button onClick={() => startRound()}>记录新轮次</Button>
+                    )}
                     {topic.data.status === "draft" ? (
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          setActivation(activationFrom(topic.data!));
-                          saveDraft.reset();
-                        }}
-                      >
-                        补齐目标并激活
-                      </Button>
+                      <>
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setPinnedRevision(topic.data!.revision);
+                            setActivation(null);
+                            setDraftEdit({
+                              title: topic.data!.title,
+                              question: topic.data!.question,
+                              conclusion: topic.data!.conclusion,
+                              summary: topic.data!.summary,
+                              open_questions: topic.data!.open_questions,
+                              next_step: topic.data!.next_step,
+                            });
+                            saveDraftEdit.reset();
+                          }}
+                        >
+                          编辑草稿
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setPinnedRevision(topic.data!.revision);
+                            setDraftEdit(null);
+                            setActivation(activationFrom(topic.data!));
+                            saveDraft.reset();
+                          }}
+                        >
+                          补齐目标并激活
+                        </Button>
+                      </>
                     ) : (
                       <Button
                         variant="outline"
                         onClick={() => {
+                          setPinnedRevision(topic.data!.revision);
                           setForm({
                             title: topic.data!.title,
                             question: topic.data!.question,
@@ -916,6 +979,7 @@ export default function ResearchTopics() {
                         key={action}
                         variant="outline"
                         onClick={() => {
+                          setPinnedRevision(topic.data!.revision);
                           setLifecycle({ action, reason: "" });
                           changeLifecycle.reset();
                         }}
@@ -947,6 +1011,72 @@ export default function ResearchTopics() {
                   {/* 课题数据视图(#512):只读消费 /api/data/catalog/topics/{id}/coverage */}
                   <TopicDataCard topicId={topic.data.topic_id} bare />
                 </section>
+                {draftEdit && topic.data.status === "draft" && (
+                  <form
+                    className="space-y-4 rounded-lg border border-border p-4"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      saveDraftEdit.mutate();
+                    }}
+                  >
+                    <h3 className="font-semibold">编辑草稿（不改变生命周期状态）</h3>
+                    <p className="text-sm text-muted-foreground">
+                      草稿只保存问题与工作笔记；目标版本、门槛与来源须在“补齐目标并激活”时提供，PUT 不能改变状态。
+                    </p>
+                    <Field
+                      label="课题标题"
+                      required
+                      value={draftEdit.title}
+                      onChange={(v) => setDraftEdit({ ...draftEdit, title: v })}
+                    />
+                    <Field
+                      label="研究问题"
+                      required
+                      multiline
+                      value={draftEdit.question}
+                      onChange={(v) => setDraftEdit({ ...draftEdit, question: v })}
+                    />
+                    <Field
+                      label="当前摘要"
+                      multiline
+                      value={draftEdit.summary ?? ""}
+                      onChange={(v) => setDraftEdit({ ...draftEdit, summary: v })}
+                    />
+                    <Field
+                      label="开放问题（每行一个）"
+                      multiline
+                      value={(draftEdit.open_questions ?? []).join("\n")}
+                      onChange={(v) =>
+                        setDraftEdit({ ...draftEdit, open_questions: v.split("\n").filter(Boolean) })
+                      }
+                    />
+                    <Field
+                      label="下一步"
+                      value={draftEdit.next_step ?? ""}
+                      onChange={(v) => setDraftEdit({ ...draftEdit, next_step: v })}
+                    />
+                    {saveDraftEdit.isError && (
+                      <p role="alert" className="text-destructive">
+                        {String(saveDraftEdit.error)}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button type="submit" disabled={saveDraftEdit.isPending}>
+                        保存草稿修改
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => {
+                          setDraftEdit(null);
+                          setPinnedRevision(null);
+                        }}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  </form>
+                )}
                 {activation && topic.data.status === "draft" && (
                   <form
                     className="space-y-4 rounded-lg border border-border p-4"

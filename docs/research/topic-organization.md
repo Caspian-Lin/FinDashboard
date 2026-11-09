@@ -34,7 +34,7 @@ draft --discard(原因)--> closed
 4. `finboard_topic_write(operation=draft_create)` 先存问题；已有课题则跳过。随后 `operation=activate` 补齐目标、门槛与来源，保存返回的 RT-ID、revision 和目标 version。
 5. `finboard_topic_write(operation=append)` 使用 `entry_type=evidence` 归档已有证据；记录为什么有关、哪些仍缺证据，以及原记忆的历史日期/状态。每批最多30个引用，超过时分批，各用稳定幂等键。
 6. `finboard_topic_read(topic_id=...,entries=true)` 或 `entry_id=RE-...` 精确读取单条全文与 checksum（跨课题 ID 返回 404）验证归档；返回 has_more 时按 offset 续页，不只读第一页就声称目录完整。选择与本次问题有关的轮次，不把全量长文塞入上下文。
-7. 后续真实研究追加 `entry_type=round`；目标或工作摘要更新用 `operation=update`，先读最新 revision。目标内容改动必须使用新 goal.version，不能覆盖旧门槛。暂停/继续/收束/重开用 `operation=transition` 并写原因。
+7. 后续真实研究追加 `entry_type=round`；目标或工作摘要更新用 `operation=update`，先读最新 revision。`update` 只改内容、**不能改状态**（显式传不同 status 会被拒绝，须走 `transition`）；草稿可用 update 编辑 title/question/summary/open_questions/next_step，但不能带 goal（须走 `activate`）。目标内容改动必须使用新 goal.version，不能覆盖旧门槛。暂停/继续/收束/重开用 `operation=transition` 并写原因。
 
 写操作受 MCP readonly_only 拒绝，创建者由服务器固定；创建/追加/更新/转移课题都不启动回测、模拟或实盘。版本冲突先重新读取并合并，Web 侧可“仅保留我的说明”追加轮次，而不是覆盖对方内容。
 
@@ -125,6 +125,6 @@ draft --discard(原因)--> closed
 {"topic_id":"RT-<已有ID>","entries":true,"limit":20,"offset":0}
 ```
 
-修改摘要/状态/下一步时，将第1步的完整输入形状作为 payload，传 `operation=update`、topic_id 和读取得到的 `expected_revision`。**不要把读取响应中的 topic_id/revision/created_by/created_at/evidence_level 混入 payload**。发生版本冲突先重新读取和合并，不盲目覆盖；改变 criteria/source 时必须改 goal.version。
+修改摘要/下一步时，将第1步的完整输入形状作为 payload，传 `operation=update`、topic_id 和读取得到的 `expected_revision`。**PUT 不能改变状态**：显式带不同 status 返回 conflict，先重新读取再用 `transition`；草稿 PUT 只接受 title/question/conclusion/summary/open_questions/next_step，带 goal 会被拒绝（走 `activate`）。**不要把读取响应中的 topic_id/revision/created_by/created_at/evidence_level 混入 payload**。发生版本冲突先重新读取和合并，不盲目覆盖；改变 criteria/source 时必须改 goal.version。
 
 每轮收尾同时保留课题记录与原研究记忆指针。正式结论依旧经 PR 进入 docs/research，研究 agent 不写只读挂载文件、不自动推送文档 PR。

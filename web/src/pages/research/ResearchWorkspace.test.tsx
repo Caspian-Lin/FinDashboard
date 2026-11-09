@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -31,6 +31,7 @@ vi.mock("@/lib/research-workspace", async () => {
       create: vi.fn(),
       createDraft: vi.fn(),
       update: vi.fn(),
+      updateDraft: vi.fn(),
       activate: vi.fn(),
       transition: vi.fn(),
       append: vi.fn(),
@@ -39,13 +40,13 @@ vi.mock("@/lib/research-workspace", async () => {
 });
 vi.mock("@/lib/api", () => ({ fetchJSON: vi.fn(() => Promise.resolve({ status: "missing" })) }));
 function show(ui: ReactElement, route = "/research/topics") {
-  return render(
-    <QueryClientProvider
-      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-    >
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const result = render(
+    <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...result, client };
 }
 beforeEach(() => {
   vi.resetAllMocks();
@@ -369,5 +370,63 @@ describe("研究解释与课题的可核验界面", () => {
     expect(screen.getByText(/已按边界截取/)).toBeInTheDocument();
     expect(screen.getByText(/最近生命周期：研究中 → 已暂停/)).toBeInTheDocument();
     expect(screen.queryByText("进行中的关联")).not.toBeInTheDocument();
+  });
+
+  it("打开表单后固定 base revision，后台刷新不会改写提交版本", async () => {
+    vi.mocked(workspaceApi.topic).mockResolvedValue(activeTopic);
+    vi.mocked(workspaceApi.entries).mockResolvedValue(emptyPage);
+    vi.mocked(workspaceApi.context).mockResolvedValue(contextPayload());
+    vi.mocked(workspaceApi.update).mockResolvedValue({ ...activeTopic, revision: 3 });
+    const view = show(<ResearchTopics />, "/research/topics?topic=RT-draft");
+    fireEvent.click(await screen.findByRole("button", { name: "更新记录" }));
+    // A background refetch brings a newer revision into the page.
+    vi.mocked(workspaceApi.topic).mockResolvedValue({ ...activeTopic, revision: 5 });
+    await act(async () => {
+      await view.client.refetchQueries({ queryKey: ["topic"] });
+    });
+    await waitFor(() =>
+      expect(view.client.getQueryData<Topic>(["topic", "RT-draft"])?.revision).toBe(5),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存研究记录" }));
+    await waitFor(() => expect(workspaceApi.update).toHaveBeenCalled());
+    expect(vi.mocked(workspaceApi.update).mock.calls[0][2]).toBe(2);
+  });
+
+  it("草稿可编辑且提交不携带目标，使用固定的 base revision", async () => {
+    vi.mocked(workspaceApi.topic).mockResolvedValue(draftTopic);
+    vi.mocked(workspaceApi.entries).mockResolvedValue(emptyPage);
+    vi.mocked(workspaceApi.context).mockResolvedValue(contextPayload({ goal: null }));
+    vi.mocked(workspaceApi.updateDraft).mockResolvedValue({ ...draftTopic, revision: 2 });
+    show(<ResearchTopics />, "/research/topics?topic=RT-draft");
+    fireEvent.click(await screen.findByRole("button", { name: "编辑草稿" }));
+    fireEvent.change(screen.getByLabelText("课题标题"), { target: { value: "改过的草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿修改" }));
+    await waitFor(() => expect(workspaceApi.updateDraft).toHaveBeenCalled());
+    const [id, body, revision] = vi.mocked(workspaceApi.updateDraft).mock.calls[0];
+    expect(id).toBe("RT-draft");
+    expect(body).not.toHaveProperty("goal");
+    expect(revision).toBe(1);
+  });
+
+  it("草稿冲突保留编辑内容且不提供追加轮次入口", async () => {
+    vi.mocked(workspaceApi.topic).mockResolvedValue(draftTopic);
+    vi.mocked(workspaceApi.entries).mockResolvedValue(emptyPage);
+    vi.mocked(workspaceApi.context).mockResolvedValue(contextPayload({ goal: null }));
+    vi.mocked(workspaceApi.updateDraft).mockRejectedValue({
+      status: 409,
+      detail: {
+        code: "topic_revision_conflict",
+        current_revision: 4,
+        your_revision: 1,
+        changed_fields: ["summary"],
+      },
+    });
+    show(<ResearchTopics />, "/research/topics?topic=RT-draft");
+    fireEvent.click(await screen.findByRole("button", { name: "编辑草稿" }));
+    fireEvent.change(screen.getByLabelText("课题标题"), { target: { value: "我的草稿改动" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿修改" }));
+    expect(await screen.findByRole("dialog", { name: "课题冲突" })).toBeInTheDocument();
+    expect(screen.getByLabelText("课题标题")).toHaveValue("我的草稿改动");
+    expect(screen.queryByRole("button", { name: /仅保留我的说明/ })).not.toBeInTheDocument();
   });
 });

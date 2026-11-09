@@ -116,10 +116,36 @@ class IllegalTransitionError(TopicWriteConflictError):
 class IdempotencyConflictError(TopicWriteConflictError):
     code = "idempotency_conflict"
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, message: str | None = None) -> None:
         super().__init__(
-            f"幂等键 {key} 已绑定内容不同的课题;请换新键或读取原课题",
+            message or f"幂等键 {key} 已绑定内容不同的课题;请换新键或读取原课题",
             detail={"idempotency_key": key},
+        )
+
+
+class TopicInvalidInputError(ValueError):
+    """Request is well-formed but violates a topic invariant (REST 422)."""
+
+
+def _assert_same_create(
+    existing: ResearchTopicModel, incoming: dict[str, Any], *, draft: bool
+) -> None:
+    keys = ("title", "question") if draft else ("title", "question", "goal")
+    current = existing.payload if isinstance(existing.payload, dict) else {}
+    if any(current.get(key) != incoming.get(key) for key in keys):
+        raise IdempotencyConflictError(str(existing.idempotency_key))
+    # A key must not be reused across creation modes: a full create never turns
+    # into a draft retry (or vice versa), even when title/question match.
+    created_as = current.get("created_as")
+    if created_as is None:
+        created_as = "draft" if current.get("goal") is None else "full"
+    if created_as != ("draft" if draft else "full"):
+        raise IdempotencyConflictError(
+            str(existing.idempotency_key),
+            message=(
+                f"幂等键 {existing.idempotency_key} 已绑定另一种创建模式"
+                f"({created_as});draft_create 与 create 不能复用同一键"
+            ),
         )
 
 
@@ -191,15 +217,6 @@ def _changed_fields(current: Mapping[str, Any], incoming: Mapping[str, Any]) -> 
     )
 
 
-def _assert_same_create(
-    existing: ResearchTopicModel, incoming: dict[str, Any], *, draft: bool
-) -> None:
-    keys = ("title", "question") if draft else ("title", "question", "goal")
-    current = existing.payload if isinstance(existing.payload, dict) else {}
-    if any(current.get(key) != incoming.get(key) for key in keys):
-        raise IdempotencyConflictError(str(existing.idempotency_key))
-
-
 def _revision_conflict(
     row: ResearchTopicModel,
     *,
@@ -224,6 +241,8 @@ async def create_topic(
     idempotency_key: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Create a draft or a full topic; returns ``(record, created)``."""
+    if idempotency_key is not None and not 1 <= len(idempotency_key) <= 128:
+        raise TopicInvalidInputError("幂等键长度须为 1-128 字符")
     repo = ResearchTopicRepository(session)
     if draft:
         draft_data = TopicDraftInput.model_validate(payload)
@@ -236,12 +255,19 @@ async def create_topic(
             "summary": draft_data.summary,
             "open_questions": draft_data.open_questions,
             "next_step": draft_data.next_step,
+            "created_as": "draft",
         }
         status = "draft"
     else:
         full = TopicInput.model_validate(payload)
-        stored = full.model_dump(mode="json")
+        stored = {**full.model_dump(mode="json"), "created_as": "full"}
         status = str(stored.get("status") or "active")
+        if status != "active":
+            # Creating paused/closed topics would skip the lifecycle audit; create
+            # active and use an explicit transition instead.
+            raise TopicInvalidInputError(
+                f"创建课题只支持 active;{status} 请先创建再用 /transitions 转移"
+            )
 
     if idempotency_key:
         existing = await repo.find_by_idempotency_key(idempotency_key)
@@ -273,12 +299,49 @@ async def update_topic(
     topic_id: str,
     payload: dict[str, Any],
     expected_revision: int,
+    status_declared: bool,
 ) -> dict[str, Any]:
+    """Full-payload update. Never changes lifecycle state (that needs transitions)."""
     repo = ResearchTopicRepository(session)
-    data = TopicInput.model_validate(payload).model_dump(mode="json")
     row = await repo.get(topic_id, lock=True)
     if row.revision != expected_revision:
-        raise _revision_conflict(row, expected=expected_revision, incoming=data)
+        raise _revision_conflict(row, expected=expected_revision, incoming=payload)
+    declared_status = str(payload.get("status")) if status_declared else None
+    if row.status == "draft":
+        if payload.get("goal") is not None:
+            raise TopicInvalidInputError("草稿不能直接设置目标;请使用 /activate 补齐目标并激活")
+        if declared_status is not None and declared_status != row.status:
+            raise IllegalTransitionError(
+                current=row.status,
+                allowed=allowed_actions(row.status),
+                action="update_status",
+                message=(
+                    f"PUT 不能改变课题状态({row.status} -> {declared_status});"
+                    f"请使用 /activate 或 /transitions 执行 "
+                    f"{'/'.join(allowed_actions(row.status)) or '无可用转移'}"
+                ),
+            )
+        draft_payload = {k: v for k, v in payload.items() if k not in {"goal", "status"}}
+        draft_data = TopicDraftInput.model_validate(draft_payload)
+        data: dict[str, Any] = draft_data.model_dump(mode="json")
+        data["goal"] = None
+        data["created_as"] = "draft"
+    else:
+        data = TopicInput.model_validate(payload).model_dump(mode="json")
+        if declared_status is not None and declared_status != row.status:
+            raise IllegalTransitionError(
+                current=row.status,
+                allowed=allowed_actions(row.status),
+                action="update_status",
+                message=(
+                    f"PUT 不能改变课题状态({row.status} -> {declared_status});"
+                    f"请使用 POST /api/research/topics/{{id}}/transitions 执行 "
+                    f"{'/'.join(allowed_actions(row.status)) or '无可用转移'}"
+                ),
+            )
+        data["created_as"] = "full"
+    # The lifecycle column is authoritative; PUT only ever keeps it in sync.
+    data["status"] = row.status
     updated = await repo.update(topic_id, data, expected_revision, actor)
     return record_out(updated)
 

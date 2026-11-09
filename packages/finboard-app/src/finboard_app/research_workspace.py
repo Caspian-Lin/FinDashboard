@@ -283,16 +283,19 @@ async def topic_context(
     recent_rounds: list[dict[str, Any]] = []
     for row in round_rows:
         data = row["payload"] if isinstance(row["payload"], dict) else {}
-        conclusion, cut = _excerpt(data.get("conclusion"), CONTEXT_EXCERPT_CHARS)
-        excerpted = excerpted or cut
+        conclusion, cut_conclusion = _excerpt(data.get("conclusion"), CONTEXT_EXCERPT_CHARS)
+        objective, cut_objective = _excerpt(data.get("objective"), CONTEXT_EXCERPT_CHARS)
+        next_step, cut_next_step = _excerpt(data.get("next_step"), CONTEXT_EXCERPT_CHARS)
+        # Never truncate silently: every shortened field flips the payload flag.
+        excerpted = excerpted or cut_conclusion or cut_objective or cut_next_step
         recent_rounds.append(
             {
                 "entry_id": row["entry_id"],
                 "branch": data.get("branch") or "main",
                 "outcome": data.get("outcome"),
-                "objective": _excerpt(data.get("objective"), CONTEXT_EXCERPT_CHARS)[0],
+                "objective": objective,
                 "conclusion_excerpt": conclusion,
-                "next_step": _excerpt(data.get("next_step"), CONTEXT_EXCERPT_CHARS)[0],
+                "next_step": next_step,
                 "created_at": row["created_at"].isoformat(),
                 "created_by": row["created_by"],
                 "evidence_level": "agent_interpretation"
@@ -313,10 +316,14 @@ async def topic_context(
             break
 
     dangling_refs: list[dict[str, Any]] = []
+    dangling_has_more = False
+    refs_checked = 0
     if refs:
         probe = await topic_refs_check(
             session, topic_id, rounds=rounds, limit=refs, docs_root=docs_root
         )
+        refs_checked = len(probe["items"])
+        dangling_has_more = bool(probe["has_more"])
         dangling_refs = [
             {"ref": item["ref"], "status": item["status"], "entry_ids": item["entry_ids"]}
             for item in probe["items"]
@@ -357,6 +364,8 @@ async def topic_context(
         "recent_rounds": recent_rounds,
         "active_links": [],  # Populated by #515 once topic <-> run links exist.
         "dangling_refs": dangling_refs,
+        "dangling_refs_has_more": dangling_has_more,
+        "refs_checked": refs_checked,
         "evidence_levels": {
             "topic": "working_summary",
             "rounds": "agent_interpretation",
@@ -472,10 +481,19 @@ async def workspace_read(
     items = [record_out(r) for r in rows[:limit]]
     if not topic_id:
         for item in items:
-            item["excerpted"] = True
+            # List mode is an excerpt view, but the flag must mean "something was
+            # actually shortened", not "this endpoint always shortens".
+            truncated = False
             for field in ("question", "summary", "next_step"):
-                item[field] = item[field][:1200]
-            item["open_questions"] = [q[:300] for q in item["open_questions"][:5]]
+                value = item.get(field) or ""
+                if len(value) > 1200:
+                    truncated = True
+                item[field] = value[:1200]
+            questions = item.get("open_questions") or []
+            if len(questions) > 5 or any(len(question) > 300 for question in questions):
+                truncated = True
+            item["open_questions"] = [question[:300] for question in questions[:5]]
+            item["excerpted"] = truncated
     return {
         "items": items,
         "has_more": len(rows) > limit,
@@ -495,6 +513,7 @@ async def workspace_write(
     topic_id: str | None = None,
     expected_revision: int | None = None,
     idempotency_key: str | None = None,
+    status_declared: bool | None = None,
 ) -> dict[str, Any]:
     from finboard_app.research_topic_lifecycle import (
         activate_topic,
@@ -516,12 +535,14 @@ async def workspace_write(
         await session.commit()
         return {**created_record, "created": created}
     if operation == "update" and topic_id and expected_revision is not None:
+        declared = status_declared if status_declared is not None else ("status" in payload)
         record = await update_topic(
             session,
             actor=actor,
             topic_id=topic_id,
             payload=payload,
             expected_revision=expected_revision,
+            status_declared=declared,
         )
     elif operation == "activate" and topic_id:
         record = await activate_topic(

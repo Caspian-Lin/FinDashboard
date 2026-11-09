@@ -96,13 +96,11 @@ class ResearchTopicRepository:
         old_goal = await self.goal(topic_id, goal["version"]) if goal else None
         if old_goal is not None and old_goal != goal:
             raise ValueError("目标内容变更须使用新目标版本,历史版本不可改写")
-        if row.status == "draft":
-            # Editing a draft never changes its lifecycle state; activation is the
-            # only draft -> active path (and it validates the goal explicitly).
-            payload = {**payload, "status": "draft"}
+        # Status changes are lifecycle transitions only; PUT never writes the
+        # column. Keep payload.status in sync with the authoritative column.
+        payload = {**payload, "status": row.status}
         row.revision += 1
         row.payload = payload
-        row.status = str(payload.get("status") or row.status)
         await self.append(
             topic_id,
             f"goal-{row.revision}",

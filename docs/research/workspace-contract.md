@@ -51,11 +51,12 @@ draft   --discard(reason)--> closed
 - 每次转移要求 `expected_revision`，服务端 `SELECT … FOR UPDATE` + `populate_existing`，revision 不符即拒绝，旧会话不得覆盖新 revision。
 - 每次转移在同一事务追加 `entry_type=lifecycle` 轮次 `{action, from, to, reason, actor, at, topic_revision}`；历史轮次与目标快照不改写、不删除。
 - 被放弃的草稿没有 goal，`reopen` 会被拒绝（不能产生无目标版本的 active 课题）；重开真实课题保留原目标与轮次。
-- `POST /topics`：带 goal 建 active（原行为不变）；只有 title/question 建 draft（`goal=null`）；可选 `idempotency_key`，同键同内容返回原课题（HTTP 200，`created=false`），同键不同内容 409 `idempotency_conflict`。
+- `POST /topics`：带 goal 建 active（原行为不变）；只有 title/question 建 draft（`goal=null`）；`status` 只接受 `active`（`paused/closed` 返回 422，须先建后转移，避免跳过生命周期审计）；可选 `idempotency_key`，同键同内容返回原课题（HTTP 200，`created=false`），同键不同内容或跨创建模式（create ↔ draft_create）返回 409 `idempotency_conflict`。
+- `PUT /topics/{id}` 只更新内容，**永不改变状态**：显式携带与当前相同的 `status` 会被忽略（老客户端全量 PUT 仍可用），不同则 409 `illegal_transition`（`allowed` 列出可用的 transitions 动作，提示走 `/transitions`）。非草稿 PUT 必须带 goal（缺失 422）；草稿 PUT 只接受 title/question/conclusion/summary/open_questions/next_step（无 goal，带 goal 返回 422，提示走 `/activate`），revision 乐观锁不变。
 - `POST /topics/{id}/activate`：`{goal, expected_revision}`，可附带 summary/open_questions/next_step/conclusion；goal 的 version/criteria/source 必须完整。已 active 且 goal 相同为幂等 200，不增加 revision；goal 不同则 409，不能借激活覆盖目标。
 - `POST /topics/{id}/transitions`：`{action: pause|resume|close|reopen|discard, reason, expected_revision}`；close/reopen/discard 必填原因。
 
-`GET /api/research/topics/{id}/context?rounds=10&refs=10` 返回跨客户端续接载荷：`topic`（含 revision/status/updated_at）、`goal`、`lifecycle`（since + 最近一次转移）、`open_questions`、`next_step`、`recent_rounds`（≤20 条、结论/目标/下一步各 ≤300 字摘录）、`active_links`（#515 前恒为空）、`dangling_refs`（对最近轮次引用逐条 `source_fact`，≤10 条/次）、`evidence_levels`、`next_actions`（服务端派生建议，不代表执行）、`generated_at`、`revision`、`bounds`。总载荷 ≤64 KiB；任何截取都置 `excerpted=true` 并在 `truncated_sections` 具名，绝不静默截断。`rounds` 上限 20，`refs` 上限 10。
+`GET /api/research/topics/{id}/context?rounds=10&refs=10` 返回跨客户端续接载荷：`topic`（含 revision/status/updated_at）、`goal`、`lifecycle`（since + 最近一次转移）、`open_questions`、`next_step`、`recent_rounds`（≤20 条；结论/目标/下一步任一超长都会截到 ≤300 字并置 `excerpted=true`）、`active_links`（#515 前恒为空）、`dangling_refs`（对最近轮次引用逐条 `source_fact`，≤10 条/次）与 `dangling_refs_has_more`/`refs_checked`、`evidence_levels`、`next_actions`（服务端派生建议，不代表执行）、`generated_at`、`revision`、`bounds`。总载荷 ≤64 KiB；任何截取都置 `excerpted=true` 并在 `truncated_sections` 具名，绝不静默截断。`rounds` 上限 20，`refs` 上限 10。列表模式的 `excerpted` 只在确实截断（>1200 字或开放问题 >5 项/单项 >300 字）时为 true。
 
 精确查询与聚合：
 
@@ -64,13 +65,15 @@ draft   --discard(reason)--> closed
 - `GET /topics/{id}/refs/check?rounds=10`：对最近 N 轮（≤20）引用去重后逐条调用既有 `source_fact`，返回 `{ref, status, facts, entry_ids}`；每次最多 20 条，`has_more` + `offset` 续页。
 - `GET /topics?status=&sort=updated|created`：默认按 `updated_at` 倒序（新列），`sort=created` 按插入 id 倒序。
 
-Web 侧：新建课题分两步（保存草稿 → 补齐目标激活），生命周期按钮带原因与二次确认，详情展示续接上下文卡片与断链提示；409 显示结构化冲突（当前 revision、变化字段）并提供“重新加载最新版本”和“仅保留我的说明（追加轮次）”，不静默覆盖。
+Web 侧：新建课题分两步（保存草稿 → 补齐目标激活），草稿可单独编辑（无 goal），生命周期按钮带原因与二次确认，详情展示续接上下文卡片与断链提示；表单打开时固定 `base_revision`，后台刷新不会改写提交版本；409 显示结构化冲突（当前 revision、变化字段）并提供“重新加载最新版本”和（非草稿）“仅保留我的说明（追加轮次）”，不静默覆盖。
+
+MCP 冲突返回 `conflict`，并把结构化 detail 以 `| details={json}` 形式附在 message 中（ToolError 无 details 字段），保留 `allowed`/`current`/`current_revision`/`changed_fields`。
 
 ## 工具同步、验证与回滚
 
 MCP工具与上述服务共用实现：topic_read、topic_write、memory_page、source_check、strategy_explain、decision_explain。`finboard_topic_read` 增加 `view=context|branches|refs` 与 `entry_id`，`finboard_topic_write` 增加 `operation=draft_create|activate|transition`；旧参数与行为不变。具体参数与完整例子见 Skill references/tools.md。MCP写工具受 readonly_only 拒绝，输入脱敏、审计，不注册任何实盘能力。
 
-迁移 `62f8b1e7a905` 创建独立 research_topics/research_topic_entries，无研究产物/实盘外键或级联；回滚前导出这两表，再downgrade。`a7c41e9b5d32`（#514）为 research_topics 增加 status/updated_at/idempotency_key、部分唯一索引与 (status, updated_at DESC) 索引，并从 payload.status 回填；downgrade 先把列值折回 payload.status 再删列/索引/约束，回滚无损。回滚不会删除任何 run、dataset、factor、memory 或模拟账本。执行差异与压力验证仍由 #502/#503 处理。
+迁移 `62f8b1e7a905` 创建独立 research_topics/research_topic_entries，无研究产物/实盘外键或级联；回滚前导出这两表，再downgrade。`a7c41e9b5d32`（#514）为 research_topics 增加 status/updated_at/idempotency_key、部分唯一索引与 (status, updated_at DESC) 索引，并从 payload.status 回填。downgrade 会**先导出**：把列值折回 payload.status 后再删除新列/索引/CHECK 约束——`idempotency_key`、`updated_at` 与按状态索引的查询能力会随之丢失，回滚后不能靠 downgrade 恢复，须先 `pg_dump`/导出。回滚不会删除任何 run、dataset、factor、memory 或模拟账本。执行差异与压力验证仍由 #502/#503 处理。
 
 本轮测试覆盖日历/OOS旧契约、方向翻转、冻结参数/版本缺证据、同源来源核验、目标与成交不一致、分页/载荷护栏、跨轮目标更新/纠正/幂等、路径包含、权限/创建者边界及迁移往返。phase1_doc.md §3.4 的3–14仅作为研究域产物关联与决策/账本解释映射，不替代实盘恢复/券商验收。
 

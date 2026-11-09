@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
@@ -12,13 +12,13 @@ from finboard_app.research_explanation import decision_evidence, explain
 from finboard_app.research_topic_lifecycle import (
     TopicActivateInput,
     TopicDraftInput,
+    TopicInvalidInputError,
     TopicTransitionInput,
     TopicWriteConflictError,
 )
 from finboard_app.research_workspace import (
     Goal,
     RoundInput,
-    TopicInput,
     memory_page,
     source_fact,
     workspace_read,
@@ -74,11 +74,16 @@ class TopicCreate(TopicDraftInput):
     """A topic with a goal creates ``active``; without one it creates a ``draft``."""
 
     goal: Goal | None = None
-    status: Literal["active", "paused", "closed"] = "active"
+    # Creating paused/closed would skip the lifecycle audit; create then transition.
+    status: Literal["active"] = "active"
     idempotency_key: str | None = Field(default=None, max_length=128)
 
 
-class TopicUpdate(TopicInput):
+class TopicUpdate(TopicDraftInput):
+    """Full-payload edit. ``goal`` is required for non-drafts; status cannot change."""
+
+    goal: Goal | None = None
+    status: Literal["draft", "active", "paused", "closed"] | None = None
     expected_revision: int = Field(ge=1)
 
 
@@ -107,6 +112,10 @@ async def _write(session: AsyncSession, **kwargs: Any) -> dict[str, Any]:
         return await workspace_write(session, actor="user:api", **kwargs)
     except TopicWriteConflictError as exc:
         raise HTTPException(409, exc.detail) from exc
+    except TopicInvalidInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -282,12 +291,20 @@ async def create(
 async def update(
     topic_id: str, body: TopicUpdate, session: AsyncSession = Depends(get_db_session)
 ) -> dict[str, Any]:
+    data = body.model_dump(mode="json", exclude={"expected_revision"})
+    declared = "status" in body.model_fields_set
+    payload = {
+        key: value
+        for key, value in data.items()
+        if (key != "status" or declared) and not (key == "goal" and value is None)
+    }
     return await _write(
         session,
         operation="update",
         topic_id=topic_id,
         expected_revision=body.expected_revision,
-        payload=body.model_dump(mode="json", exclude={"expected_revision"}),
+        payload=payload,
+        status_declared=declared,
     )
 
 

@@ -16,6 +16,15 @@ export interface TopicDraftInput {
   title: string;
   question: string;
 }
+/** Draft edits carry no goal; activation is the only way to add one. */
+export interface TopicDraftUpdate {
+  title: string;
+  question: string;
+  conclusion?: string;
+  summary?: string;
+  open_questions?: string[];
+  next_step?: string;
+}
 export interface TopicInput {
   title: string;
   question: string;
@@ -287,6 +296,11 @@ export const workspaceApi = {
       }),
     }),
   update: (id: string, body: TopicInput, revision: number) =>
+    fetchJSON<Topic>(`/research/topics/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...body, expected_revision: revision }),
+    }),
+  updateDraft: (id: string, body: TopicDraftUpdate, revision: number) =>
     fetchJSON<Topic>(`/research/topics/${encodeURIComponent(id)}`, {
       method: "PUT",
       body: JSON.stringify({ ...body, expected_revision: revision }),

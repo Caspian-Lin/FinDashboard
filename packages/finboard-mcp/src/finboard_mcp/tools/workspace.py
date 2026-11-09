@@ -1,5 +1,6 @@
-"""Bounded research context and frozen explanation tools (#499/#500)."""
+"""Bounded research context and frozen explanation tools (#499/#500/#514)."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -42,8 +43,12 @@ async def call(app: McpAppContext, operation: str, arguments: dict[str, Any]) ->
                     return await workspace_write(session, actor="agent:mcp", **args)
                 except TopicWriteConflictError as exc:
                     # Structured 409 equivalent: state/revision conflicts are not
-                    # invalid arguments and must stay distinguishable to the agent.
-                    raise McpToolError("conflict", str(exc)) from exc
+                    # invalid arguments. ToolError has no details field, so the
+                    # machine-readable detail rides along as JSON in the message.
+                    raise McpToolError(
+                        "conflict",
+                        f"{exc} | details={json.dumps(exc.detail, ensure_ascii=False, sort_keys=True)}",
+                    ) from exc
             if operation == "read":
                 return await workspace_read(
                     session,
