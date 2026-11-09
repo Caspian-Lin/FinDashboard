@@ -21,8 +21,12 @@ FinDashboard 仍是数据 / 权限 / 任务 / 审计 / 产物的唯一事实来�
 
 | 传输 | 端点 | 说明 |
 |---|---|---|
-| `streamable-http` | `http://127.0.0.1:8765/mcp`(默认) | 必须有凭据;按客户端 Bearer |
-| `stdio` | `uv run python -m finboard_mcp` 由宿主作为子进程拉起 | 无 HTTP 鉴权;作用域由 `FINBOARD_MCP_STDIO_SCOPES` 决定,**默认只有 `research.read`** |
+| `stdio` | `uv run python -m finboard_mcp` 由宿主作为子进程拉起 | **默认传输**(`Settings.mcp_transport` 默认 `stdio`);无 HTTP 鉴权;作用域由 `FINBOARD_MCP_STDIO_SCOPES` 决定,**默认只有 `research.read`** |
+| `streamable-http` | `http://127.0.0.1:8765/mcp` | 需显式 `FINBOARD_MCP_TRANSPORT=streamable-http`;必须有凭据,按客户端 Bearer |
+
+> 外部 Harness 场景(Codex / OpenCode 等)用 `streamable-http` + 按客户端凭据;
+> stdio 适合「宿主直接拉起子进程」的客户端,但默认只读,写操作需显式
+> `FINBOARD_MCP_STDIO_SCOPES`。
 
 ```bash
 # 独立启动 loopback HTTP(不是 make dev;不依赖 OpenCode / 交易内核)

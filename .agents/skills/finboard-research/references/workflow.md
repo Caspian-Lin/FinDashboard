@@ -11,7 +11,7 @@
   ├─ 要生成 Python / 可执行代码?
   │    → 网页/无代码规格拒绝;受控MCP research_code_submit可提交白名单代码,执行仅经Docker沙箱;禁止宿主文件编辑。
   │
-  ├─ 有课题(RT-)/ 深链接手 / 要续接上次研究?
+  ├─ 有课题(RT-)/ 深链交接 / 要续接上次研究?
   │    → finboard_topic_read(view=context);续等原 job 用 finboard_job_wait(BJ-),
   │      引用原运行用 finboard_run_get(RR-),见 reference tools.md「研究课题」节
   │

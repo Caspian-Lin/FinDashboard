@@ -460,8 +460,8 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 - `blockers` 非空即范围不可用(如 bars 主发布缺标的 / benchmark 不在发布 /
   locked 发布不满足窗口),不要自行绕过;`warnings` 是容错项(非交易日顺延、
   预热不足、研究发布缺标的)
-- 提交 run 时把 `resolution_id` 与同一份 `scope` 一起回填;服务端重算比对,
-  数据变了 → `conflict`(重新预览,不静默换最新发布)
+- 提交 run 时把预览返回的 `resolution_id` 作为 `data_scope_resolution_id` 与同一份
+  `scope` 一起回填;服务端重算比对,数据变了 → `conflict`(重新预览,不静默换最新发布)
 
 ## finboard_data_write_* / finboard_etf_*(✅ #137,数据准备闭环)
 
@@ -484,7 +484,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 错误:`invalid_argument`(未知行情源)/ `unavailable`(主源及备用源均不可用)
 
 (已删 `finboard_data_fetch_all`(#392):symbols.yaml 池改由
-`finboard_bulk_download_start` 的 `symbols` 参数承担,子集过滤语义一致)
+`finboard_data_bulk_download_start` 的 `symbols` 参数承担,子集过滤语义一致)
 
 ### finboard_data_sync_universe **[写,任务化]**
 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
