@@ -49,14 +49,19 @@ async def record_success(
     entity_id: str | None = None,
     result_code: str | None = None,
     idempotency_key: str | None = None,
+    outcome: AuditOutcome = "succeeded",
 ) -> None:
-    """在调用方 session 内记录成功审计(不 commit,失败让业务回滚)。"""
+    """在调用方 session 内记录成功审计(不 commit,失败让业务回滚)。
+
+    ``outcome`` 默认 ``succeeded``;调用方语义是「请求已完成但未产生动作」
+    (如对终态任务取消)时显式传 ``rejected``。
+    """
 
     await research_audit_recorder().record(
         session,
         ResearchAuditEvent(
             operation=operation,
-            outcome="succeeded",
+            outcome=outcome,
             context=mcp_context(app),
             entity_type=entity_type,
             entity_id=entity_id,

@@ -366,6 +366,8 @@ async def test_promote_binds_evidence_and_enters_formal_whitelist(tmp_path, monk
     )
 
     assert env.status == "ok"
+    # #518:晋级成功与审计同事务(伪 session 收到一次审计 insert)。
+    assert session.add.called
     data = cast(dict[str, Any], env.data)
     assert data["status"] == "active"
     assert data["promotion_status"] == PROMOTION_PASSED

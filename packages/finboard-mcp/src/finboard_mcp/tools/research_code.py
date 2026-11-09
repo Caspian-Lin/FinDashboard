@@ -20,6 +20,7 @@ from typing import Any
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
+from finboard_app.research_audit import ResearchAuditEvent, research_audit_recorder
 from finboard_backtest.research_code import (
     IMPORT_WHITELIST,
     PromotionScreenThresholds,
@@ -33,7 +34,11 @@ from finboard_backtest.validation.contracts import derive_oos_outcome
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
-from finboard_mcp.tools._audit import record_failure, record_success
+from finboard_mcp.tools._audit import (
+    mcp_context,
+    record_failure,
+    record_success,
+)
 from finboard_mcp.tools._serde import to_jsonable
 from finboard_persistence import (
     FeatureSnapshotRepository,
@@ -420,21 +425,26 @@ async def promote(
                     screen_run_id=screen_run_id,
                     evidence=evidence,
                 )
-                await session.commit()
                 error = McpToolError(
                     "invalid_argument",
                     "研究代码产物未通过晋级门: " + ", ".join(gate.failures),
                 )
-                await record_failure(
-                    app,
-                    operation="research_code.promote",
-                    params_summary=params,
-                    error=error,
-                    result_code="promotion_gate_failed",
-                    entity_type="research_code_artifact",
-                    entity_id=artifact.artifact_id,
-                    correlation=params,
+                # issue #518:业务失败证据与审计同事务(审计失败即回滚)。
+                await research_audit_recorder().record(
+                    session,
+                    ResearchAuditEvent(
+                        operation="research_code.promote",
+                        outcome="rejected",
+                        context=mcp_context(app),
+                        entity_type="research_code_artifact",
+                        entity_id=artifact.artifact_id,
+                        correlation=params,
+                        result_code="promotion_gate_failed",
+                        params_summary=params,
+                        error_summary=error.message,
+                    ),
                 )
+                await session.commit()
                 raise error
             promoted = await artifact_repo.promote(
                 artifact.artifact_id,
@@ -510,26 +520,31 @@ async def _record_promotion_failure(
         screen_run_id=screen_run_id,
         evidence=evidence,
     )
-    await session.commit()
-    # issue #518:晋级拒绝独立留痕(业务失败已随 mark_promotion_failed 提交)。
-    await record_failure(
-        app,
-        operation="research_code.promote",
-        params_summary={
-            "artifact_id": artifact.artifact_id,
-            "validation_experiment_id": validation_experiment_id,
-            "screen_run_id": screen_run_id,
-        },
-        error=failure,
-        result_code=failure.kind,
-        entity_type="research_code_artifact",
-        entity_id=artifact.artifact_id,
-        correlation={
-            "artifact_id": artifact.artifact_id,
-            "validation_experiment_id": validation_experiment_id,
-            "screen_run_id": screen_run_id,
-        },
+    # issue #518:晋级失败证据与审计**同事务**(唯一一次 commit;审计失败回滚
+    # promotion_failed,不出现「业务写成功、审计缺失」)。
+    await research_audit_recorder().record(
+        session,
+        ResearchAuditEvent(
+            operation="research_code.promote",
+            outcome="rejected",
+            context=mcp_context(app),
+            entity_type="research_code_artifact",
+            entity_id=artifact.artifact_id,
+            correlation={
+                "artifact_id": artifact.artifact_id,
+                "validation_experiment_id": validation_experiment_id,
+                "screen_run_id": screen_run_id,
+            },
+            result_code=failure.kind,
+            params_summary={
+                "artifact_id": artifact.artifact_id,
+                "validation_experiment_id": validation_experiment_id,
+                "screen_run_id": screen_run_id,
+            },
+            error_summary=failure.message,
+        ),
     )
+    await session.commit()
 
 
 def _promotion_evidence(

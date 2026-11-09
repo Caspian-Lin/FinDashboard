@@ -124,7 +124,7 @@ class ResearchOperationContext:
 
         return cls(
             actor=f"worker:{worker_id}",
-            actor_type=ResearchActorType.SYSTEM,
+            actor_type=ResearchActorType.WORKER,
             source=OperationSource.WORKER,
             client_id=client_id,
             operation_id=operation_id,

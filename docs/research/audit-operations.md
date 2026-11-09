@@ -21,7 +21,7 @@
 | `audit_id` | VARCHAR(32) UNIQUE | `RA-<16hex>`，对外唯一标识 |
 | `occurred_at` | TIMESTAMPTZ | 事件时间（UTC；服务端写入时的默认时钟） |
 | `actor` | VARCHAR(128) | 服务端身份：`user:api` / `agent:MC-…` / `worker:<id>` |
-| `actor_type` | VARCHAR(16) | `human` / `agent` / `system`（沿用 `ResearchActorType`） |
+| `actor_type` | VARCHAR(16) | `human` / `agent` / `worker` / `system`（worker 执行器用 `worker`） |
 | `source` | VARCHAR(16) | `web` / `mcp` / `worker` / `system` |
 | `client_id` | VARCHAR(32) NULL | #517 的 `MC-<12hex>`；Web 无则 NULL |
 | `topic_id` | VARCHAR(32) NULL | 课题 `RT-…` |
@@ -58,16 +58,16 @@
 | `run.submit` | `ResearchRunSubmissionService.submit`（REST `POST /api/research/runs`、MCP `finboard_run_queue`） | web / mcp | 成功与 run 行同事务；`result_code=created|idempotent_hit`；拒绝 `rejected`（统一错误码） |
 | `run.replay` | `ResearchRunSubmissionService.replay` | web / mcp | 同上；`correlation.replay_of_run_id` |
 | `job.enqueue` | `enqueue_job_core(..., context=ctx)`（run 提交双写 job 时） | web / mcp | 与 job 行同事务；`created|idempotent_hit` |
-| `job.cancel` | REST `POST /api/jobs/{id}/cancel`、MCP `finboard_job_cancel`（研究域 kind） | web / mcp | `cancel_requested` / `not_running` |
+| `job.cancel` | REST `POST /api/jobs/{id}/cancel`、MCP `finboard_job_cancel`（研究域 kind） | web / mcp | 真正发出取消 → `succeeded` + `cancel_requested`；终态/排队 no-op → `rejected` + `not_running`（HTTP/MCP 仍返回当前状态，协作式取消语义） |
 | `topic.create` | `workspace_write`（`create` / `draft_create`） | web / mcp | 成功与课题行同事务；`created|draft_created|idempotent_hit` |
 | `topic.update` | `workspace_write(update)` | web / mcp | 版本冲突 → `rejected` + `topic_revision_conflict` |
 | `topic.activate` | `workspace_write(activate)` | web / mcp | 同上 |
 | `topic.transition` | `workspace_write(transition)` | web / mcp | `result_code=<action>`；非法转移 → `illegal_transition` |
 | `topic.append` | `workspace_write(append)` | web / mcp | `correlation.entry_id` |
-| `experiment.unseal` | MCP `finboard_validation_experiment_run`（拒绝/入队）+ `ValidationExperimentExecutor`（worker 揭盲） | mcp / worker | 已揭盲 → `rejected` + `already_unsealed`；揭盲成功 → `succeeded` + `unsealed` |
+| `experiment.unseal` | MCP `finboard_validation_experiment_run`（拒绝/入队）+ `ValidationExperimentExecutor`（worker 揭盲） | mcp / worker | 已揭盲 → `rejected` + `already_unsealed`；揭盲成功 → `succeeded` + `unsealed`（worker 侧 `actor=worker:validation_experiment`） |
 | `research_code.submit` | MCP `finboard_research_code_submit` | mcp | 与 artifact 行同事务；`draft_created` |
 | `research_code.promote` | MCP `finboard_research_code_promote` | mcp | 晋级门失败 → `rejected` + `promotion_gate_failed`；成功 `promoted` |
-| `run.worker.finished` | `ResearchRunExecutor` 终态收口 | worker | `correlation.run_id/job_id/result_checksum`；非 succeeded 即 `outcome=failed` |
+| `run.worker.finished` | `ResearchRunExecutor` 终态收口 | worker | `actor=worker:research_run`、`actor_type=worker`；`correlation.run_id/job_id/result_checksum`，进程 id 在 `correlation.worker_process_id`；非 succeeded 即 `outcome=failed` |
 | `client.<event_type>` | `POST /api/research/audit/client-events` | mcp | `trust=client_declared`，永不覆盖服务端事实 |
 
 `operation` 之外不放自由文本操作名；新增写路径必须在此表登记，否则读取方无法解释。
@@ -160,9 +160,12 @@ dry-run 不写库。清理不可撤销，执行前请先备份或导出。
 - `mcp_audit_events`（#157）仍是 MCP **工具级**调用审计（延迟/失败/参数摘要），
   与本表并存：工具级延迟看 `mcp_audit_events`，业务事实与结果看
   `research_audit_events`。两者 `operation_id` 可关联但本版不强制回填。
-- 本版未接入的写路径（明确缺口）：`run.cancel`、`strategy draft/publish/
-  rollback`、`factor experiment create`、`simulation session start`、
-  `data backfill submit` —— 它们的业务表仍有自己的状态记录，但**没有**统一
+- 本版未接入的写路径（明确缺口，**不得**按已覆盖对外表述）：
+  `run.cancel`；`research_memories` create / correct / forget / confirm /
+  archive；`validation experiment` create / add_trial / reject / delete
+  （只有 `experiment.unseal` 已接入）；`strategy draft / publish / rollback`；
+  `factor experiment create`；`simulation session start`；
+  `data backfill submit`。这些路径的业务表仍有自己的状态记录，但没有统一
   研究审计行；新增时按 §2 登记操作名并复用同一 recorder。
 - 审计记录不随业务对象删除而清理（无外键）：课题/运行清理后审计仍保留，
   用于事故取证。

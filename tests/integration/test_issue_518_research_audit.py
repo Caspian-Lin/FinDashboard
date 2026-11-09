@@ -12,7 +12,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -22,10 +22,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from finboard_api.deps import get_db_session
+from finboard_api.routes.jobs import router as jobs_router
 from finboard_api.routes.research_audit import router as research_audit_router
 from finboard_app.research_audit import (
     ResearchAuditEvent,
     ResearchAuditRecorder,
+    ResearchAuditWorkerSink,
     configure_research_audit_recorder,
     reset_research_audit_recorder,
 )
@@ -36,6 +38,7 @@ from finboard_app.research_run_submission import (
 )
 from finboard_app.research_topic_lifecycle import TopicRevisionConflictError
 from finboard_app.research_workspace import workspace_write
+from finboard_mcp.context import McpAppContext
 from finboard_persistence import McpClientRepository, session_factory
 from finboard_persistence.models import (
     BackgroundJobModel,
@@ -699,3 +702,380 @@ async def test_purge_dry_run_and_delete(engine: AsyncEngine) -> None:
         await session.commit()
     assert deleted == 3
     assert await _count(engine, ResearchAuditEventModel) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 评审回归:终止态取消、worker 身份、脱敏边界、去重竞态、CLI/工具 smoke
+# --------------------------------------------------------------------------- #
+
+
+async def _insert_job(
+    engine: AsyncEngine,
+    *,
+    status: str,
+    kind: str = "research_run",
+    payload: dict[str, Any] | None = None,
+) -> str:
+    job_id = f"BJ-{uuid4().hex[:20]}"
+    async with session_factory(engine)() as session:
+        session.add(
+            BackgroundJobModel(
+                job_id=job_id,
+                kind=kind,
+                queue="research",
+                status=status,
+                payload=payload or {"run_id": "RR-cancel-audit"},
+                payload_checksum="0" * 64,
+                idempotency_key=f"k-{uuid4().hex[:20]}",
+                requested_by="user:api",
+            )
+        )
+        await session.commit()
+    return job_id
+
+
+@pytest_asyncio.fixture
+async def jobs_client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
+    from fastapi import FastAPI
+
+    sm = session_factory(engine)
+    app = FastAPI()
+    app.include_router(jobs_router)
+
+    async def _dependency() -> AsyncIterator[AsyncSession]:
+        async with sm() as session:
+            yield session
+
+    app.dependency_overrides[get_db_session] = _dependency
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield client
+
+
+async def test_cancel_terminal_job_rest_is_noop_with_audit(
+    engine: AsyncEngine, jobs_client: AsyncClient, audit: ResearchAuditRecorder
+) -> None:
+    """B1:终态 research_run 任务再取消 → 200 当前状态 + not_running 审计(不 500)。"""
+
+    job_id = await _insert_job(engine, status="succeeded")
+    response = await jobs_client.post(
+        f"/api/jobs/{job_id}/cancel", json={"reason": "already done"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "succeeded"
+
+    rows = [
+        row
+        for row in await _audit_rows(engine)
+        if row.operation == "job.cancel" and row.entity_id == job_id
+    ]
+    assert len(rows) == 1
+    assert rows[0].outcome == "rejected"
+    assert rows[0].result_code == "not_running"
+    assert rows[0].correlation["run_id"] == "RR-cancel-audit"
+    assert rows[0].params_summary["kind"] == "research_run"
+
+
+async def test_cancel_terminal_job_mcp_is_noop_with_audit(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    """B1(MCP 孪生):rollback 后不再读过期 ORM,返回 ok + not_running 审计。"""
+
+    from finboard_mcp.audit import AuditRecorder
+    from finboard_mcp.tools import jobs as job_tools
+
+    job_id = await _insert_job(engine, status="succeeded")
+    app = SimpleNamespace(
+        write_tools_enabled=True,
+        session_maker=session_factory(engine),
+        audit=AuditRecorder(),
+    )
+    envelope = await job_tools.job_cancel(cast(McpAppContext, app), job_id)
+    assert envelope.status == "ok", envelope.error
+    assert envelope.data["status"] == "succeeded"
+
+    rows = [
+        row
+        for row in await _audit_rows(engine)
+        if row.operation == "job.cancel" and row.entity_id == job_id
+    ]
+    assert len(rows) == 1
+    assert rows[0].outcome == "rejected"
+    assert rows[0].result_code == "not_running"
+
+
+async def test_worker_terminal_audit_identity(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    """worker 终态:actor=worker:<executor kind>、actor_type=worker、带 checksum。"""
+
+    from finboard_backtest.background_jobs.executors.research_run import (
+        ResearchRunExecutor,
+    )
+
+    sink = ResearchAuditWorkerSink(audit, worker_id="worker-process-1")
+    executor = ResearchRunExecutor(
+        session_maker=session_factory(engine),
+        store_factory=lambda _session: None,  # type: ignore[arg-type,return-value]
+        adapter_factory=lambda _manifest: None,  # type: ignore[arg-type,return-value]
+        audit=sink,
+    )
+    await executor._record_terminal(
+        run_id="RR-worker-audit",
+        job_id="BJ-worker-audit",
+        status="succeeded",
+        result_code="succeeded",
+        result_checksum="checksum-worker",
+    )
+
+    row = next(
+        row
+        for row in await _audit_rows(engine)
+        if row.operation == "run.worker.finished"
+    )
+    assert row.actor == "worker:research_run"
+    assert row.actor_type == "worker"
+    assert row.source == "worker"
+    assert row.correlation["run_id"] == "RR-worker-audit"
+    assert row.correlation["job_id"] == "BJ-worker-audit"
+    assert row.correlation["result_checksum"] == "checksum-worker"
+    assert row.correlation["worker_process_id"] == "worker-process-1"
+
+
+async def test_worker_unseal_audit_identity(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    """worker 揭盲成功:actor=worker:validation_experiment,带 experiment/job。"""
+
+    from finboard_backtest.background_jobs.executors.validation_experiment import (
+        ValidationExperimentExecutor,
+    )
+
+    async def _never_called(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("runner factory must not be called")
+
+    sink = ResearchAuditWorkerSink(audit, worker_id="worker-process-1")
+    executor = ValidationExperimentExecutor(
+        session_maker=session_factory(engine),
+        runner_factory=_never_called,
+        audit=sink,
+    )
+    await executor._record_unseal(
+        experiment_id="EXP-worker-audit",
+        job_id="BJ-worker-audit",
+        outcome="succeeded",
+        result_code="unsealed",
+    )
+    row = next(
+        row
+        for row in await _audit_rows(engine)
+        if row.operation == "experiment.unseal"
+    )
+    assert row.actor == "worker:validation_experiment"
+    assert row.actor_type == "worker"
+    assert row.correlation["experiment_id"] == "EXP-worker-audit"
+    assert row.correlation["job_id"] == "BJ-worker-audit"
+    assert row.result_code == "unsealed"
+
+
+async def test_correlation_is_redacted(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    async with session_factory(engine)() as session:
+        await audit.record(
+            session,
+            ResearchAuditEvent(
+                operation="run.submit",
+                outcome="succeeded",
+                context=ResearchOperationContext.for_web(actor="user:api"),
+                correlation={
+                    "run_id": "RR-x",
+                    "note": "Bearer abc.def-1234567890",
+                    "token": "token=plain-secret",
+                },
+            ),
+        )
+        await session.commit()
+    row = (await _audit_rows(engine))[0]
+    assert row.correlation["run_id"] == "RR-x"
+    assert "abc.def" not in str(row.correlation["note"])
+    assert "plain-secret" not in str(row.correlation["token"])
+
+
+async def test_body_and_code_never_stored(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    async with session_factory(engine)() as session:
+        await audit.record(
+            session,
+            ResearchAuditEvent(
+                operation="research_code.submit",
+                outcome="succeeded",
+                context=ResearchOperationContext.for_mcp(client_id="MC-x"),
+                params_summary={
+                    "code": "def alpha():\n    return 1",
+                    "content": "研究记忆正文不可入库",
+                    "files": {"factor.py": "import os\nos.system('x')"},
+                    "note": "import pandas as pd\nprint('code')",
+                    "title": "正常短标题",
+                },
+            ),
+        )
+        await session.commit()
+    stored = (await _audit_rows(engine))[0].params_summary
+    for key in ("code", "content", "files", "note"):
+        assert stored[key] == "***OMITTED***"
+    assert stored["title"] == "正常短标题"
+    assert "os.system" not in str(stored)
+    assert "研究记忆正文" not in str(stored)
+
+
+async def test_summary_budget_includes_metadata(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    import json
+
+    summary = {f"k{index:03d}": "v" * 110 for index in range(120)}
+    async with session_factory(engine)() as session:
+        await audit.record(
+            session,
+            ResearchAuditEvent(
+                operation="run.submit",
+                outcome="succeeded",
+                context=ResearchOperationContext.for_web(actor="user:api"),
+                params_summary=summary,
+            ),
+        )
+        await session.commit()
+    stored = (await _audit_rows(engine))[0].params_summary
+    encoded = json.dumps(stored, ensure_ascii=True, sort_keys=True)
+    assert len(encoded.encode("utf-8")) <= 4096
+    assert stored["_truncated"] is True
+    assert int(cast(int, stored["_omitted_keys"])) > 0
+
+
+async def test_client_event_dedupe_survives_race(
+    engine: AsyncEngine, audit: ResearchAuditRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发重复:先查后插竞态撞唯一索引 → 回滚后读既有行,不 500。"""
+
+    from finboard_persistence.research_audit_repo import ResearchAuditRepository as Repo
+
+    context = ResearchOperationContext.for_mcp(client_id="MC-race")
+    sm = session_factory(engine)
+    async with sm() as session:
+        first, created = await audit.record_client_declared(
+            session,
+            context=context,
+            client_event_id="ce-race-1",
+            operation="client.tool_call",
+            outcome="succeeded",
+            params_summary={"tool_name": "finboard_topic_write"},
+        )
+        await session.commit()
+    assert created is True
+
+    original = Repo.find_client_event
+    calls = {"n": 0}
+
+    async def _race(self: Repo, *, client_id: str, client_event_id: str) -> Any:
+        # 模拟竞态:第一次查重扑空(另一请求尚未提交),插入时才撞唯一索引;
+        # 冲突后的第二次查重走真实实现并返回既有行。
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await original(self, client_id=client_id, client_event_id=client_event_id)
+
+    monkeypatch.setattr(Repo, "find_client_event", _race)
+    async with sm() as session:
+        second, created_again = await audit.record_client_declared(
+            session,
+            context=context,
+            client_event_id="ce-race-1",
+            operation="client.tool_call",
+            outcome="succeeded",
+            params_summary={"tool_name": "finboard_topic_write"},
+        )
+        await session.commit()
+    monkeypatch.setattr(Repo, "find_client_event", original)
+    assert created_again is False
+    assert first is not None
+    assert second is not None
+    assert second.audit_id == first.audit_id
+    assert await _count(engine, ResearchAuditEventModel) == 1
+
+
+async def test_cli_retention_flags_and_defaults() -> None:
+    """CLI flags smoke:purge 帮助含 --before/--dry-run;保留默认 365、开关默认关。"""
+
+    from typer.testing import CliRunner
+
+    from finboard_app.cli import app as cli_app
+    from finboard_app.config import Settings
+
+    result = CliRunner().invoke(
+        cli_app, ["research", "audit", "purge", "--help"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "--before" in result.output
+    assert "--no-dry-run" in result.output
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.research_audit_retention_days == 365
+    assert settings.research_audit_client_events is False
+
+
+async def test_research_code_submit_audit_smoke(
+    engine: AsyncEngine, audit: ResearchAuditRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MCP research_code.submit smoke:成功写与审计同事务,正文不入库。"""
+
+    from finboard_mcp.audit import AuditRecorder
+    from finboard_mcp.tools import research_code
+
+    class _FakeService:
+        def submit(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "commit": "c" * 40,
+                "path": "factors/alpha",
+                "checksum": "d" * 64,
+            }
+
+    class _FakeRepo:
+        def __init__(self, _session: Any) -> None:
+            pass
+
+        async def register(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                artifact_id="RC-smoke", status="draft", promotion_status="pending"
+            )
+
+    monkeypatch.setattr(research_code, "_service", lambda _app: _FakeService())
+    monkeypatch.setattr(research_code, "ResearchCodeArtifactRepository", _FakeRepo)
+    app = SimpleNamespace(
+        write_tools_enabled=True,
+        session_maker=session_factory(engine),
+        audit=AuditRecorder(),
+        settings=SimpleNamespace(
+            research_code_repo_path="unused",
+            research_code_max_files=32,
+            research_code_max_file_bytes=262144,
+        ),
+    )
+    envelope = await research_code.submit(
+        cast(McpAppContext, app),
+        kind="factor",
+        name="alpha",
+        files={"factor.py": "def alpha(): pass"},
+    )
+    assert envelope.status == "ok", envelope.error
+    row = next(
+        row
+        for row in await _audit_rows(engine)
+        if row.operation == "research_code.submit"
+    )
+    assert row.outcome == "succeeded"
+    assert row.entity_type == "research_code_artifact"
+    assert row.entity_id == "RC-smoke"
+    assert row.source == "mcp"
+    assert "def alpha" not in str(row.params_summary)

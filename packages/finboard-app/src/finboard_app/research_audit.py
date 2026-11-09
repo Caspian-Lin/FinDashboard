@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from finboard_app.research_operation import ResearchOperationContext
 from finboard_backtest.background_jobs.audit import WorkerAuditEvent
@@ -79,6 +80,8 @@ def is_research_job_kind(kind: str) -> bool:
     return kind in RESEARCH_JOB_KINDS
 
 _REDACTED = "***REDACTED***"
+#: 正文类值(代码 / 记忆 / 对话)整值丢弃,只留占位符。
+_OMITTED = "***OMITTED***"
 
 #: 敏感**键名**:命中即整值替换(比文本正则更可靠,``{"token": "…"}`` 也覆盖)。
 _SENSITIVE_KEY = re.compile(
@@ -86,11 +89,44 @@ _SENSITIVE_KEY = re.compile(
     r"credential|private[_-]?key|client[_-]?secret)"
 )
 
+#: 正文**键名**:代码正文 / 记忆正文 / 对话与推理,整值丢弃(不截断后入库)。
+_BODY_KEY = re.compile(
+    r"(?i)^(content|code|source_code|files?|file_contents?|body|conversation|"
+    r"messages?|prompt|prompts|reasoning|transcript|memory|memory_content|"
+    r"text_body|raw|diff|patch)$"
+)
+
+#: 正文**前缀**:即使键名中性,明显代码/记忆正文也不入库。
+_BODY_PREFIXES: tuple[str, ...] = (
+    "import ",
+    "from ",
+    "def ",
+    "class ",
+    "async def ",
+    "#!/",
+    '"""',
+    "'''",
+    "MEMORY",
+    "memory:",
+    "# -*- coding",
+)
+
 #: 追加的凭据文本形态(sanitize_prompt 之外的平台前缀)。
 _EXTRA_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\bfbmc[._-][A-Za-z0-9._-]{8,}"), _REDACTED),
     (re.compile(r"(?i)\b(?:sk|pk|ghp|ghs|gho|xox[baprs])[-_][A-Za-z0-9_-]{16,}"), _REDACTED),
 )
+
+
+def _is_body_like(key: str, value: Any) -> bool:
+    """键名或值是否明显是代码/记忆/对话正文(正文永不入库)。"""
+
+    if _BODY_KEY.search(str(key)):
+        return True
+    if isinstance(value, str):
+        stripped = value.lstrip()
+        return any(stripped.startswith(prefix) for prefix in _BODY_PREFIXES)
+    return False
 
 
 def generate_audit_id() -> str:
@@ -109,21 +145,25 @@ def redact_secrets(text: str) -> str:
 
 
 def _sanitize_structure(value: Any) -> Any:
-    """递归脱敏任意结构(敏感键整值替换,字符串截断)。"""
+    """递归脱敏任意结构(敏感键整值替换,正文键整值丢弃,字符串截断)。"""
 
     if isinstance(value, Mapping):
         return {
             str(key)[:MAX_VALUE_CHARS]: (
                 _REDACTED
                 if _SENSITIVE_KEY.search(str(key))
-                else _sanitize_structure(item)
+                else (
+                    _OMITTED
+                    if _is_body_like(str(key), item)
+                    else _sanitize_structure(item)
+                )
             )
             for key, item in value.items()
         }
     if isinstance(value, list | tuple):
         return [_sanitize_structure(item) for item in value]
     if isinstance(value, str):
-        return redact_secrets(value)[:MAX_VALUE_CHARS]
+        return _OMITTED if _is_body_like("", value) else redact_secrets(value)[:MAX_VALUE_CHARS]
     if isinstance(value, bool | int | float) or value is None:
         return value
     return redact_secrets(str(value))[:MAX_VALUE_CHARS]
@@ -133,6 +173,8 @@ def _coerce_text(value: Any) -> str:
     """把任意值转成脱敏后的短文本(嵌套结构递归脱敏后再序列化截断)。"""
 
     if isinstance(value, str):
+        if _is_body_like("", value):
+            return _OMITTED
         text = redact_secrets(value)
     elif isinstance(value, bool | int | float) or value is None:
         text = "" if value is None else str(value)
@@ -150,12 +192,22 @@ def _coerce_text(value: Any) -> str:
 
 
 def sanitize_params(params: Mapping[str, Any] | None) -> dict[str, str]:
-    """把参数映射脱敏成 ``{key: ≤120字文本}``(不截断整包)。"""
+    """把参数映射脱敏成 ``{key: ≤120字文本}``(不截断整包)。
+
+    三层规则:敏感键整值 ``***REDACTED***``;代码/记忆/对话正文键或正文
+    形态整值 ``***OMITTED***``(正文永不入库);其余脱敏后截断。
+    """
 
     summary: dict[str, str] = {}
     for key, value in (params or {}).items():
-        name = redact_secrets(str(key))[:MAX_VALUE_CHARS]
-        summary[name] = _REDACTED if _SENSITIVE_KEY.search(str(key)) else _coerce_text(value)
+        raw_key = str(key)
+        name = redact_secrets(raw_key)[:MAX_VALUE_CHARS]
+        if _SENSITIVE_KEY.search(raw_key):
+            summary[name] = _REDACTED
+        elif _is_body_like(raw_key, value):
+            summary[name] = _OMITTED
+        else:
+            summary[name] = _coerce_text(value)
     return summary
 
 
@@ -173,16 +225,30 @@ def _encoded_size(value: Mapping[str, Any]) -> int:
 
 
 def bound_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """把摘要收敛到 ≤4 KiB:按插入顺序保留,超限的尾部键丢弃并标记。"""
+    """把摘要收敛到 ≤4 KiB:按插入顺序保留,超限的尾部键丢弃并标记。
 
+    预算检查**包含** ``_truncated`` / ``_omitted_keys`` 元信息(先在预留
+    元信息的前提下逐键判定,再按实际元信息复核),避免元信息把上限顶破。
+    """
+
+    if _encoded_size(summary) <= MAX_SUMMARY_BYTES:
+        return dict(summary)
+
+    # 预留最坏元信息长度(`_omitted_keys` 最多 6 位),逐键判定是否放得下。
+    reserved = {"_truncated": True, "_omitted_keys": 999_999}
     bounded: dict[str, Any] = {}
     omitted = 0
     for key, value in summary.items():
-        candidate = {**bounded, key: value}
-        if _encoded_size({**candidate, "_omitted_keys": 0}) > MAX_SUMMARY_BYTES:
+        if _encoded_size({**bounded, key: value, **reserved}) > MAX_SUMMARY_BYTES:
             omitted += 1
             continue
         bounded[key] = value
+    # 用真实 omitted 数字复核;仍超限则继续丢尾部键。
+    while bounded and _encoded_size(
+        {**bounded, "_truncated": True, "_omitted_keys": omitted}
+    ) > MAX_SUMMARY_BYTES:
+        bounded.popitem()
+        omitted += 1
     if omitted:
         bounded["_truncated"] = True
         bounded["_omitted_keys"] = omitted
@@ -251,7 +317,7 @@ class ResearchAuditRecorder:
             "outcome": event.outcome,
             "result_code": _clip(event.result_code, 64),
             "correlation": {
-                str(key)[:64]: str(value)[:256]
+                str(key)[:64]: redact_secrets(str(value))[:256]
                 for key, value in event.correlation.items()
                 if value is not None
             },
@@ -325,21 +391,33 @@ class ResearchAuditRecorder:
         )
         if existing is not None:
             return existing, False
-        row = await repo.append(
-            **self._fields(
-                ResearchAuditEvent(
-                    operation=operation,
-                    outcome=outcome,
-                    context=context,
-                    correlation=dict(correlation or {}),
-                    result_code=result_code,
-                    params_summary=params_summary,
-                    idempotency_key=client_event_id,
-                    trust=CLIENT_DECLARED,
-                    occurred_at=occurred_at,
+        row = None
+        try:
+            row = await repo.append(
+                **self._fields(
+                    ResearchAuditEvent(
+                        operation=operation,
+                        outcome=outcome,
+                        context=context,
+                        correlation=dict(correlation or {}),
+                        result_code=result_code,
+                        params_summary=params_summary,
+                        idempotency_key=client_event_id,
+                        trust=CLIENT_DECLARED,
+                        occurred_at=occurred_at,
+                    )
                 )
             )
-        )
+        except IntegrityError:
+            # 并发重复上报:部分唯一索引兜底;回滚本次插入后读既有行,
+            # 返回同一 audit_id(不 500、不产生第二行)。
+            await session.rollback()
+            existing = await repo.find_client_event(
+                client_id=context.client_id, client_event_id=client_event_id
+            )
+            if existing is not None:
+                return existing, False
+            raise
         return row, True
 
 
@@ -367,7 +445,12 @@ class ResearchAuditWorkerSink:
         self._worker_id = worker_id
 
     async def record(self, event: WorkerAuditEvent) -> None:
-        context = ResearchOperationContext.for_worker(self._worker_id)
+        # 身份用执行器 kind(worker:research_run / worker:validation_experiment),
+        # 进程级 worker id 只进 correlation,避免把宿主信息写进 actor。
+        actor_id = event.worker_id or self._worker_id
+        context = ResearchOperationContext.for_worker(actor_id)
+        correlation = dict(event.correlation)
+        correlation.setdefault("worker_process_id", self._worker_id)
         await self._recorder.record_detached(
             ResearchAuditEvent(
                 operation=event.operation,
@@ -375,7 +458,7 @@ class ResearchAuditWorkerSink:
                 context=context,
                 entity_type=event.entity_type,
                 entity_id=event.entity_id,
-                correlation=dict(event.correlation),
+                correlation=correlation,
                 result_code=event.result_code,
                 params_summary=dict(event.params_summary),
                 error_summary=event.error_summary,

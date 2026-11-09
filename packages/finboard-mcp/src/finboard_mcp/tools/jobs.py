@@ -458,7 +458,11 @@ async def job_cancel(
             row = await repo.get(job_id)
             if row is None:
                 raise McpToolError("not_found", f"后台任务不存在: {job_id}")
-            research_job = is_research_job_kind(row.kind)
+            # issue #518:rollback 会使 ORM 对象过期(async 下再读即
+            # MissingGreenlet);先取出纯量再尝试取消。
+            job_kind = row.kind
+            job_payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+            research_job = is_research_job_kind(job_kind)
             requested = False
             try:
                 await repo.request_cancel(job_id)
@@ -467,11 +471,10 @@ async def job_cancel(
                 await session.rollback()
                 # 不在 running(可能已排队 / 已终态)——返回当前状态给调用方判断。
             if research_job:
-                payload = row.payload if isinstance(row.payload, dict) else {}
                 correlation = {"job_id": job_id}
                 for key in ("run_id", "experiment_id"):
-                    if payload.get(key):
-                        correlation[key] = str(payload[key])
+                    if job_payload.get(key):
+                        correlation[key] = str(job_payload[key])
                 await record_success(
                     session,
                     app=app,
@@ -480,7 +483,8 @@ async def job_cancel(
                     entity_id=job_id,
                     correlation=correlation,
                     result_code="cancel_requested" if requested else "not_running",
-                    params_summary={"job_id": job_id, "kind": row.kind},
+                    params_summary={"job_id": job_id, "kind": job_kind},
+                    outcome="succeeded" if requested else "rejected",
                 )
             await session.commit()
             refreshed = await repo.get(job_id)

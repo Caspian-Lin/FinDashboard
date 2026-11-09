@@ -26,7 +26,7 @@ McpClientIdentity(client_id="MC-<12hex>", name="codex", scopes=frozenset({...}))
 身份如何到达工具(设计选择):ASGI 中间件把身份写入
 `scope["state"]["mcp_identity"]`;每个工具入口的 `app_context(ctx)` 从 MCP
 `request_context.request` 取出并写入 `contextvars.ContextVar`;唯一执行漏斗
-`execution.run_tool` 读取 contextvar 强制作用域。没有把 identity 加进 148 个
+`execution.run_tool` 读取 contextvar 强制作用域。没有把 identity 加进 149 个
 工具签名(改面过大且易漏),也没有只依赖纯 contextvar(实测 MCP SDK 的
 in-memory / stdio 任务不会继承外层 ContextVar)。stdio 无 HTTP 请求时回退到
 `FINBOARD_MCP_STDIO_SCOPES` 默认身份。
@@ -80,7 +80,7 @@ uv run finboard mcp client revoke MC-0123456789ab
 - 唯一漏斗 `execution.run_tool` 在 handler 之前检查
   `TOOL_SCOPES[tool_name] ⊆ identity.scopes`;`"*"` 仅 legacy 兼容。
 - `TOOL_SCOPES` 未登记的工具 = 契约错误 = **拒绝**(fail-closed),并记录
-  `mcp.scope_contract_missing`;契约测试比对 148 个注册工具名。
+  `mcp.scope_contract_missing`;契约测试比对 149 个注册工具名。
 - 越权返回 `status=denied` / `error.kind=permission_denied`,handler 不执行,
   业务零写入;拒绝事件同样进审计(`caller` = client_id)。
 - 混合 operation 工具(如 `finboard_research_stress` 的 plan/get 与 queue)按
