@@ -84,6 +84,7 @@ LLM（包括本 agent 自身）**不允许**：直接连接实盘账户、直接
 
 ### FinBoard MCP Server 与 OpenCode 运行时边界
 - **MCP Server（#108）**：研究能力以受控 MCP 工具暴露给外置 Agent，FinDashboard 仍是唯一事实来源；研究写操作（创建快照/策略/运行/发布/启动模拟盘）agent 可自主执行（#122）；实盘能力（下单/撤单/改持仓/Kill Switch/连接 broker/凭证探测）**永久不注册为工具**；工具返回统一信封 `ToolEnvelope`；入参 `sanitize_prompt` 脱敏 + 审计（structlog + `mcp_audit_events` 表，REST `GET /api/mcp/audit` 可查），不记录凭证与未脱敏内容。
+- **MCP 按客户端授权（#517）**：外部接入使用 `mcp_clients` 表签发的可撤销 Bearer 凭据（只存 `sha256` 摘要，`finboard mcp client create/list/revoke` 管理），作用域 `research.read` / `research.write` / `research.run` / `data.write` / `audit.read` 在唯一漏斗 `run_tool` 强制；`TOOL_SCOPES` 必须覆盖全部注册工具，未登记即拒绝（fail-closed）；stdio 默认仅 `research.read`（收紧行为变更），非 loopback HTTP 必须 `FINBOARD_MCP_ALLOW_REMOTE=true` 且置于 TLS 反向代理后；旧 `FINBOARD_MCP_AUTH_TOKEN` 与 `FINBOARD_MCP_READONLY_ONLY` 处于弃用兼容期。详见 `docs/mcp-client-auth.md`。
 - **任务队列 MCP（#136）**：`finboard_job_*` 只覆盖研究/数据/回测类 kind（`background_jobs`，`BJ-` ID）；`job_cancel` 是研究域协作式取消，非实盘撤单。
 - **能力同步规范（#123，硬性）**：新增/修改研究功能必须同步 ①`finboard-mcp` 注册/更新工具 ②`server.py` 的 `_INSTRUCTIONS` ③Skill `references/tools.md` ④（涉及新阶段时）`packages/finboard-mcp/ROADMAP.md`——否则外置 agent 认知与研究现实脱节。
 - **OpenCode 运行时（#109/#118）**：`opencode web` 容器级隔离（独立命名卷持久化会话与 auth、版本锁定镜像、环境变量白名单，**绝不**继承 FinBoard 的 DB 密码/broker 凭证/API Key）；FinBoard 网关只是控制面（status/health/access），不透传流量；单用户模型下宿主机 127.0.0.1 绑定是唯一网络边界（无 basic auth，多用户需恢复网关鉴权）。容器经 `host.docker.internal:8765` 访问内嵌 `finboard_mcp`（streamable-http + Bearer）；**lifespan 必须先起内嵌 MCP、后建容器**（opencode 首连失败即 `failed` 且不再重试）；`HOME=/workspace` 与 XDG 目录注入语义不可变（决定文件选择器与数据落点）。

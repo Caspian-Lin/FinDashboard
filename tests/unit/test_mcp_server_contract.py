@@ -13,6 +13,8 @@ from __future__ import annotations
 from mcp import Client
 
 from finboard_mcp import build_mcp_server
+from finboard_mcp.identity import McpClientIdentity
+from finboard_mcp.scopes import SCOPE_PRESETS, TOOL_SCOPES, VALID_SCOPES
 
 _EXPECTED_TOOLS = {
     "finboard_run_diagnostics", "finboard_run_compare",
@@ -210,6 +212,26 @@ class TestToolExposure:
         # #157:精确相等 —— 新增/删除工具必须同步本清单与文档(#123 同步规范)。
         assert await _tool_names() == _EXPECTED_TOOLS
 
+    async def test_tool_scopes_cover_all_registered_tools(self) -> None:
+        """#517:TOOL_SCOPES 必须与注册工具集一一对应(数量同源)。"""
+        names = await _tool_names()
+        assert len(names) == 148
+        assert set(TOOL_SCOPES) == names
+        for tool_name, scopes in TOOL_SCOPES.items():
+            assert scopes, f"{tool_name} 没有声明作用域"
+            assert scopes <= VALID_SCOPES, f"{tool_name} 含未知作用域 {scopes - VALID_SCOPES}"
+            assert "*" not in scopes, f"{tool_name} 不得使用通配作用域"
+
+    async def test_scope_presets_are_valid_subsets(self) -> None:
+        """#517:预设只由合法作用域组成,readonly 只读、topic-writer 不含 data.write。"""
+        assert set(SCOPE_PRESETS) == {"readonly", "topic-writer", "data-operator"}
+        for name, scopes in SCOPE_PRESETS.items():
+            assert scopes, name
+            assert scopes <= VALID_SCOPES, name
+        assert SCOPE_PRESETS["readonly"] == frozenset({"research.read"})
+        assert "data.write" not in SCOPE_PRESETS["topic-writer"]
+        assert "data.write" in SCOPE_PRESETS["data-operator"]
+
     async def test_no_live_trading_tools_exposed(self) -> None:
         names = await _tool_names()
         for name in names:
@@ -241,6 +263,14 @@ class TestCallToolContract:
     async def test_run_list_returns_envelope(self) -> None:
         mcp = build_mcp_server()
         async with Client(mcp) as client:
+            # #517:lifespan 已装配作用域强制;进程内测试显式给全权身份。
+            from finboard_mcp.scopes import set_default_identity
+
+            set_default_identity(
+                McpClientIdentity(
+                    client_id="MC-pytest", name="pytest", scopes=frozenset({"*"})
+                )
+            )
             result = await client.call_tool("finboard_run_list", {"limit": 1})
         content = result.structured_content
         assert content is not None

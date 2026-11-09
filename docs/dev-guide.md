@@ -627,8 +627,8 @@ FinBoard 把 [OpenCode](https://opencode.ai) 作为受控研究 Agent 运行时,
 opencode web Docker 容器(宿主机侧锁 loopback)
   ↓ finboard-researcher agent(内置 bash/edit/write/webfetch 等默认拒绝,
     只放行 read/glob/grep/skill + finboard_* MCP 工具)
-finboard-mcp(受控 MCP 工具,113 个;研究写操作自主执行 #122;#160 后零内置 LLM)
-  ↓ Bearer token(streamable-http)
+finboard-mcp(受控 MCP 工具,148 个;研究写操作自主执行 #122;#160 后零内置 LLM)
+  ↓ Bearer token(streamable-http;按客户端凭据 / 作用域,#517)
 FinDashboard service / repository(唯一事实来源)
 ```
 
@@ -639,10 +639,16 @@ FinDashboard service / repository(唯一事实来源)
 FINBOARD_OPENCODE_WEB_ENABLED=true \
 FINBOARD_OPENCODE_MANAGE_PROCESS=true \
 FINBOARD_OPENCODE_WEB_CORS_ORIGINS=http://localhost:5173 \
+FINBOARD_MCP_ALLOW_REMOTE=true \
 FINBOARD_MCP_AUTH_TOKEN=<token> \
 FINBOARD_OPENCODE_ENV_OVERRIDES=DEEPSEEK_API_KEY=<key> \
 uv run uvicorn finboard_api.app:app
 ```
+
+> **行为变更(#517)**:内嵌 MCP 不再隐式把 `127.0.0.1` 放宽为 `0.0.0.0`。
+> 容器模式必须显式设置 `FINBOARD_MCP_ALLOW_REMOTE=true`,否则 MCP 保持 loopback、
+> 容器经 `host.docker.internal:8765` 首连失败(#118 不重试)。#520 退役内嵌托管
+> 后此开关不再需要。
 
 要点(#157):
 - **无 basic auth**:单用户模型下 OpenCode Web 直接使用明文
@@ -650,8 +656,14 @@ uv run uvicorn finboard_api.app:app
   宿主机侧 `127.0.0.1` 绑定是唯一网络边界。
 - **MCP 地址可配置**:`FINBOARD_OPENCODE_MCP_REMOTE_URL` 在容器启动时渲染进
   `.opencode/runtime/opencode.json` 并以单文件 bind mount 覆盖容器内配置;
-  内嵌 MCP 在容器模式下默认绑 `0.0.0.0`(Bearer token 保护)。
-- 也可用 Makefile 独立跑 MCP HTTP server:`make mcp-serve-http MCP_AUTH_TOKEN=<token>`。
+  内嵌 MCP 仅在显式 `FINBOARD_MCP_ALLOW_REMOTE=true` 时绑 `0.0.0.0`
+  (Bearer 凭据保护),否则保持 `127.0.0.1`(容器不可达,日志具名告警)。
+- 也可用 Makefile 独立跑 MCP HTTP server:`make mcp-serve-http`(本机 loopback;
+  凭据用 `make mcp-client-create` 签发,或兼容期显式传 `MCP_AUTH_TOKEN=<token>`);
+  容器 / 远程场景用 `make mcp-serve-http-remote`(显式 `ALLOW_REMOTE=true`,
+  必须置于 TLS 反向代理后)。外部客户端推荐用
+  `finboard mcp client create --name <n> --preset <preset>` 签发可撤销凭据
+  (#517,见 `docs/mcp-client-auth.md`)。
 
 外部 serve 模式(向后兼容,`opencode serve` 4096 + `FINBOARD_OPENCODE_ENABLED=true`)
 仍可用,见 `packages/finboard-opencode` 文档。
@@ -703,13 +715,19 @@ IndexedDB(iframe 与新窗口各自独立),服务端无法预置 —— 首次�
 ### MCP 审计与工具契约
 
 - 每次 MCP 工具调用记录审计事件(structlog + 内存副本;`FINBOARD_MCP_AUDIT_PERSIST=true`
-  时追加到独立 `mcp_audit_events` 表,`GET /api/mcp/audit` 可查询,#157);
+  时追加到独立 `mcp_audit_events` 表,`GET /api/mcp/audit` 可查询,#157);作用域
+  拒绝同样进审计,`caller` 记录客户端 ID;
 - 工具清单与边界同步规范见 #123:`_INSTRUCTIONS` / Skill `SKILL.md` /
-  `references/tools.md` / `ROADMAP.md` 必须与注册表同步,契约测试锁定工具总数。
+  `references/tools.md` / `ROADMAP.md` 必须与注册表同步,契约测试锁定工具总数
+  与 `TOOL_SCOPES` 覆盖(148 个);
+- 按客户端授权(#517):`mcp_clients` 可撤销凭据 + 五个作用域 + 唯一漏斗
+  `run_tool` 强制;详见 `docs/mcp-client-auth.md`。
 
 ### 回滚
 
-- 关闭 MCP 入口:`FINBOARD_MCP_ENABLED=false`(默认)
+- 关闭 MCP 入口:`FINBOARD_MCP_ENABLED=false`(未设置时默认启用,#517)
+- 回退 MCP 凭据迁移:`alembic downgrade -1` 删除 `mcp_clients`,可临时回退
+  `FINBOARD_MCP_AUTH_TOKEN` 旧共享 token
 - 关闭外部 serve 接入:`FINBOARD_OPENCODE_ENABLED=false`(默认)
 - 关闭 Web 工作台网关:`FINBOARD_OPENCODE_WEB_ENABLED=false`(默认),网关端点
   返回 503、不启动容器

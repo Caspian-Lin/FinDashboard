@@ -17,6 +17,9 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 2. **研究写操作可自主执行**(#122) —— 创建因子 / 快照 / 策略 / 运行回测 / 发布数据 /
    启动模拟盘等研究写操作 agent 可通过 MCP **自主执行**,无需人工审批。
    不触及交易安全红线(不连 broker / 账户 / 订单 / 持仓)。
+   写操作仍受调用凭据作用域约束(#517,`research.write` / `research.run` /
+   `data.write`;readonly 预设只能读,stdio 默认 `research.read`)——越权返回
+   `denied`,不是本 Skill 可绕过的审批门。
 3. **实盘能力永久不可用** —— 下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker /
    凭证探测不在工具集中。需要它们 = 走错了路。
 4. **代码通道受控** —— 网页/无代码规格禁Python与可执行表达式;MCP research_code_submit可提交白名单策略/因子Python,仅经Docker沙箱执行。用户因子序列只用compute_series;禁止宿主文件编辑、模块路径注入、任意表达式。
