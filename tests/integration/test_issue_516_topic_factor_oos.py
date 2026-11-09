@@ -720,6 +720,37 @@ async def test_code_run_execute_names_disabled_sandbox(engine: AsyncEngine) -> N
     assert await _count(engine, BackgroundJobModel) == 0
 
 
+async def test_operation_id_is_unique_across_run_links_and_actions(
+    engine: AsyncEngine,
+) -> None:
+    """One client operation_id must not bind both a run and a factor experiment."""
+
+    await _make_snapshot(engine)
+    topic = await _create_topic(engine)
+    async with session_factory(engine)() as session:
+        await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="run.submit",
+            goal_version="v1",
+            payload=_payload("topic-op-cross-516"),
+            ctx=_ctx("OP-516-cross"),
+        )
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchConflictError) as excinfo:
+            await run_topic_action(
+                session,
+                topic_id=topic["topic_id"],
+                action="factor_experiment.create",
+                goal_version="v1",
+                payload=_factor_payload(),
+                ctx=_ctx("OP-516-cross"),
+            )
+    assert excinfo.value.code == "operation_id_bound"
+    assert await _count(engine, FactorExperimentModel) == 0
+    assert await _count(engine, ResearchRunModel) == 1
+
+
 async def test_validation_experiment_create_add_trial_and_unseal(
     engine: AsyncEngine,
 ) -> None:
@@ -939,6 +970,39 @@ async def test_unseal_replay_returns_receipt_instead_of_already_unsealed(
     ]
     assert rejected == []
 
+    # The queued unseal job is visible on the link even though the link itself
+    # is immutable (the link already existed for this experiment).
+    async with session_factory(engine)() as session:
+        page = await workspace_read(
+            session, topic_id=topic["topic_id"], view="artifacts", limit=10
+        )
+    oos = next(
+        item for item in page["items"] if item["entity_type"] == "validation_experiment"
+    )
+    assert oos["unseal_job_id"] == first["job_id"]
+    assert oos["unseal_job_status"] == "queued"
+    assert oos["unseal_job_pending"] is True
+
+    # A failed one-time unseal is surfaced as a named evidence gap.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE background_jobs SET status='failed', error_summary='boom' "
+                "WHERE job_id=:job_id"
+            ),
+            {"job_id": first["job_id"]},
+        )
+    async with session_factory(engine)() as session:
+        page = await workspace_read(
+            session, topic_id=topic["topic_id"], view="artifacts", limit=10
+        )
+    oos = next(
+        item for item in page["items"] if item["entity_type"] == "validation_experiment"
+    )
+    assert oos["unseal_job_status"] == "failed"
+    assert "unseal_job_failed" in oos["evidence_gaps"]
+    assert oos["unseal_job_error"] == "boom"
+
 
 async def test_duplicate_unseal_is_conflict_and_does_not_touch_state(
     engine: AsyncEngine, audit: ResearchAuditRecorder
@@ -1015,6 +1079,67 @@ async def test_run_submit_failure_is_audited_once_by_515(
     assert await _audit_rows(engine, "topic.action.run.submit") == []
     assert await _count(engine, ResearchRunModel) == 0
     assert await _count(engine, BackgroundJobModel) == 0
+
+    # Pre-delegation wrapper rejections must still leave a rejected audit row.
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchInvalidInputError) as invalid_op:
+            await run_topic_action(
+                session,
+                topic_id=topic["topic_id"],
+                action="run.submit",
+                goal_version="v1",
+                payload=_payload("topic-action-516-bad-op"),
+                ctx=_ctx("   "),
+            )
+    assert invalid_op.value.code == "invalid_operation_id"
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchNotFoundError) as missing_topic:
+            await run_topic_action(
+                session,
+                topic_id="RT-missing-516",
+                action="run.submit",
+                goal_version="v1",
+                payload=_payload("topic-action-516-missing"),
+                ctx=_ctx("OP-516-run-missing"),
+            )
+    assert missing_topic.value.code == "topic_not_found"
+    wrapper_rejected = await _audit_rows(engine, "topic.action.run.submit")
+    assert sorted(str(row.result_code) for row in wrapper_rejected) == [
+        "invalid_operation_id",
+        "topic_not_found",
+    ]
+    assert all(row.outcome == "rejected" for row in wrapper_rejected)
+
+
+async def test_run_replay_validates_declared_goal_version(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    topic = await _create_topic(engine)
+    async with session_factory(engine)() as session:
+        submitted = await run_topic_action(
+            session,
+            topic_id=topic["topic_id"],
+            action="run.submit",
+            goal_version="v1",
+            payload=_payload("topic-replay-goal-516"),
+            ctx=_ctx("OP-516-run-a"),
+        )
+    async with session_factory(engine)() as session:
+        with pytest.raises(ResearchPreconditionFailedError) as excinfo:
+            await run_topic_action(
+                session,
+                topic_id=topic["topic_id"],
+                action="run.replay",
+                goal_version="v9",
+                payload={
+                    "run_id": submitted["run_id"],
+                    "idempotency_key": "topic-replay-goal-516-r",
+                    "requested_by": "integration-test",
+                },
+                ctx=_ctx("OP-516-run-b"),
+            )
+    assert excinfo.value.code == "goal_version_mismatch"
+    assert await _count(engine, ResearchRunModel) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -1248,7 +1373,6 @@ async def test_context_recovers_in_flight_experiment_links(engine: AsyncEngine) 
 async def test_rest_action_surface_has_no_code_channel(
     engine: AsyncEngine, client: httpx.AsyncClient
 ) -> None:
-    await _make_snapshot(engine)
     topic = await _create_topic(engine)
     catalog = await client.get(f"/api/research/topics/{topic['topic_id']}/artifacts/actions")
     assert catalog.status_code == 200
@@ -1293,6 +1417,13 @@ async def test_rest_action_surface_has_no_code_channel(
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "code_channel_forbidden"
+    # The handler-level rejection must leave a rejected audit row (the wire-level
+    # extra field above is rejected by FastAPI before the handler, so it has no
+    # audit by design).
+    code_audits = await _audit_rows(engine, "topic.action.code_run.execute")
+    assert [row.outcome for row in code_audits] == ["rejected"]
+    assert code_audits[0].result_code == "code_channel_forbidden"
+    assert code_audits[0].topic_id == topic["topic_id"]
     assert set(CODE_FORBIDDEN_FIELDS) >= {"code", "module", "expression"}
     # The Web-source grep guard (no finboard_research_code_submit / source_code)
     # is covered by tests/unit/test_issue_516_topic_factor_oos_unit.py.

@@ -163,6 +163,9 @@ const EVIDENCE_GAP_LABELS: Record<string, string> = {
   run_not_created: "沙箱运行尚未生成记录",
   timed_out: "运行超时",
   oom_killed: "内存不足被终止",
+  unseal_job_failed: "揭盲任务失败",
+  unseal_job_interrupted: "揭盲任务中断",
+  unseal_job_cancelled: "揭盲任务取消",
 };
 
 function gapLabel(gap: string): string {
@@ -596,9 +599,22 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
                     证据缺口：{link.evidence_gaps.map(gapLabel).join("、")}
                   </p>
                 )}
+                {link.unseal_job_id && (
+                  <p className="text-xs text-muted-foreground">
+                    揭盲任务：{link.unseal_job_id} ·{" "}
+                    {ARTIFACT_STATES[link.unseal_job_status ?? ""] ??
+                      link.unseal_job_status ??
+                      "未知"}
+                    {link.unseal_job_error ? ` · ${link.unseal_job_error}` : ""}
+                  </p>
+                )}
                 {link.final_test_unsealed ? (
                   <p className="text-xs text-muted-foreground">
                     已揭盲的实验不能再次执行；如需新证据请新建实验并用 supersedes_id 关联。
+                  </p>
+                ) : link.unseal_job_pending ? (
+                  <p className="text-xs text-warning">
+                    排队的揭盲任务尚未完成（{link.unseal_job_status}）；不要重复入队，等待终态后再读取。
                   </p>
                 ) : (
                   <Button

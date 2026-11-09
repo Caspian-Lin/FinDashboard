@@ -161,6 +161,11 @@ export interface TopicArtifactLink {
   result_bytes?: number | null;
   result_checksum?: string | null;
   metrics?: Record<string, unknown> | null;
+  /** Latest one-time unseal execution job (joined; the link keeps no state). */
+  unseal_job_id?: string | null;
+  unseal_job_status?: string | null;
+  unseal_job_error?: string | null;
+  unseal_job_pending?: boolean | null;
 }
 export interface TopicArtifactPage {
   topic_id: string;

@@ -48,6 +48,7 @@ from finboard_app.research_operation import (
 from finboard_app.research_topic_actions import (
     RESEARCH_RUN_ENTITY,
     _require_active_with_goal,
+    _require_goal_version,
     _require_topic,
     _valid_operation_id,
     derive_link_state,
@@ -757,6 +758,24 @@ async def _artifact_facts(
                 ).where(ResearchExperimentModel.experiment_id.in_(validation_ids))
             )
         ).mappings()
+        # The one-time unseal job never lands on the link (the link already
+        # exists for the experiment), so join the latest validation job to make
+        # queued/running/failed unseals visible (and avoid duplicate enqueues).
+        unseal_job_rows = (
+            await session.execute(
+                text(
+                    "SELECT DISTINCT ON (payload::jsonb->>'experiment_id') "
+                    "payload::jsonb->>'experiment_id' AS experiment_id, "
+                    "job_id, status, error_summary "
+                    "FROM background_jobs "
+                    "WHERE kind='validation_experiment' "
+                    "AND payload::jsonb->>'experiment_id' = ANY(CAST(:ids AS text[])) "
+                    "ORDER BY payload::jsonb->>'experiment_id', id DESC"
+                ),
+                {"ids": validation_ids},
+            )
+        ).mappings()
+        unseal_jobs = {str(row["experiment_id"]): row for row in unseal_job_rows}
         for row in rows:
             experiment_id = str(row["experiment_id"])
             oos = await bounded_experiment_oos(session, experiment_id)
@@ -776,6 +795,18 @@ async def _artifact_facts(
                 trials_used=int(row["trials_used"] or 0),
                 final_test_unsealed=bool(row["final_test_unsealed"]),
             )
+            unseal_job = unseal_jobs.get(experiment_id)
+            unseal_job_status = (
+                str(unseal_job["status"]) if unseal_job is not None else None
+            )
+            unseal_job_pending = unseal_job_status in {
+                "queued",
+                "running",
+                "retry_waiting",
+                "cancel_requested",
+            }
+            if unseal_job_status in {"failed", "interrupted", "cancelled"}:
+                validation_gaps.append(f"unseal_job_{unseal_job_status}")
             facts[experiment_id] = {
                 "entity_type": "validation_experiment",
                 # oos_outcome is the primary read-side fact; status is secondary.
@@ -787,7 +818,15 @@ async def _artifact_facts(
                     "limit": budget_limit,
                 },
                 "final_test_unsealed": bool(row["final_test_unsealed"]),
-                "evidence_gaps": validation_gaps,
+                "evidence_gaps": validation_gaps[:8],
+                "unseal_job_id": (
+                    str(unseal_job["job_id"]) if unseal_job is not None else None
+                ),
+                "unseal_job_status": unseal_job_status,
+                "unseal_job_error": (
+                    unseal_job["error_summary"] if unseal_job is not None else None
+                ),
+                "unseal_job_pending": unseal_job_pending,
                 "state": _experiment_state(row["status"]),
                 "updated_at": row["finalized_at"].isoformat()
                 if row["finalized_at"] is not None
@@ -923,6 +962,10 @@ def _artifact_link_payload(
         "result_bytes",
         "result_checksum",
         "metrics",
+        "unseal_job_id",
+        "unseal_job_status",
+        "unseal_job_error",
+        "unseal_job_pending",
     ):
         if data.get(key) is not None:
             payload[key] = data[key]
@@ -1174,7 +1217,6 @@ async def run_topic_action(
             details={"allowed": sorted(TOPIC_ACTION_ENTITY_TYPES)},
         )
     entity_type = TOPIC_ACTION_ENTITY_TYPES[action]
-    _reject_code_fields(payload)
     params = _params_summary(
         action, payload, topic_id=topic_id, goal_version=goal_version, operation_id=ctx.operation_id
     )
@@ -1182,15 +1224,20 @@ async def run_topic_action(
     receipts = ResearchTopicActionReceiptRepository(session)
     entity_id: str | None = None
     job_id: str | None = None
+    # True once the action has been handed to #515; delegating failures are
+    # audited there, everything before it is audited by this wrapper.
+    delegated = False
     try:
-        # Inside the try so scope denials and invalid operation ids are audited
-        # as rejected/denied instead of silently disappearing.
+        # Inside the try so code-field rejection, scope denials and invalid
+        # operation ids all leave a rejected/denied audit row.
+        _reject_code_fields(payload)
         _valid_operation_id(ctx.operation_id)
         _require_action_scope(ctx, action)
         topic = await _require_topic(session, topic_id, lock=True)
 
         if action in {"run.submit", "run.replay"}:
             if action == "run.submit":
+                delegated = True
                 run_receipt = await start_topic_run(
                     session,
                     topic_id=topic_id,
@@ -1206,9 +1253,13 @@ async def run_topic_action(
                     raise ResearchInvalidInputError(
                         "run.replay 需要 payload.run_id", code="run_id_required"
                     )
+                # The declared goal version must match the topic's current goal;
+                # #515 additionally pins the original link's goal version.
+                _require_goal_version(topic, goal_version)
                 replay_payload = {
                     key: value for key, value in payload.items() if key != "run_id"
                 }
+                delegated = True
                 run_receipt = await retry_topic_run(
                     session,
                     topic_id=topic_id,
@@ -1258,6 +1309,24 @@ async def run_topic_action(
                         else None
                     ),
                 }
+
+        # Cross-store uniqueness: #515 links and this action layer share the same
+        # client-provided operation_id space. A link hit without a receipt means
+        # the id is already spent (e.g. bound to a ResearchRun), so report the
+        # unified `operation_id_bound` instead of a later `link_conflict`.
+        if ctx.operation_id:
+            bound_link = await link_repo.get_by_operation_id(ctx.operation_id)
+            if bound_link is not None:
+                raise ResearchConflictError(
+                    "operation_id 已绑定其他课题或产物;不能跨存储复用",
+                    code="operation_id_bound",
+                    details={
+                        "operation_id": ctx.operation_id,
+                        "topic_id": bound_link.topic_id,
+                        "entity_type": bound_link.entity_type,
+                        "entity_id": bound_link.entity_id,
+                    },
+                )
 
         # run.* delegates the active/goal gate (and its rejection audit) to #515
         # so a rejected submission produces exactly one topic.run.* event.
@@ -1362,13 +1431,13 @@ async def run_topic_action(
             "link": _artifact_link_payload(link, facts.get(link.entity_id)),
         }
     except Exception as exc:
-        if action in _DELEGATED_RUN_ACTIONS and not isinstance(
-            exc, ResearchPermissionDeniedError
-        ):
-            # #515 already records the rejection/failure (topic.run.start /
-            # topic.run.retry); a second topic.action.run.* event would
-            # double-count the same attempt. Scope denials happen before any
-            # #515 call, so they still get a `denied` audit here.
+        if delegated and not isinstance(exc, ResearchPermissionDeniedError):
+            # The failure happened inside #515, which already records it as
+            # topic.run.start / topic.run.retry. A second topic.action.run.*
+            # event would double-count the same attempt. Everything thrown
+            # *before* delegation (topic_not_found, invalid_operation_id,
+            # code_channel_forbidden, scope denials, replay goal drift) is
+            # audited here so no rejection disappears.
             raise
         correlation: dict[str, str] = {}
         if entity_id:

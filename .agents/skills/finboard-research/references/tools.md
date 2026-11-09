@@ -2069,7 +2069,7 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 | action | 作用域 | payload | 链接 entity_type |
 |---|---|---|---|
 | `run.submit` | research.run | 同 `finboard_run_queue` 入队字段 | research_run |
-| `run.replay` | research.run | `run_id` + 原 replay 字段{idempotency_key,requested_by} | research_run |
+| `run.replay` | research.run | `run_id` + 原 replay 字段{idempotency_key,requested_by}；声明的 `goal_version` 须等于当前目标版本 | research_run |
 | `factor_experiment.create` | research.write | hypothesis/factor_names/dataset_release_id/feature_snapshot_id/plan/comparison_group?/validation_experiment_id? | factor_experiment |
 | `code_run.execute` | research.run | `artifact_id` 或 `name`（二选一）+kind=factor+dataset_release_ids+decision_at(+symbols/params) | code_run |
 | `validation_experiment.create` | research.write | hypothesis/version_stamp/plan/thresholds?/robustness?/strategy_params_space?/supersedes_id? | validation_experiment |
@@ -2092,9 +2092,13 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
   job，不会误报已揭盲。新证据请新建实验 + `supersedes_id`。
 - 读取：`finboard_topic_read(view=artifacts)` 或 `view=context.experiment_links`；
   OOS 先看 `oos_outcome`，再看 `status`、`trial_budget{used,limit}`、
-  `final_test_unsealed` 与 `evidence_gaps`（`no_trials` / `final_test_not_unsealed` /
-  `oos_inconclusive` / `trial_summary_oversized` / `status_not_terminal` /
-  `run_not_created` / `unseal_job_failed|interrupted|cancelled`）。
+  `final_test_unsealed`，以及 join 出的最近揭盲任务
+  `unseal_job_id/unseal_job_status/unseal_job_error/unseal_job_pending` 与
+  `evidence_gaps`（`no_trials` / `final_test_not_unsealed` / `oos_inconclusive` /
+  `trial_summary_oversized` / `status_not_terminal` / `run_not_created` /
+  `unseal_job_failed|interrupted|cancelled`）。排队中的揭盲任务不要重复入队。
+- `operation_id` 在 run 链接与动作回执之间共享：同一键先绑定运行再用于非 run 动作
+  返回 conflict（`operation_id_bound`），不会落到 `link_conflict`。
 - 失败/拒绝/中断与成功同列展示；动作永不自动触发，保存课题或追加 plan/review
   轮次不会创建 run/job。
 
