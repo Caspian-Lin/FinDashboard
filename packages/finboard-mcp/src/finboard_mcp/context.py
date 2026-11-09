@@ -137,7 +137,9 @@ async def app_lifespan(_server: MCPServer) -> AsyncIterator[McpAppContext]:
                 "create --preset readonly`。"
             ),
         )
-    if settings.mcp_transport != "stdio" and settings.mcp_auth_token:
+    # 旧共享 token 弃用告警统一在 lifespan 打印一次(内嵌 MCP 的 settings
+    # 可能仍是默认 stdio,但实际服务 HTTP;不能按 transport 抑制)。
+    if settings.mcp_auth_token:
         warn_legacy_auth_token()
 
     engine = create_async_engine(

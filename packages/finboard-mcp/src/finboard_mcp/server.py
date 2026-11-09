@@ -463,7 +463,8 @@ data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读�
   equity_curve(默认降采样) + fills(默认有界 200 条,limit/offset 分页,
   fills_limit=null 全量) + summary)、report_export(导出 CSV/Markdown 文件,
   写入 FINBOARD_EXPORT_DIR 或系统临时目录,返回绝对路径;导出走全量;
-  纯标准库,零新依赖;只读不写 DB)。
+  纯标准库,零新依赖;只读数据库但会在服务端落盘导出,需要 research.write
+  写权限)。
 - 研究代码仓库(5,✅ #215/#219):research_code submit/rollback/promote(写)+
   list/get(只读)。submit 只登记 draft;必须把同一 artifact 的 screen 运行与
   #57 validated_oos + final_test_unsealed=true 绑定并通过 IC/换手/相关性门,

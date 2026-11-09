@@ -21,9 +21,16 @@ from fastapi import FastAPI
 
 from finboard_api.app import (
     _check_opencode_mcp_status,
+    _start_embedded_mcp_and_wait,
     _start_embedded_mcp_server,
     _wait_embedded_mcp_ready,
 )
+from finboard_app.config import Settings
+
+
+def _real_settings(**overrides: object) -> Settings:
+    """真实 Settings(不是 MagicMock),用于验证安全默认值分支。"""
+    return Settings(**overrides)  # type: ignore[arg-type]
 
 
 def _make_settings(**overrides: object) -> MagicMock:
@@ -148,13 +155,79 @@ async def test_start_embedded_mcp_server_skipped_without_token() -> None:
     with patch(
         "finboard_mcp.server.build_mcp_server"
     ) as build_mock, patch("uvicorn.Server") as server_mock:
-        await _start_embedded_mcp_server(app, settings)
+        started = await _start_embedded_mcp_server(app, settings)
 
+    assert started is False
     build_mock.assert_not_called()
     server_mock.assert_not_called()
     assert not hasattr(app.state, "opencode_mcp_server") or (
         getattr(app.state, "opencode_mcp_server", None) is None
     )
+
+
+@pytest.mark.asyncio
+async def test_embedded_skipped_when_mcp_disabled_real_settings() -> None:
+    """#517:真实 Settings 下 mcp_enabled=false 不启动内嵌 MCP。"""
+    app = FastAPI()
+    settings = _real_settings(
+        mcp_enabled=False,
+        mcp_auth_token="secret-token",
+        mcp_transport="streamable-http",
+    )
+    with patch("finboard_mcp.server.build_mcp_server") as build_mock:
+        started = await _start_embedded_mcp_server(app, settings)
+    assert started is False
+    build_mock.assert_not_called()
+    assert getattr(app.state, "opencode_mcp_server", None) is None
+
+
+@pytest.mark.asyncio
+async def test_embedded_skipped_non_loopback_without_allow_remote_real_settings() -> None:
+    """#517:真实 Settings 默认 allow_remote=false 时拒绝 0.0.0.0 内嵌绑定。"""
+    app = FastAPI()
+    settings = _real_settings(
+        mcp_enabled=True,
+        mcp_allow_remote=False,
+        mcp_auth_token="secret-token",
+        mcp_transport="streamable-http",
+    )
+    with patch("finboard_mcp.server.build_mcp_server") as build_mock:
+        started = await _start_embedded_mcp_server(app, settings, host="0.0.0.0")
+    assert started is False
+    build_mock.assert_not_called()
+    assert getattr(app.state, "opencode_mcp_server", None) is None
+
+
+@pytest.mark.asyncio
+async def test_start_embedded_mcp_and_wait_skips_wait_when_not_started() -> None:
+    """#517:未启动(禁用/无凭据/未放行)不空等 10s 端口探测。"""
+    app = FastAPI()
+    settings = _real_settings(mcp_enabled=False, mcp_transport="streamable-http")
+    with patch(
+        "finboard_api.app._start_embedded_mcp_server",
+        new=AsyncMock(return_value=False),
+    ), patch(
+        "finboard_api.app._wait_embedded_mcp_ready", new=AsyncMock()
+    ) as wait_mock:
+        started = await _start_embedded_mcp_and_wait(app, settings)
+    assert started is False
+    wait_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_embedded_mcp_and_wait_waits_when_started() -> None:
+    """启动成功时仍等待端口就绪(容器首连竞态防护不变)。"""
+    app = FastAPI()
+    settings = _real_settings(mcp_port=8765, mcp_transport="streamable-http")
+    with patch(
+        "finboard_api.app._start_embedded_mcp_server",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "finboard_api.app._wait_embedded_mcp_ready", new=AsyncMock(return_value=True)
+    ) as wait_mock:
+        started = await _start_embedded_mcp_and_wait(app, settings)
+    assert started is True
+    wait_mock.assert_awaited_once_with(settings.mcp_port)
 
 
 # ---------------------------------------------------------------------------

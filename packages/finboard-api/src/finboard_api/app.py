@@ -83,7 +83,7 @@ def _is_loopback_host(host: str) -> bool:
 
 async def _start_embedded_mcp_server(
     app: FastAPI, settings: Settings, *, host: str | None = None
-) -> None:
+) -> bool:
     """在当前事件循环后台启动 finboard-mcp HTTP server(uvicorn 后台任务)。
 
     容器内 opencode 通过 ``host.docker.internal:{mcp_port}`` 访问该 server。
@@ -91,9 +91,12 @@ async def _start_embedded_mcp_server(
     TradingKernel 无 session 冲突)+ Bearer 鉴权(#517:``mcp_clients`` 表按
     客户端凭据 + 旧 ``mcp_auth_token`` 兼容)。
 
-    ``host`` 显式覆盖 ``settings.mcp_host``(#157):web 容器模式下容器经
-    host.docker.internal 访问宿主机,服务绑 127.0.0.1 时不可达,调用方会在
-    默认值时自动改绑 0.0.0.0(Bearer token 保护)。
+    ``host`` 显式覆盖 ``settings.mcp_host``(#157)。#517 起内嵌入口不再隐式
+    放宽网络边界:非 loopback 绑定必须 ``mcp_allow_remote=true``,否则跳过
+    启动(调用方在容器模式下仅在显式放行时传入 ``0.0.0.0``)。
+
+    返回是否真正启动了 server(调用方据此决定是否等待端口就绪;
+    ``mcp_enabled=false`` / 非 loopback 未放行 / 无凭据都返回 ``False``)。
 
     失败降级:无 ``mcp_auth_token`` 且无有效客户端 → 跳过(HTTP 传输强制鉴权,
     无凭据拒绝启动);端口已被占用(上次进程残留)→ 后台任务捕获
@@ -111,7 +114,7 @@ async def _start_embedded_mcp_server(
     # #517:内嵌入口同样尊重 mcp_enabled / mcp_allow_remote(不再隐式放宽网络边界)。
     if not getattr(settings, "mcp_enabled", True):
         logger.warning("api.opencode_mcp_skipped", reason="mcp_disabled")
-        return
+        return False
     if not _is_loopback_host(bind_host) and not getattr(
         settings, "mcp_allow_remote", False
     ):
@@ -120,7 +123,7 @@ async def _start_embedded_mcp_server(
             reason="non_loopback_requires_allow_remote",
             host=bind_host,
         )
-        return
+        return False
 
     components = getattr(app.state, "components", None)
     smaker = getattr(components, "session_maker", None)
@@ -129,14 +132,14 @@ async def _start_embedded_mcp_server(
     if not legacy_token:
         if smaker is None or resolver is None:
             logger.warning("api.opencode_mcp_skipped", reason="no_mcp_auth_token")
-            return
+            return False
         async with smaker() as session:
             active = await McpClientRepository(session).count_active()
         if active == 0:
             logger.warning(
                 "api.opencode_mcp_skipped", reason="no_active_mcp_clients"
             )
-            return
+            return False
 
     mcp = build_mcp_server()
     starlette_app = mcp.streamable_http_app(host=bind_host)
@@ -178,6 +181,7 @@ async def _start_embedded_mcp_server(
         host=bind_host,
         port=settings.mcp_port,
     )
+    return True
 
 
 #: 内嵌 MCP 就绪探测参数(#250):容器创建前的短超时轮询。
@@ -221,6 +225,25 @@ async def _wait_embedded_mcp_ready(
         "api.opencode_mcp_ready_timeout", port=port, timeout=timeout
     )
     return False
+
+
+async def _start_embedded_mcp_and_wait(
+    app: FastAPI, settings: Settings, *, host: str | None = None
+) -> bool:
+    """启动内嵌 MCP,并仅在真正启动时等待端口就绪(#517)。
+
+    ``mcp_enabled=false`` / 非 loopback 未放行 / 无凭据时
+    ``_start_embedded_mcp_server`` 返回 False —— 此时端口不会被监听,继续
+    ``_wait_embedded_mcp_ready`` 只会空等超时(默认 10s),必须跳过。
+    """
+    started = await _start_embedded_mcp_server(app, settings, host=host)
+    if not started:
+        logger.info(
+            "api.opencode_mcp_skip_wait", reason="embedded_mcp_not_started"
+        )
+        return False
+    await _wait_embedded_mcp_ready(settings.mcp_port)
+    return True
 
 
 async def _check_opencode_mcp_status(
@@ -356,9 +379,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # 模式(形态 B)容器非本进程创建,无此约束,时序保持现状。
             # 内嵌启动省去单独跑 ``python -m finboard_mcp``;设
             # ``opencode_embed_mcp=False`` 回退独立进程模式。
-            # #157:容器经 host.docker.internal 跨网络访问宿主机,MCP 服务绑
-            # 127.0.0.1 时不可达 —— ``mcp_host`` 为默认值时自动改绑 0.0.0.0
-            # (Bearer token 保护);用户显式配置了其它地址则尊重配置。
+            # #157/#517:容器经 host.docker.internal 跨网络访问宿主机,MCP 服务绑
+            # 127.0.0.1 时不可达 —— 仅在显式 mcp_allow_remote=true 时改绑
+            # 0.0.0.0(Bearer 凭据保护);否则保持 loopback 并具名告警,不再隐式
+            # 放宽网络边界。用户显式配置了其它地址则尊重配置。
             if settings.opencode_embed_mcp:
                 mcp_bind_host = settings.mcp_host
                 if mcp_bind_host == "127.0.0.1":
@@ -379,9 +403,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                             host=mcp_bind_host,
                             port=settings.mcp_port,
                         )
-                await _start_embedded_mcp_server(app, settings, host=mcp_bind_host)
-                # 确认端口完成 bind 再创建容器;超时只告警不阻断(#118 降级风格)。
-                await _wait_embedded_mcp_ready(settings.mcp_port)
+                await _start_embedded_mcp_and_wait(
+                    app, settings, host=mcp_bind_host
+                )
+                # 启动成功时已确认端口完成 bind 再创建容器;超时只告警不阻断
+                # (#118 降级风格);未启动(禁用/无凭据/未放行)不空等。
             web_ready = True
             if settings.opencode_manage_process:
                 try:

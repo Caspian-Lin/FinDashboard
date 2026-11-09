@@ -147,6 +147,27 @@ def _identity(*scopes: str):
     )
 
 
+class TestScopePolicySelfCheck:
+    def test_unarmed_raises(self) -> None:
+        from finboard_mcp.scopes import (
+            require_scope_enforcement_armed,
+            reset_scope_policy,
+        )
+
+        reset_scope_policy()
+        with pytest.raises(RuntimeError, match="未装配"):
+            require_scope_enforcement_armed()
+
+    def test_armed_passes(self) -> None:
+        from finboard_mcp.scopes import (
+            arm_scope_enforcement,
+            require_scope_enforcement_armed,
+        )
+
+        arm_scope_enforcement(readonly_only=False)
+        require_scope_enforcement_armed()  # 不抛异常
+
+
 class TestScopeEnforcement:
     async def test_missing_identity_denied_when_enforced(self) -> None:
         from finboard_mcp.scopes import arm_scope_enforcement

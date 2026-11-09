@@ -93,7 +93,7 @@ HTTP 请求的 `Authorization: Bearer <token>` 由服务端解析为
 # 签发(明文 token 只打印一次;库里只存 sha256 摘要)
 uv run finboard mcp client create --name codex --preset readonly
 uv run finboard mcp client create --name harness --scopes research.read,research.write,research.run
-uv run finboard mcp client list          # 不显示任何 secret / 摘要
+uv run finboard mcp client list          # 只展示 token_prefix,不展示明文 / 摘要
 uv run finboard mcp client revoke MC-xxxx
 ```
 

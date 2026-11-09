@@ -346,3 +346,32 @@ def test_app_context_http_without_identity_does_not_fall_back_to_default() -> No
     finally:
         reset_scope_policy()
 
+
+async def test_lifespan_warns_legacy_token_even_when_transport_is_stdio(
+    monkeypatch,
+) -> None:
+    """#517:内嵌 MCP 的 settings 可能仍是默认 stdio;legacy 告警不能按 transport 抑制。"""
+    from unittest.mock import MagicMock, patch
+
+    from finboard_app.config import Settings
+    from finboard_mcp import context as context_module
+
+    settings = Settings(mcp_transport="stdio", mcp_auth_token="legacy-token")
+    monkeypatch.setattr(context_module, "load_settings", lambda: settings)
+    with patch.object(context_module, "warn_legacy_auth_token") as warn:
+        async with context_module.app_lifespan(MagicMock()) as _app:
+            warn.assert_called_once()
+
+
+async def test_lifespan_does_not_warn_without_legacy_token(monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from finboard_app.config import Settings
+    from finboard_mcp import context as context_module
+
+    settings = Settings(mcp_transport="stdio", mcp_auth_token="")
+    monkeypatch.setattr(context_module, "load_settings", lambda: settings)
+    with patch.object(context_module, "warn_legacy_auth_token") as warn:
+        async with context_module.app_lifespan(MagicMock()) as _app:
+            warn.assert_not_called()
+

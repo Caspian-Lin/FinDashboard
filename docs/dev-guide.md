@@ -639,10 +639,16 @@ FinDashboard service / repository(唯一事实来源)
 FINBOARD_OPENCODE_WEB_ENABLED=true \
 FINBOARD_OPENCODE_MANAGE_PROCESS=true \
 FINBOARD_OPENCODE_WEB_CORS_ORIGINS=http://localhost:5173 \
+FINBOARD_MCP_ALLOW_REMOTE=true \
 FINBOARD_MCP_AUTH_TOKEN=<token> \
 FINBOARD_OPENCODE_ENV_OVERRIDES=DEEPSEEK_API_KEY=<key> \
 uv run uvicorn finboard_api.app:app
 ```
+
+> **行为变更(#517)**:内嵌 MCP 不再隐式把 `127.0.0.1` 放宽为 `0.0.0.0`。
+> 容器模式必须显式设置 `FINBOARD_MCP_ALLOW_REMOTE=true`,否则 MCP 保持 loopback、
+> 容器经 `host.docker.internal:8765` 首连失败(#118 不重试)。#520 退役内嵌托管
+> 后此开关不再需要。
 
 要点(#157):
 - **无 basic auth**:单用户模型下 OpenCode Web 直接使用明文
@@ -650,7 +656,8 @@ uv run uvicorn finboard_api.app:app
   宿主机侧 `127.0.0.1` 绑定是唯一网络边界。
 - **MCP 地址可配置**:`FINBOARD_OPENCODE_MCP_REMOTE_URL` 在容器启动时渲染进
   `.opencode/runtime/opencode.json` 并以单文件 bind mount 覆盖容器内配置;
-  内嵌 MCP 在容器模式下默认绑 `0.0.0.0`(Bearer 凭据保护)。
+  内嵌 MCP 仅在显式 `FINBOARD_MCP_ALLOW_REMOTE=true` 时绑 `0.0.0.0`
+  (Bearer 凭据保护),否则保持 `127.0.0.1`(容器不可达,日志具名告警)。
 - 也可用 Makefile 独立跑 MCP HTTP server:`make mcp-serve-http`(本机 loopback;
   凭据用 `make mcp-client-create` 签发,或兼容期显式传 `MCP_AUTH_TOKEN=<token>`);
   容器 / 远程场景用 `make mcp-serve-http-remote`(显式 `ALLOW_REMOTE=true`,
