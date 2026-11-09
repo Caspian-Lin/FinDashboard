@@ -557,6 +557,41 @@ async def test_concurrent_same_operation_id_returns_one_link(
     assert counts["jobs"] == 1
 
 
+async def test_concurrent_same_operation_id_across_topics_rolls_back_loser(
+    engine: AsyncEngine, audit: ResearchAuditRecorder
+) -> None:
+    """The partial unique index, not the pre-check, decides a cross-topic race."""
+
+    first_topic = await _create_topic(engine, title="并发课题 A")
+    second_topic = await _create_topic(engine, title="并发课题 B")
+
+    async def _run(topic_id: str, key: str) -> dict[str, Any]:
+        async with session_factory(engine)() as session:
+            return await start_topic_run(
+                session,
+                topic_id=topic_id,
+                goal_version="v1",
+                payload=_payload(key),
+                ctx=_web_ctx("OP-cross-race"),
+            )
+
+    results = await asyncio.gather(
+        _run(first_topic["topic_id"], "topic-run-race-a"),
+        _run(second_topic["topic_id"], "topic-run-race-b"),
+        return_exceptions=True,
+    )
+    successes = [item for item in results if isinstance(item, dict)]
+    failures = [item for item in results if isinstance(item, ResearchConflictError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].code in {"operation_id_bound", "link_conflict"}
+    counts = await _counts(engine)
+    assert counts["links"] == 1
+    assert counts["runs"] == 1
+    assert counts["jobs"] == 1
+
+
+
 # --------------------------------------------------------------------------- #
 # 读侧 join 派生状态
 # --------------------------------------------------------------------------- #

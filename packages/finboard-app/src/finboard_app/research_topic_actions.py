@@ -467,7 +467,7 @@ async def start_topic_run(
 
         try:
             body = ResearchRunSubmitInput.from_json_payload(payload)
-        except ValidationError as exc:
+        except (ValidationError, ValueError, ArithmeticError) as exc:
             raise ResearchInvalidInputError(
                 f"研究运行入队参数非法: {exc}", code="invalid_run_payload"
             ) from exc
