@@ -231,6 +231,9 @@ def _stop_dev_process(
       立即 ``taskkill /T /F``。
     * POSIX —— ``killpg SIGTERM`` 等待 ``graceful_seconds`` 后 ``killpg
       SIGKILL`` 兜底(与既有行为同形,宽限可配)。
+
+    等待期间被二次 Ctrl-C 打断时**不能**只把异常抛给调用方:那样进程只收到了优雅
+    信号、可能仍然存活。这里吞掉 ``KeyboardInterrupt`` 继续走强杀兜底(issue #544)。
     """
 
     if process.poll() is not None:
@@ -244,6 +247,9 @@ def _stop_dev_process(
                 return
             except subprocess.TimeoutExpired:
                 pass
+            except KeyboardInterrupt:
+                # 二次 Ctrl-C:放弃等待,直接强杀整树。
+                pass
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
             check=False,
@@ -254,7 +260,7 @@ def _stop_dev_process(
     try:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=max(0.1, graceful_seconds))
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
@@ -490,11 +496,11 @@ def _spawn_dev_mcp() -> subprocess.Popen[bytes]:
 
 
 def _start_dev_mcp(settings: Settings) -> subprocess.Popen[bytes] | None:
-    """spawn 并做**有界存活 + 监听**检查(issue #544);失败只告警返回 ``None``。
+    """前置检查 + spawn(**不做长等待**);失败只告警返回 ``None``。
 
-    父进程不能说「已启动」就完事:端口被占、缺凭据门禁(退出码 2)、命令缺失都
-    发生在子进程里,不 poll 就只会打印一条假的成功日志 —— 那正是本 issue 要消灭
-    的「以为 MCP 起来了」故障。逐项前置检查同时避免把 `agents` 指向旧实例。
+    返回值必须在调用方**立即**赋值:就绪等待放到 :func:`_watch_dev_mcp`(线程),
+    这样等待期间被 Ctrl-C 打断时进程句柄已经在 ``mcp_process`` 里,``finally`` 仍能
+    回收 —— 否则刚 spawn 的子进程(独立 session)会漏成孤儿并继续占端口。
     """
 
     host = str(settings.mcp_host)
@@ -515,11 +521,21 @@ def _start_dev_mcp(settings: Settings) -> subprocess.Popen[bytes] | None:
         )
         return None
     try:
-        process = _spawn_dev_mcp()
+        return _spawn_dev_mcp()
     except OSError as exc:
         typer.echo(f"警告: MCP 研究服务启动失败,客户端将连不上: {exc}", err=True)
         return None
 
+
+def _watch_dev_mcp(process: subprocess.Popen[bytes], settings: Settings) -> None:
+    """有界等待 MCP 就绪并打印一次结果(在 daemon 线程里跑,不阻塞 API 启动)。
+
+    父进程不能「print 成功就算成功」:端口被占、缺凭据门禁(退出码 2)、命令缺失
+    都发生在子进程里。这里 poll + 端口探测,失败/超时都只告警。
+    """
+
+    host = str(settings.mcp_host)
+    port = int(settings.mcp_port)
     deadline = time.monotonic() + _DEV_MCP_READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -529,20 +545,19 @@ def _start_dev_mcp(settings: Settings) -> subprocess.Popen[bytes] | None:
                 "凭据、非 loopback 未放行(见上方 stderr)。",
                 err=True,
             )
-            return None
+            return
         if _dev_mcp_port_in_use(host, port, timeout=0.2):
             typer.echo(
                 f"已同步启动 MCP 研究服务({settings.mcp_transport} {host}:{port});"
                 "如需关闭请用 --no-mcp"
             )
-            return process
+            return
         time.sleep(0.1)
     typer.echo(
         f"警告: MCP 研究服务已启动但 {_DEV_MCP_READY_TIMEOUT_SECONDS:.0f}s 内未监听 "
         f"{host}:{port},请查看上方日志确认是否起在别的端口。",
         err=True,
     )
-    return process
 
 
 @app.command()
@@ -645,7 +660,16 @@ def dev(
                 )
 
         if not no_mcp and _should_spawn_dev_mcp(settings):
+            # 先 spawn 并立刻赋值(不留「等待期间被 Ctrl-C → 孤儿」的窗口),
+            # 就绪等待交给 daemon 线程,不阻塞 API/Vite 启动。
             mcp_process = _start_dev_mcp(settings)
+            if mcp_process is not None:
+                threading.Thread(
+                    target=_watch_dev_mcp,
+                    args=(mcp_process, settings),
+                    name="finboard-mcp-readiness",
+                    daemon=True,
+                ).start()
 
         # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
         serve(ctx, host=host, port=port, reload=False)
@@ -672,7 +696,8 @@ def dev(
                     worker_process,
                     graceful_seconds=_dev_worker_stop_grace_seconds(settings),
                 )
-        frontend_thread.join(timeout=1.0)
+        with contextlib.suppress(KeyboardInterrupt):
+            frontend_thread.join(timeout=1.0)
         for frontend in frontend_holder:
             with contextlib.suppress(KeyboardInterrupt):
                 _stop_dev_process(frontend)
