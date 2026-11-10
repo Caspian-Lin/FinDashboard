@@ -129,10 +129,10 @@ worker: ## 启动后台任务 worker(消费研究/数据 job 队列;make dev 已
 	$(UV) run finboard worker run
 
 # --------------------------------------------------------------------------- 一键开发
-dev: ## 一键启动开发环境(后端 :$(API_PORT) + 前端 :$(WEB_PORT) + 后台 worker,Ctrl-C 同时退出)
-	@echo "\033[36m启动后端(FastAPI :$(API_PORT)) + 前端(Vite :$(WEB_PORT)) + 后台 worker...\033[0m"
+dev: ## 一键启动开发环境(后端 :$(API_PORT) + 前端 :$(WEB_PORT) + worker + MCP,Ctrl-C 同时退出)
+	@echo "\033[36m启动后端(FastAPI :$(API_PORT)) + 前端(Vite :$(WEB_PORT)) + 后台 worker + MCP 研究服务...\033[0m"
 	@echo "\033[33m本机数据库不可达时会自动唤醒 WSL PostgreSQL;请确保已执行 make migrate\033[0m"
-	@echo "\033[33m研究/数据 job 由随 dev 启动的 worker 消费;独立部署请用 make worker\033[0m"
+	@echo "\033[33m研究/数据 job 由随 dev 启动的 worker 消费;MCP 仅在 mcp_transport=streamable-http 且 mcp_enabled=true 时托管(8765),可用 --no-mcp / --no-worker 关闭\033[0m"
 	FINBOARD_WEB_PORT=$(WEB_PORT) FINBOARD_WEB_API_PORT=$(API_PORT) $(UV) run finboard dev --port $(API_PORT) --web-dir $(WEB_DIR)
 
 clean: ## 清理缓存与构建产物

@@ -109,5 +109,5 @@ disconnected`;服务端 access log 全是 200,`mcp_clients.last_used_at` 在更�
 - DSH 之外的 Harness(ZCode)仍未安装,维持「待验」。
 - 代码沙箱相关工具(`research_code_run` / `user_code` 策略 / 用户因子序列)需要
   Docker,本机 daemon 未运行,本次未涉及。
-- `make dev` 仍不拉起 MCP;若改为随 dev 托管,需同步修改本文与
-  `docs/agent-integration.md` §5。
+- `make dev` 当时仍不拉起 MCP;后续 issue #544 已改为随 `make dev` 托管
+  (`--no-mcp` 关闭),本文与 `docs/agent-integration.md` §1.1/§5 已同步。

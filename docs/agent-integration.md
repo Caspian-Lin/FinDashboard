@@ -22,14 +22,14 @@ FinDashboard 仍是数据 / 权限 / 任务 / 审计 / 产物的唯一事实来�
 | 传输 | 端点 | 说明 |
 |---|---|---|
 | `stdio` | `uv run python -m finboard_mcp` 由宿主作为子进程拉起 | **默认传输**(`Settings.mcp_transport` 默认 `stdio`);无 HTTP 鉴权;作用域由 `FINBOARD_MCP_STDIO_SCOPES` 决定,**默认只有 `research.read`** |
-| `streamable-http` | `http://127.0.0.1:8765/mcp` | **独立入口**:显式 `FINBOARD_MCP_TRANSPORT=streamable-http` 启动 `uv run python -m finboard_mcp`(或 `make mcp-serve-http`)。#520 后 `finboard api` / `make dev` **不再**内嵌或自动挂载 MCP,必须单独启动。必须有凭据,按客户端 Bearer |
+| `streamable-http` | `http://127.0.0.1:8765/mcp` | 显式 `FINBOARD_MCP_TRANSPORT=streamable-http` 启动 `uv run python -m finboard_mcp`(或 `make mcp-serve-http`)。**#544 起 `make dev` 会托管这份 MCP 子进程**(`--no-mcp` 关闭,`mcp_enabled=false` / stdio 传输自动跳过);`finboard api` 仍不内嵌。必须有凭据,按客户端 Bearer |
 
 > 外部 Harness 场景(Codex / OpenCode 等)用 `streamable-http` + 按客户端凭据;
 > stdio 适合「宿主直接拉起子进程」的客户端,但默认只读,写操作需显式
 > `FINBOARD_MCP_STDIO_SCOPES`。
 
 ```bash
-# 独立启动 loopback HTTP(不是 make dev;不依赖 OpenCode / 交易内核)
+# 独立启动 loopback HTTP(不依赖 OpenCode / 交易内核;make dev 也会托管一份)
 FINBOARD_MCP_TRANSPORT=streamable-http \
 FINBOARD_MCP_HOST=127.0.0.1 \
 FINBOARD_MCP_PORT=8765 \
@@ -239,11 +239,12 @@ DSH 的 MCP 接入是**插件条目**形态:每个 server 是 `cordis.patch.yml`
   `chmod 600`。**不要把 token 写进 patch 文件**。
 - **改完即生效**:编辑 patch 触发 HMR 重载,不需要重启 DSH(实测保存后数秒内工具可调;
   只改 mtime 不触发,要改内容)。
-- **端点**:`make mcp-serve-http`(或
+- **端点**:`make dev` 默认托管 MCP(issue #544;`--no-mcp` 关闭,`FINBOARD_MCP_ENABLED=false`
+  或 stdio 传输自动跳过),启动日志会打印 `已同步启动 MCP 研究服务(streamable-http …)`;
+  也可以单独起:`make mcp-serve-http`(或
   `FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=127.0.0.1 uv run python -m finboard_mcp`)。
-  注意 `make dev` **不**拉起 MCP(#520 起 MCP 与 API 解耦),要单独启动;
-  `.env` 若留着 `FINBOARD_MCP_HOST=0.0.0.0`(旧容器期配置)会被启动门禁拒绝
-  (退出码 2),本机应改成 `127.0.0.1`。
+  注意 `.env` 若留着 `FINBOARD_MCP_HOST=0.0.0.0`(旧容器期配置)会被启动门禁拒绝
+  (退出码 2),本机应改成 `127.0.0.1`;`make dev` 里这个失败只告警、不阻断 API。
 
 ### 三个坑(都会静默失败)
 

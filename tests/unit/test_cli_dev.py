@@ -77,7 +77,8 @@ def test_dev_worker_process_is_stopped_on_exit(tmp_path: Path) -> None:
 
     ctx = MagicMock()
     # settings 必须是真实 Settings:worker 停机宽限(#307)从 settings 读取。
-    ctx.obj = Settings()
+    # issue #544 起 dev 还会托管 MCP,本用例只关注 worker → 关掉 MCP 保持隔离。
+    ctx.obj = Settings(mcp_enabled=False)
     thread = MagicMock()
     worker_process = MagicMock(spec=subprocess.Popen)
 
@@ -113,6 +114,143 @@ def test_dev_worker_command_uses_module_entry() -> None:
     cmd = _dev_worker_command()
     assert cmd[0] == sys.executable
     assert cmd[-4:] == ["-m", "finboard_app.cli", "worker", "run"]
+
+
+# --------------------------------------------------------------------------- #
+# dev 托管 MCP 研究服务(issue #544)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_should_spawn_dev_mcp_matrix() -> None:
+    """只有「开关打开 + HTTP 传输」才由 dev 托管;stdio 由客户端自己 spawn。"""
+    from finboard_app.cli import _should_spawn_dev_mcp
+    from finboard_app.config import Settings
+
+    assert _should_spawn_dev_mcp(
+        Settings(mcp_enabled=True, mcp_transport="streamable-http")
+    )
+    # 多 worktree 场景:脚本默认关掉 MCP,dev 必须尊重该开关,否则抢 8765。
+    assert not _should_spawn_dev_mcp(
+        Settings(mcp_enabled=False, mcp_transport="streamable-http")
+    )
+    assert not _should_spawn_dev_mcp(Settings(mcp_enabled=True, mcp_transport="stdio"))
+
+
+@pytest.mark.unit
+def test_dev_mcp_command_uses_module_entry() -> None:
+    """MCP 子进程用同一 venv python 跑 ``python -m finboard_mcp``。"""
+    import sys
+
+    from finboard_app.cli import _dev_mcp_command
+
+    assert _dev_mcp_command() == [sys.executable, "-m", "finboard_mcp"]
+
+
+@pytest.mark.unit
+def test_dev_spawns_mcp_and_stops_it_on_exit(tmp_path: Path) -> None:
+    """HTTP 传输下 dev 托管 MCP,Ctrl-C 时与 worker 一起回收。"""
+    from finboard_app.cli import dev
+    from finboard_app.config import Settings
+
+    ctx = MagicMock()
+    ctx.obj = Settings(mcp_enabled=True, mcp_transport="streamable-http")
+    mcp_process = MagicMock(spec=subprocess.Popen)
+
+    with (
+        patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
+        patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
+        patch("finboard_app.cli._spawn_dev_worker", return_value=None),
+        patch("finboard_app.cli._spawn_dev_mcp", return_value=mcp_process) as spawn_mcp,
+        patch("finboard_app.cli.threading.Thread", return_value=MagicMock()),
+        patch("finboard_app.cli._stop_dev_process") as stop_process,
+        patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path)
+
+    spawn_mcp.assert_called_once_with()
+    stop_process.assert_any_call(mcp_process)
+
+
+@pytest.mark.unit
+def test_dev_no_mcp_skips_spawn(tmp_path: Path) -> None:
+    """--no-mcp 逃生开关:dev 不启动 MCP(客户端自己用 make mcp-serve-http)。"""
+    from finboard_app.cli import dev
+    from finboard_app.config import Settings
+
+    ctx = MagicMock()
+    ctx.obj = Settings(mcp_enabled=True, mcp_transport="streamable-http")
+
+    with (
+        patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
+        patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
+        patch("finboard_app.cli._spawn_dev_worker", return_value=None),
+        patch("finboard_app.cli._spawn_dev_mcp") as spawn_mcp,
+        patch("finboard_app.cli.threading.Thread", return_value=MagicMock()),
+        patch("finboard_app.cli._stop_dev_process"),
+        patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path, no_mcp=True)
+
+    spawn_mcp.assert_not_called()
+
+
+@pytest.mark.unit
+def test_dev_stdio_transport_skips_mcp_spawn(tmp_path: Path) -> None:
+    """stdio 形态由宿主/客户端拉起,dev 再起一个没有消费者。"""
+    from finboard_app.cli import dev
+    from finboard_app.config import Settings
+
+    ctx = MagicMock()
+    ctx.obj = Settings(mcp_enabled=True, mcp_transport="stdio")
+
+    with (
+        patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
+        patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
+        patch("finboard_app.cli._spawn_dev_worker", return_value=None),
+        patch("finboard_app.cli._spawn_dev_mcp") as spawn_mcp,
+        patch("finboard_app.cli.threading.Thread", return_value=MagicMock()),
+        patch("finboard_app.cli._stop_dev_process"),
+        patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path)
+
+    spawn_mcp.assert_not_called()
+
+
+@pytest.mark.unit
+def test_dev_mcp_spawn_failure_warns_and_keeps_running(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """MCP 子进程起不来(端口被占 / 无凭据)只告警,不能阻断 API。"""
+    from finboard_app.cli import dev
+    from finboard_app.config import Settings
+
+    ctx = MagicMock()
+    ctx.obj = Settings(mcp_enabled=True, mcp_transport="streamable-http")
+
+    with (
+        patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
+        patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
+        patch("finboard_app.cli._spawn_dev_worker", return_value=None),
+        patch("finboard_app.cli._spawn_dev_mcp", side_effect=OSError("port busy")),
+        patch("finboard_app.cli.threading.Thread", return_value=MagicMock()),
+        patch("finboard_app.cli._stop_dev_process") as stop_process,
+        patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path)
+
+    assert "MCP 研究服务启动失败" in capsys.readouterr().err
+    # 没有子进程可回收;worker 也被 mock 成 None。
+    stop_process.assert_not_called()
 
 
 @pytest.mark.unit

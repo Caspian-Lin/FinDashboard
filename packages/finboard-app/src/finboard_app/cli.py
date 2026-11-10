@@ -437,6 +437,33 @@ def _spawn_dev_worker() -> subprocess.Popen[bytes]:
     return subprocess.Popen(_dev_worker_command(), start_new_session=True)
 
 
+def _dev_mcp_command() -> list[str]:
+    """dev 托管 MCP 研究服务的命令(独立进程,与 API/worker 同生命周期)。"""
+    return [sys.executable, "-m", "finboard_mcp"]
+
+
+def _should_spawn_dev_mcp(settings: Settings) -> bool:
+    """dev 是否托管 MCP HTTP 服务(issue #544)。
+
+    * ``stdio`` 传输是「宿主/客户端拉起子进程」形态(Codex / DSH 自己 spawn),
+      dev 再起一个没有消费者,必须跳过;
+    * ``mcp_enabled=false`` 的 worktree 必须跳过,否则多个 worktree 会抢同一个
+      8765 端口(AGENTS.md 的 worktree 脚本默认关掉 MCP)。
+    """
+
+    return bool(settings.mcp_enabled) and settings.mcp_transport == "streamable-http"
+
+
+def _spawn_dev_mcp() -> subprocess.Popen[bytes]:
+    """启动 MCP 子进程(与 worker 同样的进程组托管,退出时整树回收)。"""
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            _dev_mcp_command(),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(_dev_mcp_command(), start_new_session=True)
+
+
 @app.command()
 def dev(
     ctx: typer.Context,
@@ -450,8 +477,18 @@ def dev(
             help="不随 dev 启动后台任务 worker(默认启动,研究/数据 job 才能被消费)",
         ),
     ] = False,
+    no_mcp: Annotated[
+        bool,
+        typer.Option(
+            "--no-mcp",
+            help=(
+                "不随 dev 启动 MCP 研究服务(默认启动;stdio 传输或 "
+                "mcp_enabled=false 时自动跳过)"
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """前台运行 API 并托管 Vite 与后台 worker,确保 Ctrl-C 触发 FastAPI shutdown。"""
+    """前台运行 API 并托管 Vite、worker 与 MCP,确保 Ctrl-C 触发 FastAPI shutdown。"""
     resolved_web_dir = web_dir.resolve()
     if not resolved_web_dir.is_dir():
         raise typer.BadParameter(f"前端目录不存在: {resolved_web_dir}", param_hint="--web-dir")
@@ -518,6 +555,23 @@ def dev(
                 "如需关闭请用 --no-worker"
             )
 
+    mcp_process: subprocess.Popen[bytes] | None = None
+    if not no_mcp and _should_spawn_dev_mcp(settings):
+        # issue #544:研究 MCP 是控制面,真正的执行依赖本轮已启动的 DB + worker。
+        # 启动失败(端口被占 / 无凭据门禁 / 命令缺失)只告警,不阻断 API。
+        try:
+            mcp_process = _spawn_dev_mcp()
+        except OSError as exc:
+            typer.echo(
+                f"警告: MCP 研究服务启动失败,客户端将连不上: {exc}", err=True
+            )
+        else:
+            typer.echo(
+                "已同步启动 MCP 研究服务"
+                f"(streamable-http {settings.mcp_host}:{settings.mcp_port});"
+                "如需关闭请用 --no-mcp"
+            )
+
     try:
         # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
         serve(ctx, host=host, port=port, reload=False)
@@ -526,6 +580,10 @@ def dev(
         frontend_thread.join(timeout=1.0)
         for frontend in frontend_holder:
             _stop_dev_process(frontend)
+        if mcp_process is not None:
+            # MCP 与 worker 同一套回收:先优雅信号(Windows CTRL_BREAK / POSIX
+            # SIGTERM),宽限内不退出再强杀整树。
+            _stop_dev_process(mcp_process)
         if worker_process is not None:
             # issue #307:不再 taskkill /F 首杀 —— 先向 worker 进程组发优雅
             # 信号(Windows CTRL_BREAK / POSIX SIGTERM),给 worker 侧宽限
