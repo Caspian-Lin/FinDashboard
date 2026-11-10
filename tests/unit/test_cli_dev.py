@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,6 +24,7 @@ def _settings(**overrides: Any) -> Settings:
         "mcp_transport": "streamable-http",
         "mcp_host": "127.0.0.1",
         "mcp_port": 18766,
+        "worker_shutdown_grace_seconds": 0,
     }
     base.update(overrides)
     # pydantic-settings 的 _env_file 不在类型签名里(Settings 运行时注入)。
@@ -237,7 +239,7 @@ def test_watch_dev_mcp_reports_listening_port(
     process = MagicMock(spec=subprocess.Popen)
     process.poll.return_value = None
     with patch("finboard_app.cli._dev_mcp_port_in_use", return_value=True):
-        _watch_dev_mcp(process, _settings())
+        _watch_dev_mcp(process, _settings(), threading.Event())
 
     out = capsys.readouterr().out
     assert "127.0.0.1:18766" in out
@@ -254,7 +256,7 @@ def test_watch_dev_mcp_warns_when_child_exits_immediately(
     process = MagicMock(spec=subprocess.Popen)
     process.poll.return_value = 2
     process.returncode = 2
-    _watch_dev_mcp(process, _settings())
+    _watch_dev_mcp(process, _settings(), threading.Event())
 
     assert "启动即退出(退出码 2)" in capsys.readouterr().err
 
@@ -272,9 +274,28 @@ def test_watch_dev_mcp_warns_when_listen_times_out(
         patch("finboard_app.cli._dev_mcp_port_in_use", return_value=False),
         patch("finboard_app.cli._DEV_MCP_READY_TIMEOUT_SECONDS", 0.0),
     ):
-        _watch_dev_mcp(process, _settings())
+        _watch_dev_mcp(process, _settings(), threading.Event())
 
     assert "未监听" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_watch_dev_mcp_silent_when_stopping(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """主动停机时不得把 uvicorn 的优雅退出码 3 打印成「启动即退出」的假故障。"""
+    from finboard_app.cli import _watch_dev_mcp
+
+    process = MagicMock(spec=subprocess.Popen)
+    process.poll.return_value = 3
+    process.returncode = 3
+    stop_event = threading.Event()
+    stop_event.set()
+    _watch_dev_mcp(process, _settings(), stop_event)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 @pytest.mark.unit
@@ -311,7 +332,10 @@ def test_dev_spawns_mcp_and_watches_it_in_background(tmp_path: Path) -> None:
     )
     readiness["thread"].start.assert_called_once_with()
     assert readiness["kwargs"]["target"] is _watch_dev_mcp
-    assert readiness["kwargs"]["args"] == (mcp_process, ctx.obj)
+    args = readiness["kwargs"]["args"]
+    assert args[:2] == (mcp_process, ctx.obj)
+    assert isinstance(args[2], threading.Event)
+    readiness["thread"].join.assert_called_once_with(timeout=0.5)
     assert readiness["kwargs"]["daemon"] is True
     stop_process.assert_any_call(mcp_process)
 

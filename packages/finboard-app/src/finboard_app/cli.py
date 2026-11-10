@@ -240,9 +240,9 @@ def _stop_dev_process(
         return
     if sys.platform == "win32":
         if graceful_seconds > 0:
-            with contextlib.suppress(OSError):
-                os.kill(process.pid, _CTRL_BREAK_EVENT)
             try:
+                with contextlib.suppress(OSError):
+                    os.kill(process.pid, _CTRL_BREAK_EVENT)
                 process.wait(timeout=graceful_seconds)
                 return
             except subprocess.TimeoutExpired:
@@ -264,7 +264,10 @@ def _stop_dev_process(
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
-            process.kill()
+            # 进程组已消失时 killpg 抛 ESRCH;再按 pid 兜一枪,失败也不再抛
+            # (调用方只兜 KeyboardInterrupt,冒出 OSError 会跳过后续回收)。
+            with contextlib.suppress(OSError):
+                process.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=5.0)
 
@@ -527,18 +530,29 @@ def _start_dev_mcp(settings: Settings) -> subprocess.Popen[bytes] | None:
         return None
 
 
-def _watch_dev_mcp(process: subprocess.Popen[bytes], settings: Settings) -> None:
+def _watch_dev_mcp(
+    process: subprocess.Popen[bytes],
+    settings: Settings,
+    stop_event: threading.Event,
+) -> None:
     """有界等待 MCP 就绪并打印一次结果(在 daemon 线程里跑,不阻塞 API 启动)。
 
     父进程不能「print 成功就算成功」:端口被占、缺凭据门禁(退出码 2)、命令缺失
     都发生在子进程里。这里 poll + 端口探测,失败/超时都只告警。
+
+    ``stop_event`` 是 dev 的主动停机信号:一旦置位就**不再报告任何结果** —— 否则
+    正常 Ctrl-C 会把 uvicorn 优雅停机的退出码 3 打印成「启动即退出」的假故障。
     """
 
     host = str(settings.mcp_host)
     port = int(settings.mcp_port)
     deadline = time.monotonic() + _DEV_MCP_READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if stop_event.is_set():
+            return
         if process.poll() is not None:
+            if stop_event.is_set():
+                return
             typer.echo(
                 "警告: MCP 研究服务启动即退出(退出码 "
                 f"{process.returncode}),客户端将连不上;常见原因:端口被占、缺少可用"
@@ -547,12 +561,17 @@ def _watch_dev_mcp(process: subprocess.Popen[bytes], settings: Settings) -> None
             )
             return
         if _dev_mcp_port_in_use(host, port, timeout=0.2):
+            if stop_event.is_set():
+                return
             typer.echo(
                 f"已同步启动 MCP 研究服务({settings.mcp_transport} {host}:{port});"
                 "如需关闭请用 --no-mcp"
             )
             return
-        time.sleep(0.1)
+        # 用 stop_event.wait 代替 sleep:停机信号可以立刻打断等待。
+        stop_event.wait(0.1)
+    if stop_event.is_set():
+        return
     typer.echo(
         f"警告: MCP 研究服务已启动但 {_DEV_MCP_READY_TIMEOUT_SECONDS:.0f}s 内未监听 "
         f"{host}:{port},请查看上方日志确认是否起在别的端口。",
@@ -643,6 +662,7 @@ def dev(
 
     worker_process: subprocess.Popen[bytes] | None = None
     mcp_process: subprocess.Popen[bytes] | None = None
+    mcp_watch: threading.Thread | None = None
     try:
         if not no_worker:
             # 研究/数据 job 默认由随 dev 托管的 worker 子进程消费;
@@ -664,17 +684,23 @@ def dev(
             # 就绪等待交给 daemon 线程,不阻塞 API/Vite 启动。
             mcp_process = _start_dev_mcp(settings)
             if mcp_process is not None:
-                threading.Thread(
+                mcp_watch = threading.Thread(
                     target=_watch_dev_mcp,
-                    args=(mcp_process, settings),
+                    args=(mcp_process, settings, stop_event),
                     name="finboard-mcp-readiness",
                     daemon=True,
-                ).start()
+                )
+                mcp_watch.start()
 
         # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
         serve(ctx, host=host, port=port, reload=False)
     finally:
         stop_event.set()
+        # 就绪线程必须先停:否则主动停机(uvicorn 优雅退出码 3)会被它当成
+        # 「启动即退出」打印一条假故障(issue #544)。
+        if mcp_watch is not None:
+            with contextlib.suppress(KeyboardInterrupt):
+                mcp_watch.join(timeout=0.5)
         # 回收顺序:MCP / worker 是关键进程,先发信号缩短无信号窗口,再收 Vite。
         # 二次 Ctrl-C 会在 _stop_dev_process 内部抛 KeyboardInterrupt —— 逐个兜住,
         # 否则一次中断就跳过剩余进程,独立 session 的 MCP/worker 会变成孤儿
