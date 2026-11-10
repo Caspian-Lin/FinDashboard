@@ -231,18 +231,24 @@ def _stop_dev_process(
       立即 ``taskkill /T /F``。
     * POSIX —— ``killpg SIGTERM`` 等待 ``graceful_seconds`` 后 ``killpg
       SIGKILL`` 兜底(与既有行为同形,宽限可配)。
+
+    等待期间被二次 Ctrl-C 打断时**不能**只把异常抛给调用方:那样进程只收到了优雅
+    信号、可能仍然存活。这里吞掉 ``KeyboardInterrupt`` 继续走强杀兜底(issue #544)。
     """
 
     if process.poll() is not None:
         return
     if sys.platform == "win32":
         if graceful_seconds > 0:
-            with contextlib.suppress(OSError):
-                os.kill(process.pid, _CTRL_BREAK_EVENT)
             try:
+                with contextlib.suppress(OSError):
+                    os.kill(process.pid, _CTRL_BREAK_EVENT)
                 process.wait(timeout=graceful_seconds)
                 return
             except subprocess.TimeoutExpired:
+                pass
+            except KeyboardInterrupt:
+                # 二次 Ctrl-C:放弃等待,直接强杀整树。
                 pass
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
@@ -254,11 +260,14 @@ def _stop_dev_process(
     try:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=max(0.1, graceful_seconds))
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
-            process.kill()
+            # 进程组已消失时 killpg 抛 ESRCH;再按 pid 兜一枪,失败也不再抛
+            # (调用方只兜 KeyboardInterrupt,冒出 OSError 会跳过后续回收)。
+            with contextlib.suppress(OSError):
+                process.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=5.0)
 
@@ -437,6 +446,139 @@ def _spawn_dev_worker() -> subprocess.Popen[bytes]:
     return subprocess.Popen(_dev_worker_command(), start_new_session=True)
 
 
+def _dev_mcp_command() -> list[str]:
+    """dev 托管 MCP 研究服务的命令(独立进程,与 API/worker 同生命周期)。"""
+    return [sys.executable, "-m", "finboard_mcp"]
+
+
+#: dev 等 MCP 子进程开始监听的上限秒数(issue #544):超时只告警,不阻断 API。
+#: 本机实测冷启动约 3-5s(156 个工具注册 + DB 引擎),留足余量但保持有界。
+_DEV_MCP_READY_TIMEOUT_SECONDS = 10.0
+
+
+def _should_spawn_dev_mcp(settings: Settings) -> bool:
+    """dev 是否托管 MCP 服务(issue #544)。
+
+    * ``stdio`` 传输是「宿主/客户端拉起子进程」形态(Codex / DSH 自己 spawn),
+      dev 再起一个没有消费者,必须跳过;``streamable-http`` / ``sse`` 都是常驻
+      HTTP 服务,可以托管;
+    * ``mcp_enabled=false`` 的 worktree 必须跳过,否则多个 worktree 会抢同一个
+      8765 端口(AGENTS.md 的 worktree 脚本默认关掉 MCP)。
+    """
+
+    return bool(settings.mcp_enabled) and settings.mcp_transport != "stdio"
+
+
+def _is_loopback_bind(host: str) -> bool:
+    """dev 只托管 loopback 绑定:非 loopback 必须显式走 ``make mcp-serve-http-remote``。"""
+
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+
+def _dev_mcp_port_in_use(host: str, port: int, *, timeout: float = 0.5) -> bool:
+    """端口是否已有进程在监听(上一次 dev 残留实例 / 手动 ``make mcp-serve-http``)。"""
+
+    probe_host = host if _is_loopback_bind(host) and host != "localhost" else "127.0.0.1"
+    if host == "::1":
+        probe_host = "::1"
+    try:
+        with socket.create_connection((probe_host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _spawn_dev_mcp() -> subprocess.Popen[bytes]:
+    """启动 MCP 子进程(与 worker 同样的进程组托管,退出时整树回收)。"""
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            _dev_mcp_command(),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(_dev_mcp_command(), start_new_session=True)
+
+
+def _start_dev_mcp(settings: Settings) -> subprocess.Popen[bytes] | None:
+    """前置检查 + spawn(**不做长等待**);失败只告警返回 ``None``。
+
+    返回值必须在调用方**立即**赋值:就绪等待放到 :func:`_watch_dev_mcp`(线程),
+    这样等待期间被 Ctrl-C 打断时进程句柄已经在 ``mcp_process`` 里,``finally`` 仍能
+    回收 —— 否则刚 spawn 的子进程(独立 session)会漏成孤儿并继续占端口。
+    """
+
+    host = str(settings.mcp_host)
+    port = int(settings.mcp_port)
+    if not _is_loopback_bind(host):
+        typer.echo(
+            f"警告: FINBOARD_MCP_HOST={host} 是非 loopback 绑定,dev 不托管(远程暴露"
+            "须显式 make mcp-serve-http-remote + TLS 反向代理);本次未启动 MCP。",
+            err=True,
+        )
+        return None
+    if _dev_mcp_port_in_use(host, port):
+        typer.echo(
+            f"警告: MCP 端口 {host}:{port} 已被占用(上一次 dev 残留的实例,或手动 "
+            "make mcp-serve-http);本次未托管 MCP,客户端可能连到旧实例。"
+            "先停掉占用进程,或用 --no-mcp 静默。",
+            err=True,
+        )
+        return None
+    try:
+        return _spawn_dev_mcp()
+    except OSError as exc:
+        typer.echo(f"警告: MCP 研究服务启动失败,客户端将连不上: {exc}", err=True)
+        return None
+
+
+def _watch_dev_mcp(
+    process: subprocess.Popen[bytes],
+    settings: Settings,
+    stop_event: threading.Event,
+) -> None:
+    """有界等待 MCP 就绪并打印一次结果(在 daemon 线程里跑,不阻塞 API 启动)。
+
+    父进程不能「print 成功就算成功」:端口被占、缺凭据门禁(退出码 2)、命令缺失
+    都发生在子进程里。这里 poll + 端口探测,失败/超时都只告警。
+
+    ``stop_event`` 是 dev 的主动停机信号:一旦置位就**不再报告任何结果** —— 否则
+    正常 Ctrl-C 会把 uvicorn 优雅停机的退出码 3 打印成「启动即退出」的假故障。
+    """
+
+    host = str(settings.mcp_host)
+    port = int(settings.mcp_port)
+    deadline = time.monotonic() + _DEV_MCP_READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if stop_event.is_set():
+            return
+        if process.poll() is not None:
+            if stop_event.is_set():
+                return
+            typer.echo(
+                "警告: MCP 研究服务启动即退出(退出码 "
+                f"{process.returncode}),客户端将连不上;常见原因:端口被占、缺少可用"
+                "凭据、非 loopback 未放行(见上方 stderr)。",
+                err=True,
+            )
+            return
+        if _dev_mcp_port_in_use(host, port, timeout=0.2):
+            if stop_event.is_set():
+                return
+            typer.echo(
+                f"已同步启动 MCP 研究服务({settings.mcp_transport} {host}:{port});"
+                "如需关闭请用 --no-mcp"
+            )
+            return
+        # 用 stop_event.wait 代替 sleep:停机信号可以立刻打断等待。
+        stop_event.wait(0.1)
+    if stop_event.is_set():
+        return
+    typer.echo(
+        f"警告: MCP 研究服务已启动但 {_DEV_MCP_READY_TIMEOUT_SECONDS:.0f}s 内未监听 "
+        f"{host}:{port},请查看上方日志确认是否起在别的端口。",
+        err=True,
+    )
+
+
 @app.command()
 def dev(
     ctx: typer.Context,
@@ -450,8 +592,22 @@ def dev(
             help="不随 dev 启动后台任务 worker(默认启动,研究/数据 job 才能被消费)",
         ),
     ] = False,
+    no_mcp: Annotated[
+        bool,
+        typer.Option(
+            "--no-mcp",
+            help=(
+                "不随 dev 启动 MCP 研究服务(默认启动;stdio 传输或 "
+                "mcp_enabled=false 时自动跳过)"
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """前台运行 API 并托管 Vite 与后台 worker,确保 Ctrl-C 触发 FastAPI shutdown。"""
+    """前台运行 API 并托管 Vite、worker 与 MCP,确保 Ctrl-C 触发 FastAPI shutdown。
+
+    子进程(worker / MCP)按当前工作目录的 ``.env`` 自行读配置;``--env-file`` 只影响
+    父进程的设置对象。
+    """
     resolved_web_dir = web_dir.resolve()
     if not resolved_web_dir.is_dir():
         raise typer.BadParameter(f"前端目录不存在: {resolved_web_dir}", param_hint="--web-dir")
@@ -505,36 +661,74 @@ def dev(
     frontend_thread.start()
 
     worker_process: subprocess.Popen[bytes] | None = None
-    if not no_worker:
-        # 研究/数据 job 默认由随 dev 托管的 worker 子进程消费;
-        # 生产部署用独立 `finboard worker run`(见 README),--no-worker 关闭。
-        try:
-            worker_process = _spawn_dev_worker()
-        except OSError as exc:
-            typer.echo(f"警告: 后台 worker 启动失败,任务将停留在 queued: {exc}", err=True)
-        else:
-            typer.echo(
-                "已同步启动后台 worker(消费研究/数据任务队列);"
-                "如需关闭请用 --no-worker"
-            )
-
+    mcp_process: subprocess.Popen[bytes] | None = None
+    mcp_watch: threading.Thread | None = None
     try:
+        if not no_worker:
+            # 研究/数据 job 默认由随 dev 托管的 worker 子进程消费;
+            # 生产部署用独立 `finboard worker run`(见 README),--no-worker 关闭。
+            try:
+                worker_process = _spawn_dev_worker()
+            except OSError as exc:
+                typer.echo(
+                    f"警告: 后台 worker 启动失败,任务将停留在 queued: {exc}", err=True
+                )
+            else:
+                typer.echo(
+                    "已同步启动后台 worker(消费研究/数据任务队列);"
+                    "如需关闭请用 --no-worker"
+                )
+
+        if not no_mcp and _should_spawn_dev_mcp(settings):
+            # 先 spawn 并立刻赋值(不留「等待期间被 Ctrl-C → 孤儿」的窗口),
+            # 就绪等待交给 daemon 线程,不阻塞 API/Vite 启动。
+            mcp_process = _start_dev_mcp(settings)
+            if mcp_process is not None:
+                mcp_watch = threading.Thread(
+                    target=_watch_dev_mcp,
+                    args=(mcp_process, settings, stop_event),
+                    name="finboard-mcp-readiness",
+                    daemon=True,
+                )
+                mcp_watch.start()
+
         # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
         serve(ctx, host=host, port=port, reload=False)
     finally:
         stop_event.set()
-        frontend_thread.join(timeout=1.0)
-        for frontend in frontend_holder:
-            _stop_dev_process(frontend)
+        # 就绪线程必须先停:否则主动停机(uvicorn 优雅退出码 3)会被它当成
+        # 「启动即退出」打印一条假故障(issue #544)。
+        if mcp_watch is not None:
+            # RuntimeError:线程可能因 start() 失败而未真正启动(极罕见),
+            # join 未启动的线程会抛异常并中断后续回收。
+            with contextlib.suppress(KeyboardInterrupt, RuntimeError):
+                mcp_watch.join(timeout=0.5)
+        # 回收顺序:MCP / worker 是关键进程,先发信号缩短无信号窗口,再收 Vite。
+        # 二次 Ctrl-C 会在 _stop_dev_process 内部抛 KeyboardInterrupt —— 逐个兜住,
+        # 否则一次中断就跳过剩余进程,独立 session 的 MCP/worker 会变成孤儿
+        # (worker 孤儿还会回到 #339 的「旧代码抢队列」场景)。
+        if mcp_process is not None:
+            # MCP 与 worker 同一套回收:先优雅信号(Windows CTRL_BREAK / POSIX
+            # SIGTERM),宽限内不退出再强杀整树。
+            # 二次 Ctrl-C 会在 _stop_dev_process 内部抛 KeyboardInterrupt,必须兜住,
+            # 否则一次中断就跳过剩余进程(独立 session 的 MCP/worker 会变孤儿)。
+            with contextlib.suppress(KeyboardInterrupt):
+                _stop_dev_process(mcp_process)
         if worker_process is not None:
             # issue #307:不再 taskkill /F 首杀 —— 先向 worker 进程组发优雅
             # 信号(Windows CTRL_BREAK / POSIX SIGTERM),给 worker 侧宽限
             # (settings.worker_shutdown_grace_seconds,默认 0 时给兜底窗口
             # 让 worker 完成「立即取消 → 退出」),超时才强杀。
-            _stop_dev_process(
-                worker_process,
-                graceful_seconds=_dev_worker_stop_grace_seconds(settings),
-            )
+            with contextlib.suppress(KeyboardInterrupt):
+                _stop_dev_process(
+                    worker_process,
+                    graceful_seconds=_dev_worker_stop_grace_seconds(settings),
+                )
+        with contextlib.suppress(KeyboardInterrupt):
+            frontend_thread.join(timeout=1.0)
+        for frontend in frontend_holder:
+            with contextlib.suppress(KeyboardInterrupt):
+                _stop_dev_process(frontend)
 
 
 @app.command(name="kill-switch")

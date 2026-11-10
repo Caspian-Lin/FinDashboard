@@ -110,6 +110,9 @@ uv run finboard mcp client revoke MC-0123456789ab
   `MCP_AUTH_TOKEN`)、`make mcp-serve-http-remote`(非 loopback,显式
   `ALLOW_REMOTE=true`)、`make mcp-client-create`(签发客户端)。
 - 重复启动(端口占用)→ FinBoard 具名错误并退出码 2,不会静默换端口。
+- `make dev` 也会托管一份 loopback MCP(issue #544;`.env` 配成非 stdio 传输时),
+  与 `make mcp-serve-http` **二选一**:端口已被占用时 dev 只告警并跳过托管
+  (`DEV_ARGS=--no-mcp` 可显式关闭),非 loopback 绑定一律不托管。
 
 ## 6. 运维检查清单
 

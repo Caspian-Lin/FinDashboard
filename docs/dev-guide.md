@@ -137,9 +137,11 @@ make test-integration # 需要 PostgreSQL 已就绪
   / `dataset_manifests` 等用户数据。
 - **连接切换**:`FINBOARD_TEST_DB_URL` 优先,回退 `FINBOARD_DB_URL`,再
   回退默认测试库。CI 的 postgres 服务用户是 superuser,自动建库即可。
-- **端口**:`make dev` 只启动 API(:8000)+ 后台 worker + Vite;MCP 是独立进程
-  (`uv run python -m finboard_mcp` / `make mcp-serve*`),不随 `make dev` 内嵌,
-  也不会与测试端口冲突(测试用 ASGITransport 不占端口)。
+- **端口**:`make dev` 启动 API(:8000)+ 后台 worker + Vite,并在 `.env` 配成非
+  stdio 传输(`streamable-http` / `sse`)且 `mcp_enabled=true` 时托管 MCP
+  (默认 8765,受 `FINBOARD_MCP_PORT` 控制;issue #544)。多 worktree 的 `.env` 默认
+  关掉 MCP,不会互抢端口;`stdio` 传输与手动 `make mcp-serve-http` 不代管(端口已被
+  占用时 dev 只告警跳过);测试用 ASGITransport 不占端口。
 - **挂死兜底超时**:pytest-timeout(thread 方式,Windows 无 signal)兜底
   sync 挂死(超时后 dump 堆栈并退出进程);asyncio 挂死由 conftest 的
   `asyncio.timeout` 守卫优雅打断(单测试失败,进程继续)。默认超时
@@ -154,18 +156,25 @@ make test-integration # 需要 PostgreSQL 已就绪
 ### 4. 一键启动开发环境
 
 ```bash
-make dev              # 后端 FastAPI(:8000) + 前端 Vite(:5173) + 后台 Worker,Ctrl-C 同时退出
+make dev              # API(:8000) + Vite(:5173) + 后台 Worker + MCP(默认 8765,条件见下)
+make dev DEV_ARGS=--no-mcp    # 或 --no-worker,逐个关闭
 ```
 
 打开浏览器访问 `http://localhost:5173` 即可使用交易控制台。
 Vite dev server 自动代理 `/api` 和 `/ws` 到后端。
 
-`make dev` 默认同时托管一个后台 **Worker 子进程**,研究/数据 job 无需再
-另开终端即可被消费;退出 dev 时 Worker 与 Vite 一起回收,不留孤儿进程
-(Ctrl-C 先向 Worker 发优雅停止信号、按宽限等 in-flight 收尾后强杀兜底,
-issue #307)。
-如不需要(例如本机已另跑独立 Worker),用 `uv run finboard dev --no-worker`
-关闭。前端「任务中心」页(`/jobs`)可查看全部任务、过滤、详情与取消。
+`make dev` 默认同时托管一个后台 **Worker 子进程**(研究/数据 job 的消费端)和一个
+**MCP 研究服务**(issue #544;仅当 `.env` 的 `mcp_transport` 不是 `stdio` 且
+`mcp_enabled=true` 时启动 —— `.env.example` 默认是 `stdio`,所以新 clone 默认不起
+MCP)。MCP 只是控制面,真正的执行依赖这一轮的 DB 与 worker,所以完整栈一条命令即可。
+退出 dev 时 MCP、Worker 与 Vite 一起回收,不留给下一个会话
+(Ctrl-C 先向子进程组发优雅停止信号、按宽限等 in-flight 收尾后强杀兜底,issue #307);
+二次 Ctrl-C 不会跳过后续进程的回收。如 MCP 起不来(端口被占 / 无凭据 / 非 loopback),
+dev 只告警并继续跑 API/worker —— 看启动日志里的 `警告: MCP …` 具名原因。
+前端「任务中心」页(`/jobs`)可查看全部任务、过滤、详情与取消。
+
+> `finboard --env-file X dev` 的覆盖只作用于父进程:worker/MCP 子进程按 CWD 的
+> `.env` 自行读配置。需要换配置就跑 `make dev`(或先 `cd` 到目标目录)。
 
 也可以分别启动:
 
