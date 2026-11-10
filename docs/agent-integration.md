@@ -22,14 +22,14 @@ FinDashboard 仍是数据 / 权限 / 任务 / 审计 / 产物的唯一事实来�
 | 传输 | 端点 | 说明 |
 |---|---|---|
 | `stdio` | `uv run python -m finboard_mcp` 由宿主作为子进程拉起 | **默认传输**(`Settings.mcp_transport` 默认 `stdio`);无 HTTP 鉴权;作用域由 `FINBOARD_MCP_STDIO_SCOPES` 决定,**默认只有 `research.read`** |
-| `streamable-http` | `http://127.0.0.1:8765/mcp` | 显式 `FINBOARD_MCP_TRANSPORT=streamable-http` 启动 `uv run python -m finboard_mcp`(或 `make mcp-serve-http`)。**#544 起 `make dev` 会托管这份 MCP 子进程**(`--no-mcp` 关闭,`mcp_enabled=false` / stdio 传输自动跳过);`finboard api` 仍不内嵌。必须有凭据,按客户端 Bearer |
+| `streamable-http` | `http://127.0.0.1:8765/mcp` | 显式 `FINBOARD_MCP_TRANSPORT=streamable-http` 启动 `uv run python -m finboard_mcp`(或 `make mcp-serve-http`)。**#544 起 `.env` 配成非 stdio 传输时 `make dev` 会托管这份 MCP**(`DEV_ARGS=--no-mcp` 关闭,`mcp_enabled=false` / stdio 自动跳过,非 loopback 不托管);`finboard api` 仍不内嵌。必须有凭据,按客户端 Bearer |
 
 > 外部 Harness 场景(Codex / OpenCode 等)用 `streamable-http` + 按客户端凭据;
 > stdio 适合「宿主直接拉起子进程」的客户端,但默认只读,写操作需显式
 > `FINBOARD_MCP_STDIO_SCOPES`。
 
 ```bash
-# 独立启动 loopback HTTP(不依赖 OpenCode / 交易内核;make dev 也会托管一份)
+# 单独启动 loopback HTTP(与 make dev 托管的那一份二选一,别同时开)
 FINBOARD_MCP_TRANSPORT=streamable-http \
 FINBOARD_MCP_HOST=127.0.0.1 \
 FINBOARD_MCP_PORT=8765 \
@@ -239,12 +239,17 @@ DSH 的 MCP 接入是**插件条目**形态:每个 server 是 `cordis.patch.yml`
   `chmod 600`。**不要把 token 写进 patch 文件**。
 - **改完即生效**:编辑 patch 触发 HMR 重载,不需要重启 DSH(实测保存后数秒内工具可调;
   只改 mtime 不触发,要改内容)。
-- **端点**:`make dev` 默认托管 MCP(issue #544;`--no-mcp` 关闭,`FINBOARD_MCP_ENABLED=false`
-  或 stdio 传输自动跳过),启动日志会打印 `已同步启动 MCP 研究服务(streamable-http …)`;
+- **端点**:`make dev` 在 `.env` 配成**非 stdio 传输**(`streamable-http` / `sse`)且
+  `mcp_enabled=true` 时托管 MCP(issue #544;`make dev DEV_ARGS=--no-mcp` 关闭),
+  启动日志会打印 `已同步启动 MCP 研究服务(… host:port)`;`stdio`(默认传输)由客户端
+  自己拉起子进程,dev 不代管。与手动 `make mcp-serve-http` **二选一**——两者都要占用
+  同一个端口,dev 检测到端口已被占用时只会告警并跳过托管(避免把 agent 指向旧实例)。
   也可以单独起:`make mcp-serve-http`(或
   `FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=127.0.0.1 uv run python -m finboard_mcp`)。
-  注意 `.env` 若留着 `FINBOARD_MCP_HOST=0.0.0.0`(旧容器期配置)会被启动门禁拒绝
-  (退出码 2),本机应改成 `127.0.0.1`;`make dev` 里这个失败只告警、不阻断 API。
+  注意:`.env` 若留着 `FINBOARD_MCP_HOST=0.0.0.0`(旧容器期配置)会被启动门禁拒绝
+  (退出码 2),本机应改成 `127.0.0.1`;dev **不托管非 loopback 绑定**(远程暴露必须
+  显式 `make mcp-serve-http-remote` + TLS 反向代理),这类配置和子进程早退都只告警、
+  不阻断 API。
 
 ### 三个坑(都会静默失败)
 
