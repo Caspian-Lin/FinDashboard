@@ -699,7 +699,9 @@ def dev(
         # 就绪线程必须先停:否则主动停机(uvicorn 优雅退出码 3)会被它当成
         # 「启动即退出」打印一条假故障(issue #544)。
         if mcp_watch is not None:
-            with contextlib.suppress(KeyboardInterrupt):
+            # RuntimeError:线程可能因 start() 失败而未真正启动(极罕见),
+            # join 未启动的线程会抛异常并中断后续回收。
+            with contextlib.suppress(KeyboardInterrupt, RuntimeError):
                 mcp_watch.join(timeout=0.5)
         # 回收顺序:MCP / worker 是关键进程,先发信号缩短无信号窗口,再收 Vite。
         # 二次 Ctrl-C 会在 _stop_dev_process 内部抛 KeyboardInterrupt —— 逐个兜住,
