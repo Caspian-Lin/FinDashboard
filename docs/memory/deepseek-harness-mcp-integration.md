@@ -11,14 +11,16 @@
 1. DSH 的 MCP 桥有个 **`maxInstructionBytes`,默认 32768 字节**。FinBoard 的
    `_INSTRUCTIONS` 约 43 KB(2026-11-10 实测 43,087 字节),**超限**。
 2. 超限的失败点**在连接之后**:`server/discover` 返回 200、`subscriptions/listen`
-   返回 200 并 ack,桥读完 instructions 才抛错 → 判定连接失败 → 退避重连死循环。
-   外部只能看到 `mcp-client(finboard): server is disconnected`,**没有任何 401 /
-   协议错误**,所以要设 `maxInstructionBytes: 262144`(或压低 `_INSTRUCTIONS`)。
+   返回 200 并 ack,桥读完 instructions 才抛错 → 判定连接失败 → 按
+   `reconnect.maxAttempts`(默认 10)退避重连,耗尽后打 `giving up … tools
+   unregistered` 并停止重连(需 HMR 重载 / 重启 Host)。外部只能看到
+   `mcp-client(finboard): server is disconnected`,**没有任何 401 / 协议错误**,
+   所以要设 `maxInstructionBytes: 262144`(或压低 `_INSTRUCTIONS`)。
 3. DSH 的 skill provider 要求 `SKILL.md` frontmatter 同时有 `name` + `description`
-   (kebab-case),缺 `name` 会被静默丢弃;且 provider(`@deepseek-ai/dsh-skill-filesystem`)
-   在 profile 里**默认关闭**。
+   (kebab-case),缺 `name` 会被静默丢弃;且该 provider(`- id: skill-filesystem`,
+   patchId,不是 `include:skill-filesystem`)在本机 GUI profile 里默认关闭。
 4. 模型可见工具名是 `mcp__finboard__finboard_*`(双前缀),`finboard_*` 只是线上
-   真实注册名。
+   真实注册名;`toolCallTimeoutMs` 必须大于 `finboard_job_wait` 的 300s 上限。
 
 ## Why
 
@@ -37,6 +39,8 @@
 - 看到「连上但 0 工具」时,先量 `len(_INSTRUCTIONS.encode())`,再去翻客户端上限,
   不要先怀疑协议版本。
 - 给 DSH 加 MCP 一律走 `~/.dsh/profiles/<profile>/cordis.patch.yml` 的
-  `@deepseek-ai/dsh-mcp-client` insert 条目;token 放
-  `~/.dsh/secrets/finboard-mcp.token`(ACL 收本用户),用 `!!js` 读,不写进 patch。
-- 相关:`docs/agent-integration.md` §2/§5/§8;issue #542。
+  `@deepseek-ai/dsh-mcp-client` insert 条目 + `- id: skill-filesystem disabled: false`;
+  token 放 `~/.dsh/secrets/finboard-mcp.token`(ACL 收本用户),用 `!!js` 读
+  `FINBOARD_MCP_TOKEN` 或该文件,不写进 patch。
+- 过程记录:`docs/research/rounds/2026-11-10-dsh-542/`;文档:
+  `docs/agent-integration.md` §2/§5/§8;issue #542。
