@@ -1,4 +1,5 @@
 ---
+name: finboard-research
 description: FinBoard 研究 Skill —— 指导外部 Agent Harness（Codex / DeepSeek Harness / ZCode 等）通过 FinBoard MCP 工具做受控量化研究：课题续接、证据核验、研究工作流、作用域边界与收尾归档。用于量化研究、因子分析、回测/模拟盘分析、研究记忆。不用于实盘交易或代码编辑。
 ---
 

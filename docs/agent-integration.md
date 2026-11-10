@@ -107,7 +107,7 @@ provider 模型同步)已于 #520 删除;Web 入口改为 `/research/agent-conne
 |---|---|---|---|
 | Codex CLI `0.163.0` | **已验**:读 context + 追加轮次 + readonly 越权被拒 | 2026-11-10 | [`docs/research/rounds/2026-11-10-skill-519/`](research/rounds/2026-11-10-skill-519/README.md) |
 | 外部 OpenCode `v2.0.32` | **已验**:同上,且跨客户端续接(读到 Codex 写入的轮次) | 2026-11-10 | 同上 |
-| DeepSeek Harness | **待验** | — | 见 §5 |
+| DeepSeek Harness `44.7.0` | **已验**:156 工具全量发现 + `topic_read` / `memory_page` / `instrument_search` 真实回执 + 越权 `denied` + Skill 目录发现 | 2026-11-10 | 见 §5 |
 | ZCode | **待验** | — | 见 §6 |
 
 待验 ≠ 不支持:是没有做端到端实测,配置片段也不提供未经验证的字段。
@@ -196,27 +196,81 @@ opencode run --format json -m opencode/qwen3.8-flash "<message>"
 | `provider.invalid-request … not valid JSON` | 客户端模型 / 网关抖动,换模型重试(与 FinBoard 无关) |
 | `list_mcp_resources` 里看不到 finboard | 该接口只列暴露 resources 的 server,不代表未连接;直接调工具验证 |
 
-## 5. DeepSeek Harness(待验)
+## 5. DeepSeek Harness(已验 2026-11-10)
 
-**为什么待验**:本机 Harness 的 MCP 接入是**插件包**形态(profile 里是
-`@local/blender-official-mcp`、`@local/godot-mcp` 之类),`~/.dsh` 下没有可直接粘贴
-的"远程 MCP server"settings 片段;#519 也没有打包 finboard MCP 插件。因此
-**没有**可复现的配置步骤,不宣称支持。
+DSH 的 MCP 接入是**插件条目**形态:每个 server 是 `cordis.patch.yml` 里一个
+`@deepseek-ai/dsh-mcp-client` 实例(与 `@local/blender-official-mcp` 等同构),
+没有"远程 MCP settings 面板"。实测版本 `44.7.0`。
 
-字段需求(与其它客户端相同,待实测确认落点):
+### 配置
 
-- 传输:streamable HTTP;URL:`http://127.0.0.1:8765/mcp`
-- 认证:`Authorization: Bearer $FINBOARD_MCP_TOKEN`
-- 作用域:按预设(`readonly` / `topic-writer` / `data-operator`)
+`~/.dsh/profiles/<profile>/cordis.patch.yml`(本机 GUI 用 `desktop` profile;
+`web` / `headless` / `acp` 各自独立,配了才生效):
 
-实测时要记录的项:① 连接是否成功;② 工具是否出现;③ `topic_read(view=context)` 回执;
-④ readonly 越权 `denied`;⑤ 日志位置与格式。
+```yaml
+- insert:
+    - id: finboard-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: finboard
+        transport: streamable-http
+        url: http://127.0.0.1:8765/mcp
+        headers:
+          Authorization: !!js '(function(){const t=process.env.FINBOARD_MCP_TOKEN;if(t)return "Bearer "+t;const fs=process.getBuiltinModule("node:fs");return "Bearer "+fs.readFileSync(process.env.USERPROFILE+"/.dsh/secrets/finboard-mcp.token","utf8").trim()})()'
+        maxInstructionBytes: 262144   # 必设,见下"坑 1"
+        toolCallTimeoutMs: 240000
+        failOnStartupError: false
+```
+
+- **凭据**:`finboard mcp client create --name dsh --preset topic-writer`(明文只打印
+  一次),写进 `~/.dsh/secrets/finboard-mcp.token` 并收 ACL
+  (`icacls <file> /inheritance:r /grant:r "<user>:(R)"`);`!!js` 先读
+  `FINBOARD_MCP_TOKEN`,没有再读该文件。**不要把 token 写进 patch 文件**。
+- **改完即生效**:编辑 patch 触发 HMR 重载,不需要重启 DSH(实测保存后数秒内工具可调)。
+- **端点**:`make mcp-serve-http`(或
+  `FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=127.0.0.1 uv run python -m finboard_mcp`)。
+  注意 `make dev` **不**拉起 MCP(#520 起 MCP 与 API 解耦),要单独启动。
+
+### 三个坑(都会静默失败)
+
+1. **`maxInstructionBytes` 默认 32768 字节**:FinBoard `_INSTRUCTIONS` 当前约 43 KB。
+   超限时链路是 `server/discover` 成功 → `subscriptions/listen` ack 成功 →
+   **桥读取 instructions 才抛错** → 判连接失败 → 退避重连死循环;外部表现是
+   `list_mcp_resources` 报 `mcp-client(finboard): server is disconnected`、一个工具都
+   没有,极易误判为协议不兼容。设为 `262144` 即可。
+2. **Skill 需要 `name`**:DSH 的 skill provider 要求 `SKILL.md` frontmatter 同时有
+   `name` + `description`(kebab-case),缺 `name` 会被**静默丢弃**(只留一条 warn)。
+   另外该 provider 默认关闭,需在 profile 打开 `@deepseek-ai/dsh-skill-filesystem`
+   (`plugin_manager` 以 `include:skill-filesystem` 为 entry id),它按
+   `<项目根>/.agents/skills`(最近 `.git` 祖先)扫描。
+3. **工具名前缀**:模型可见名是 `mcp__finboard__finboard_topic_read` 这种
+   `<命名空间>__<真实名>` 双前缀;Skill 与文档里的 `finboard_*` 是**真实注册名**,
+   两者不是同一字符串。排障时按前缀名搜会话日志。
+
+### 自动同步语义(实测)
+
+| 对象 | 同步方式 |
+|---|---|
+| 工具清单 | 连接时 `tools/list` 发现;监听 `notifications/tools/list_changed` 重同步;改名/重连不漂移(`(serverName, rawName)` 纯函数) |
+| 服务端重启 | **无需动 DSH**:杀掉并重启 MCP 进程后,下一次工具调用直接成功(HTTP 按需重试) |
+| Skill 正文 | Skill 就是仓库文件;provider 有 watcher,每次加载重读 `SKILL.md`,合并即生效,不用打包/重启 |
+| 插件配置 / token | **手工**:URL、端口、`maxInstructionBytes`、轮换后的 token 都在 profile patch / 密钥文件里 |
+
+### 排障
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `server is disconnected`,且服务端看到 `initialize`/`discover` 已 200 | 先查 `maxInstructionBytes`(坑 1);再看 `~/.dsh` 下无通用日志,可用 loopback TCP 探针抓 `discover → subscriptions/listen → 立刻 close` 的循环 |
+| 连上但 Skill 目录里没有 `finboard-research` | `name:` 缺失(坑 2)+ provider 未启用;`SKILL.md` 里不得出现 `OpenCode`(测试锁定) |
+| 工具调用返回 `denied` | 凭据作用域不足,换 `topic-writer` / `data-operator` 客户端;不要给只读凭据加权限 |
+| 改了 patch 但工具没变 | HMR 只对**内容**变化生效;`touch` 改 mtime 不触发,改一个字段即可 |
 
 ## 6. ZCode(待验)
 
 **为什么待验**:本机未安装(`Get-Command zcode` 无结果),无法实测;不提供未经验证
 的配置片段。接入时需要的仍是同一组事实:streamable HTTP URL +
-`Authorization: Bearer` + 作用域预设。实测记录项同 §5。
+`Authorization: Bearer` + 作用域预设。实测记录项同 §5(其中 instructions 上限、
+Skill frontmatter `name`、工具名前缀三条通用,与本机无关)。
 
 ## 7. 网络边界
 
@@ -234,7 +288,7 @@ opencode run --format json -m opencode/qwen3.8-flash "<message>"
 | 连不上 / 401 | `finboard mcp client list` → `state` / `token_prefix`;确认 `FINBOARD_MCP_HOST/PORT` 与 URL 一致 |
 | 401 但客户端有 token | token 是否被换行 / 引号污染;是否用了已 `revoke` 的客户端 |
 | 工具返回 `denied` | 看 `error.message` 里的"已授予"列表;属预期契约,不是重试项 |
-| 看不到任何 `finboard_*` 工具 | 客户端配置未加载 / MCP 初始化失败;看客户端 MCP 日志与服务端 access log |
+| 看不到任何 `finboard_*` 工具 | 客户端配置未加载 / MCP 初始化失败;看客户端 MCP 日志与服务端 access log。若服务端 access log 已有 200 响应,先查客户端侧的 instructions 上限(§5 坑 1) |
 | 服务端退出码 2 | 读 stderr 的具名原因(enabled=false / 端口占用 / 无凭据 / ALLOW_REMOTE) |
 | 长任务超时 | 用 `finboard_job_wait` 有界等待,超时 `completed=false` 续同 job;不要重复入队 |
 

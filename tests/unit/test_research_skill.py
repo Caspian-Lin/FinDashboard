@@ -62,6 +62,9 @@ class TestCanonicalSkill:
         assert content.startswith("---")
         frontmatter = content.split("---", 2)[1]
         assert "description:" in frontmatter
+        # issue #542:DeepSeek Harness / Codex 等客户端要求 name + description,
+        # 缺 name 会被静默丢弃(只有一条 warn),Skill 目录里看不到。
+        assert f"name: {_SKILL_DIR.name}" in frontmatter
         # 通用名 Skill 不得把客户端权限写进 frontmatter(旧 OpenCode 耦合)。
         assert "permission:" not in frontmatter
 
