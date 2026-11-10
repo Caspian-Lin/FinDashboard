@@ -26,6 +26,7 @@ AGENTS.md git 历史承载，仅留档备查；活跃记忆只保留「不读代
 - [tushare 因子清单调研：内部因子路线图](tushare-factor-roadmap-survey-20260909.md) — 202 因子 9 类全清单含公式；202≈60-70 算子组合；数据缺口三层；分批方案批次进度以 issue #391 为准
 - [统一数据链路方案：拉取重构+数据类型全景+因子批次整合](unified-data-pipeline-plan-20260909.md) — ≤2000 积分全纳入；SyncSpec 数据集驱动统一框架（dataset_sync）；批次落地状态以 #391 批次地图为准
 - [MCP run 摘要查询 13GB 内存飙升根因与修复（#478）](mcp-run-summary-db-aggregation-478.md) — view=summary 曾全量物化 7203 artifacts 顶到 13.27GB；修复=summarize_artifacts 库内有界聚合（::jsonb 归一化 + jsonb 函数只放 CASE THEN）；新增聚合查询禁走 list_artifacts 全量物化
+- [DeepSeek Harness 接入：instructions 上限坑（#542）](deepseek-harness-mcp-integration.md) — DSH 默认 maxInstructionBytes=32768 而 `_INSTRUCTIONS` ~43KB，超限在连接**之后**才抛错，外部只看到 server is disconnected；Skill 缺 frontmatter `name` 会被静默丢弃
 
 ## 归档记忆（archive/，issue 已关闭留档备查）
 
