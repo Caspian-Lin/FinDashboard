@@ -444,6 +444,11 @@ class DataBackfillExecutor:
                     "end_date": item.end_date.isoformat(),
                     "adjustment": item.adjustment,
                     "symbols": symbols,
+                    **(
+                        {"publish_source": "tushare"}
+                        if support.release_kind == "multi_asset_mixed" and item.source == "tushare"
+                        else {}
+                    ),
                 },
                 attempt=1,
                 max_attempts=1,

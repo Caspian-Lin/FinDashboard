@@ -840,6 +840,41 @@ class TestPublishSwitchAndIdentity:
 
 
 class TestBarsExecution:
+    async def test_registered_benchmark_outside_candidate_symbols(
+        self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
+    ) -> None:
+        benchmark = "000001.SH"
+        db_session.add(
+            InstrumentModel(
+                code=benchmark,
+                name="上证指数",
+                market="a_share",
+                instrument_type="index",
+                exchange="SSE",
+                status="active",
+            )
+        )
+        await db_session.flush()
+        requested = (*_SYMBOLS, benchmark)
+        spec = BackfillRequestSpec(
+            scope=_scope().model_copy(update={"benchmarks": (benchmark,)}),
+            datasets=(
+                BackfillDatasetSpec(
+                    dataset=CatalogDataset.BARS, source="tushare", symbols=requested,
+                ),
+            ),
+        )
+        result = await _submit(db_session, spec, key="bars-with-benchmark")
+        assert result.plan.blockers == ()
+        assert result.plan.items[0].symbols == tuple(sorted(requested))
+        harness = _StrictHarness(maker)
+        job_result, error = await _execute(maker, result.request_id, harness=harness)
+        assert error is None, error
+        assert job_result is not None
+        assert job_result.status == "succeeded"
+        assert harness.calls["dataset_publish"][0]["publish_source"] == "tushare"
+        assert set(harness.calls["dataset_publish"][0]["symbols"]) == set(requested)
+
     async def test_bars_sync_uses_contract_payload_and_publishes(
         self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
     ) -> None:
@@ -860,6 +895,7 @@ class TestBarsExecution:
         assert bulk_payload["symbols"] == list(_SYMBOLS)
         assert bulk_payload["market"] == "a_share"
         publish_payload = harness.calls["dataset_publish"][0]
+        assert publish_payload["publish_source"] == "tushare"
         assert publish_payload["release_id"] == release_id_for(
             "bars", result.request_id, "qfq"
         )
