@@ -59,6 +59,7 @@ from finboard_backtest.research_sandbox.factor_publish import (
     SeriesQualityReport,
     check_series_quality,
 )
+from finboard_backtest.research_sandbox.mount_retention import use_mount
 
 _STATS_INTERVAL_SECONDS = 1.0
 _MEM_USAGE_RE = re.compile(r"^([\d.]+)\s*([KMGT]i?B)", re.IGNORECASE)
@@ -487,81 +488,82 @@ async def run_factor_series_container(
     run_dir = workspace / f"FSC-{uuid.uuid4().hex[:12]}"
     _stage_series_code(run_dir, code, spec.params)
 
-    if mount_override is not None:
-        _validate_mount_override(spec, mount_override)
-        mount = mount_override
-        release_checksums: dict[str, str] = {}
-    else:
-        providers, release_checksums = await _series_providers(
-            spec, release_provider_factory, settings
+    with use_mount(mount_override.root if mount_override else run_dir / "data"):
+        if mount_override is not None:
+            _validate_mount_override(spec, mount_override)
+            mount = mount_override
+            release_checksums: dict[str, str] = {}
+        else:
+            providers, release_checksums = await _series_providers(
+                spec, release_provider_factory, settings
+            )
+            mount = await build_window_data_mount(
+                providers=providers,
+                window_start=spec.window_start,
+                window_end=spec.window_end,
+                dates=spec.dates,
+                out_root=run_dir / "data",
+                code_artifact=spec.code_artifact,
+                code_commit=spec.code_commit,
+                release_id=spec.release_id,
+                dataset_release_ids=spec.dataset_release_ids,
+                on_batch=mount_on_batch,
+            )
+
+        result = await ResearchSandboxRunner(driver).run(
+            SandboxRunSpec(
+                image=image,
+                code_dir=run_dir / "code",
+                data_dir=mount.root,
+                out_dir=run_dir / "out",
+                timeout_seconds=settings.research_sandbox_timeout_seconds,
+                memory_mb=settings.research_sandbox_memory_mb,
+                cpus=settings.research_sandbox_cpus,
+                pids_limit=settings.research_sandbox_pids_limit,
+                user=settings.research_sandbox_user,
+                mode="factor_series",
+            )
         )
-        mount = await build_window_data_mount(
-            providers=providers,
-            window_start=spec.window_start,
-            window_end=spec.window_end,
+        _archive_series_run(run_dir, result, image, mount)
+        series_path = run_dir / "out" / "factor_series.json"
+        metrics = _read_series_metrics(run_dir / "out")
+        error = _classify_series(result, run_dir / "out")
+        if error is not None:
+            code_err, summary = error
+            raise SandboxError(code_err, summary)
+        payload = _parse_series_payload(series_path, spec)
+
+        quality = check_series_quality(
+            payload["values"],
             dates=spec.dates,
-            out_root=run_dir / "data",
-            code_artifact=spec.code_artifact,
-            code_commit=spec.code_commit,
-            release_id=spec.release_id,
-            dataset_release_ids=spec.dataset_release_ids,
-            on_batch=mount_on_batch,
+            universe=mount.symbols,
+            max_nan_ratio=settings.research_sandbox_max_nan_ratio,
+            min_coverage=settings.research_sandbox_min_coverage,
         )
-
-    result = await ResearchSandboxRunner(driver).run(
-        SandboxRunSpec(
+        return FactorSeriesOutput(
+            code_artifact=payload["code_artifact"],
+            code_commit=payload["code_commit"],
+            release_id=payload["release_id"],
+            dataset_release_ids=payload["dataset_release_ids"],
+            params=payload["params"],
+            window_start=payload["window_start"],
+            window_end=payload["window_end"],
+            dates=payload["dates"],
+            values=payload["values"],
+            quality=quality,
+            metrics=metrics or {},
+            usage={
+                **result.usage,
+                "duration_seconds": result.duration_seconds,
+                "release_checksums": release_checksums,
+            },
+            mount_manifest_checksum=mount.manifest_checksum,
+            series_checksum=_sha256_file(series_path),
+            workspace_dir=run_dir,
             image=image,
-            code_dir=run_dir / "code",
-            data_dir=mount.root,
-            out_dir=run_dir / "out",
-            timeout_seconds=settings.research_sandbox_timeout_seconds,
-            memory_mb=settings.research_sandbox_memory_mb,
-            cpus=settings.research_sandbox_cpus,
-            pids_limit=settings.research_sandbox_pids_limit,
-            user=settings.research_sandbox_user,
-            mode="factor_series",
+            image_digest=digest,
+            mount=mount,
         )
-    )
-    _archive_series_run(run_dir, result, image, mount)
-    series_path = run_dir / "out" / "factor_series.json"
-    metrics = _read_series_metrics(run_dir / "out")
-    error = _classify_series(result, run_dir / "out")
-    if error is not None:
-        code_err, summary = error
-        raise SandboxError(code_err, summary)
-    payload = _parse_series_payload(series_path, spec)
-
-    quality = check_series_quality(
-        payload["values"],
-        dates=spec.dates,
-        universe=mount.symbols,
-        max_nan_ratio=settings.research_sandbox_max_nan_ratio,
-        min_coverage=settings.research_sandbox_min_coverage,
-    )
-    return FactorSeriesOutput(
-        code_artifact=payload["code_artifact"],
-        code_commit=payload["code_commit"],
-        release_id=payload["release_id"],
-        dataset_release_ids=payload["dataset_release_ids"],
-        params=payload["params"],
-        window_start=payload["window_start"],
-        window_end=payload["window_end"],
-        dates=payload["dates"],
-        values=payload["values"],
-        quality=quality,
-        metrics=metrics or {},
-        usage={
-            **result.usage,
-            "duration_seconds": result.duration_seconds,
-            "release_checksums": release_checksums,
-        },
-        mount_manifest_checksum=mount.manifest_checksum,
-        series_checksum=_sha256_file(series_path),
-        workspace_dir=run_dir,
-        image=image,
-        image_digest=digest,
-        mount=mount,
-    )
 
 
 def _default_series_settings() -> Any | None:

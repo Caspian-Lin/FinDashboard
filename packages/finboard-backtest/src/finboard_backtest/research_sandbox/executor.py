@@ -93,6 +93,7 @@ from finboard_backtest.research_sandbox.factor_publish import (
     check_output_quality,
     check_series_quality,
 )
+from finboard_backtest.research_sandbox.mount_retention import use_mount
 from finboard_backtest.research_sandbox.runner import (
     FactorSeriesRunSpec,
     ResearchSandboxRunner,
@@ -309,120 +310,121 @@ class ResearchCodeRunExecutor:
                 await progress(_TOTAL_STAGES, _TOTAL_STAGES, "research_code_run:failed")
                 return _failed_result(run.run_id, STATIC_VALIDATION_FAILED, summary)
             await session.commit()
-        await progress(2, _TOTAL_STAGES, "research_code_run:mount")
+        with use_mount(run_dir / "data"):
+            await progress(2, _TOTAL_STAGES, "research_code_run:mount")
 
-        if payload.mode == MODE_FACTOR_SERIES:
-            return await self._execute_factor_series(
-                job=job,
-                payload=payload,
-                settings=settings,
-                runner=runner,
-                image=image,
-                run_id=run_id,
-                run_dir=run_dir,
-                code=code,
-                commit=commit,
-                progress=progress,
+            if payload.mode == MODE_FACTOR_SERIES:
+                return await self._execute_factor_series(
+                    job=job,
+                    payload=payload,
+                    settings=settings,
+                    runner=runner,
+                    image=image,
+                    run_id=run_id,
+                    run_dir=run_dir,
+                    code=code,
+                    commit=commit,
+                    progress=progress,
+                )
+
+            try:
+                mount, release_checksums = await self._build_mount(payload, run_dir)
+            except (SandboxMountError, SandboxError) as exc:
+                code_err = getattr(exc, "code", None) or DATASET_RELEASE_UNAVAILABLE
+                return await self._fail(
+                    run_id,
+                    code_err,
+                    str(exc),
+                    progress=progress,
+                    mount_checksum=None,
+                )
+            _stage_write_code(run_dir, code, payload.params)
+            await progress(3, _TOTAL_STAGES, "research_code_run:execute")
+
+            result = await runner.run(
+                SandboxRunSpec(
+                    image=image,
+                    code_dir=run_dir / "code",
+                    data_dir=run_dir / "data",
+                    out_dir=run_dir / "out",
+                    timeout_seconds=settings.research_sandbox_timeout_seconds,
+                    memory_mb=settings.research_sandbox_memory_mb,
+                    cpus=settings.research_sandbox_cpus,
+                    pids_limit=settings.research_sandbox_pids_limit,
+                    user=settings.research_sandbox_user,
+                )
             )
+            await progress(4, _TOTAL_STAGES, "research_code_run:archive")
 
-        try:
-            mount, release_checksums = await self._build_mount(payload, run_dir)
-        except (SandboxMountError, SandboxError) as exc:
-            code_err = getattr(exc, "code", None) or DATASET_RELEASE_UNAVAILABLE
-            return await self._fail(
-                run_id,
-                code_err,
-                str(exc),
-                progress=progress,
-                mount_checksum=None,
-            )
-        _stage_write_code(run_dir, code, payload.params)
-        await progress(3, _TOTAL_STAGES, "research_code_run:execute")
+            outputs = _read_outputs(run_dir / "out")
+            _archive_logs(run_dir, result, image)
+            ok, error_code, error_summary = _classify(result, outputs)
+            usage = {**result.usage, "duration_seconds": result.duration_seconds}
+            _write_json(run_dir / "usage.json", usage)
 
-        result = await runner.run(
-            SandboxRunSpec(
-                image=image,
-                code_dir=run_dir / "code",
-                data_dir=run_dir / "data",
-                out_dir=run_dir / "out",
-                timeout_seconds=settings.research_sandbox_timeout_seconds,
-                memory_mb=settings.research_sandbox_memory_mb,
-                cpus=settings.research_sandbox_cpus,
-                pids_limit=settings.research_sandbox_pids_limit,
-                user=settings.research_sandbox_user,
-            )
-        )
-        await progress(4, _TOTAL_STAGES, "research_code_run:archive")
-
-        outputs = _read_outputs(run_dir / "out")
-        _archive_logs(run_dir, result, image)
-        ok, error_code, error_summary = _classify(result, outputs)
-        usage = {**result.usage, "duration_seconds": result.duration_seconds}
-        _write_json(run_dir / "usage.json", usage)
-
-        # issue #217:成功执行后的输出质量门 + 快照落库。质量门不过 →
-        # run 置 failed(quality_gate_failed),错误信息指明阈值与实际值。
-        output_snapshot_id: str | None = None
-        metrics = outputs.metrics
-        if ok and outputs.scores_path is not None:
-            scores = _load_scores(outputs.scores_path)
-            quality = check_output_quality(
-                scores,
-                universe_size=len(mount.symbols),
-                max_nan_ratio=settings.research_sandbox_max_nan_ratio,
-                min_coverage=settings.research_sandbox_min_coverage,
-                universe_symbols=mount.symbols,
-            )
-            metrics = {**(metrics or {}), "quality_gate": quality.as_dict()}
-            if not quality.passed:
-                ok = False
-                error_code = QUALITY_GATE_FAILED
-                error_summary = "输出质量门未通过,拒绝入库: " + ";".join(quality.failures)
-            else:
-                try:
-                    assert payload.decision_at is not None
-                    snapshot = build_factor_snapshot(
-                        factor_artifact_name=payload.name,
-                        run_id=run_id,
-                        decision_at=payload.decision_at,
-                        commit=commit,
-                        mount_manifest_checksum=mount.manifest_checksum,
-                        scores=scores,
-                        quality=quality,
-                    )
-                    from finboard_persistence import FeatureSnapshotRepository
-
-                    async with self._session_maker() as session:
-                        await FeatureSnapshotRepository(session).publish(snapshot)
-                        await session.commit()
-                    output_snapshot_id = snapshot.snapshot_id
-                except QualityGateError as exc:
+            # issue #217:成功执行后的输出质量门 + 快照落库。质量门不过 →
+            # run 置 failed(quality_gate_failed),错误信息指明阈值与实际值。
+            output_snapshot_id: str | None = None
+            metrics = outputs.metrics
+            if ok and outputs.scores_path is not None:
+                scores = _load_scores(outputs.scores_path)
+                quality = check_output_quality(
+                    scores,
+                    universe_size=len(mount.symbols),
+                    max_nan_ratio=settings.research_sandbox_max_nan_ratio,
+                    min_coverage=settings.research_sandbox_min_coverage,
+                    universe_symbols=mount.symbols,
+                )
+                metrics = {**(metrics or {}), "quality_gate": quality.as_dict()}
+                if not quality.passed:
                     ok = False
                     error_code = QUALITY_GATE_FAILED
-                    error_summary = f"输出质量门未通过,拒绝入库: {exc}"
+                    error_summary = "输出质量门未通过,拒绝入库: " + ";".join(quality.failures)
+                else:
+                    try:
+                        assert payload.decision_at is not None
+                        snapshot = build_factor_snapshot(
+                            factor_artifact_name=payload.name,
+                            run_id=run_id,
+                            decision_at=payload.decision_at,
+                            commit=commit,
+                            mount_manifest_checksum=mount.manifest_checksum,
+                            scores=scores,
+                            quality=quality,
+                        )
+                        from finboard_persistence import FeatureSnapshotRepository
 
-        async with self._session_maker() as session:
-            run_repo = ResearchCodeRunRepository(session)
-            run = await run_repo.mark_terminal(
-                run_id,
-                status="succeeded" if ok else "failed",
-                error_code=error_code,
-                error_summary=error_summary,
-                exit_code=result.exit_code,
-                timed_out=result.timed_out,
-                oom_killed=result.oom_killed,
-                usage=usage,
-                metrics=metrics,
-                scores_checksum=outputs.scores_checksum,
-                mount_manifest_checksum=mount.manifest_checksum,
-                dataset_release_checksums=release_checksums,
-                output_snapshot_id=output_snapshot_id,
-            )
-            await session.commit()
-        await progress(_TOTAL_STAGES, _TOTAL_STAGES, f"research_code_run:{run.status}")
-        if ok:
-            return JobResult(status="succeeded", result_ref=run_id)
-        return _failed_result(run_id, error_code or RUNTIME_ERROR, error_summary or "")
+                        async with self._session_maker() as session:
+                            await FeatureSnapshotRepository(session).publish(snapshot)
+                            await session.commit()
+                        output_snapshot_id = snapshot.snapshot_id
+                    except QualityGateError as exc:
+                        ok = False
+                        error_code = QUALITY_GATE_FAILED
+                        error_summary = f"输出质量门未通过,拒绝入库: {exc}"
+
+            async with self._session_maker() as session:
+                run_repo = ResearchCodeRunRepository(session)
+                run = await run_repo.mark_terminal(
+                    run_id,
+                    status="succeeded" if ok else "failed",
+                    error_code=error_code,
+                    error_summary=error_summary,
+                    exit_code=result.exit_code,
+                    timed_out=result.timed_out,
+                    oom_killed=result.oom_killed,
+                    usage=usage,
+                    metrics=metrics,
+                    scores_checksum=outputs.scores_checksum,
+                    mount_manifest_checksum=mount.manifest_checksum,
+                    dataset_release_checksums=release_checksums,
+                    output_snapshot_id=output_snapshot_id,
+                )
+                await session.commit()
+            await progress(_TOTAL_STAGES, _TOTAL_STAGES, f"research_code_run:{run.status}")
+            if ok:
+                return JobResult(status="succeeded", result_ref=run_id)
+            return _failed_result(run_id, error_code or RUNTIME_ERROR, error_summary or "")
 
     # ---- 内部 -------------------------------------------------------------
 

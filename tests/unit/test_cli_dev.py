@@ -24,6 +24,7 @@ def _settings(**overrides: Any) -> Settings:
         "mcp_transport": "streamable-http",
         "mcp_host": "127.0.0.1",
         "mcp_port": 18766,
+        "research_sandbox_cleanup_on_dev": False,
         "worker_shutdown_grace_seconds": 0,
     }
     base.update(overrides)
@@ -38,7 +39,7 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
 
     ctx = MagicMock()
     # issue #544:settings 必须显式关掉 MCP 与 `.env` 读取,否则会真的拉起子进程。
-    ctx.obj = _settings(mcp_enabled=False)
+    ctx.obj = _settings(mcp_enabled=False, research_sandbox_cleanup_on_dev=True)
     threads: list[tuple[MagicMock, dict[str, object]]] = []
 
     def _thread_factory(*_: object, **kwargs: object) -> MagicMock:
@@ -52,6 +53,10 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
         patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
         patch("finboard_app.cli._spawn_dev_worker") as spawn_worker,
         patch("finboard_app.cli._stop_dev_process"),
+        patch(
+            "finboard_backtest.research_sandbox.mount_retention.collect_idle_mounts",
+            side_effect=RuntimeError("filesystem unavailable"),
+        ) as cleanup,
         patch("finboard_app.cli.threading.Thread", side_effect=_thread_factory),
         patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt) as serve,
         pytest.raises(KeyboardInterrupt),
@@ -67,6 +72,7 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
     frontend_thread.join.assert_called_once_with(timeout=1.0)
     serve.assert_called_once_with(ctx, host="127.0.0.1", port=8000, reload=False)
     spawn_worker.assert_called_once_with()
+    cleanup.assert_called_once()
 
 
 @pytest.mark.unit
