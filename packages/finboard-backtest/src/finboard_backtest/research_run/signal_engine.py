@@ -2212,6 +2212,7 @@ async def iter_decision_load_contexts(
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
+    process_min_symbols: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
     series_provider: FactorSeriesProvider | None = None,
     suspension_view: SuspensionView | None = None,
@@ -2312,7 +2313,9 @@ async def iter_decision_load_contexts(
     # 池是纯性能优化:启动失败返回 None(#288 语义),矩阵预建随即降级进程内
     # 线程路径;multi_period 才启用池(#288 门槛,single_shot 维持线程路径)。
     pool: PriceFeatureProcessPool | None = None
-    if schedule is not None and process_workers > 0:
+    if schedule is not None and process_workers > 0 and (
+        process_min_symbols == 0 or len(provider.release.instruments) >= process_min_symbols
+    ):
         pool = await _start_period_feature_pool(provider, process_workers)
     await _release_trading_days(provider, trading_days_loader=trading_days_loader)
     # issue #450:预计算段进度帧(尽力而为)。首帧 0/N 之后到首个分块边界
@@ -2651,6 +2654,7 @@ async def iter_decision_inputs(
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
+    process_min_symbols: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
     series_provider: FactorSeriesProvider | None = None,
     suspension_view: SuspensionView | None = None,
@@ -2694,6 +2698,7 @@ async def iter_decision_inputs(
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
         process_workers=process_workers,
+        process_min_symbols=process_min_symbols,
         chunk_probe=chunk_probe,
         series_provider=series_provider,
         suspension_view=suspension_view,
@@ -2914,6 +2919,7 @@ class SignalEnginePipelineAdapter:
         release_provider_factory: ReleaseProviderFactory,
         snapshot_provider: FeatureSnapshotProvider,
         process_workers: int = 0,
+        process_min_symbols: int = 0,
         chunk_probe: LoadChunkProbe | None = None,
         series_provider: FactorSeriesProvider | None = None,
         suspension_view_factory: Callable[[], Awaitable[SuspensionView | None]]
@@ -2942,6 +2948,7 @@ class SignalEnginePipelineAdapter:
         # issue #288:multi_period 逐期价格特征使用的常驻进程池 worker 数
         # (settings ``research_price_feature_process_workers``;0 = 进程内)。
         self._process_workers = max(0, process_workers)
+        self._process_min_symbols = max(0, process_min_symbols)
         # issue #306:加载期分块探针(run status / cancel 轮询 + 进度上报)。
         self._chunk_probe = chunk_probe
         # issue #450:预计算段 phase 进度上报器(只写 phase 文本,与探针
@@ -3111,6 +3118,7 @@ class SignalEnginePipelineAdapter:
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
                 process_workers=self._process_workers,
+                process_min_symbols=self._process_min_symbols,
                 chunk_probe=self._chunk_probe,
                 series_provider=self._series_provider,
                 suspension_view=suspension_view,
@@ -3502,17 +3510,17 @@ class SignalEnginePipelineAdapter:
         return report
 
 
-def _resolve_period_feature_process_workers(
+def _resolve_period_feature_process_config(
     settings_factory: Callable[[], Any] | None,
-) -> int:
-    """从 settings 解析 research 逐期价格特征进程池 worker 数(issue #288)。
+) -> tuple[int, int]:
+    """从 settings 解析价格特征进程池 worker 数及启用进程池的标的数门槛。
 
     ``research_price_feature_process_workers``(默认 4,0 = 关闭);settings
     工厂缺失 / 抛错 / 返回 None 一律按 0(进程内协程路径)处理 —— 该配置
     只是性能开关,解析失败不能阻断 run 入口。
     """
     if settings_factory is None:
-        return 0
+        return 0, 0
     try:
         settings = settings_factory()
     except Exception:
@@ -3520,14 +3528,15 @@ def _resolve_period_feature_process_workers(
             "research_run.process_workers_settings_unavailable",
             message="settings 工厂抛错,逐期价格特征多进程关闭",
         )
-        return 0
+        return 0, 0
     if settings is None:
-        return 0
+        return 0, 0
     try:
         value = int(getattr(settings, "research_price_feature_process_workers", 0) or 0)
+        minimum = int(getattr(settings, "research_price_feature_process_min_symbols", 0) or 0)
     except (TypeError, ValueError):
-        return 0
-    return max(0, value)
+        return 0, 0
+    return max(0, value), max(0, minimum)
 
 
 def build_signal_engine_adapter_factory(
@@ -3738,11 +3747,15 @@ def build_signal_engine_adapter_factory(
                 retryable=False,
             )
 
+        process_workers, process_min_symbols = _resolve_period_feature_process_config(
+            settings_factory
+        )
         return SignalEnginePipelineAdapter(
             manifest=manifest,
             release_provider_factory=_release_factory,
             snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
-            process_workers=_resolve_period_feature_process_workers(settings_factory),
+            process_workers=process_workers,
+            process_min_symbols=process_min_symbols,
             chunk_probe=chunk_probe,
             series_provider=_series_provider,  # type: ignore[arg-type]
             suspension_view_factory=_suspension_view_factory,

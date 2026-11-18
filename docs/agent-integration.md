@@ -1,5 +1,7 @@
 # 外部 Agent 接入(#519)
 
+Docker 研究版可在 Windows 安装包目录运行 `finboard setup --client codex`，或将客户端改为 `dsh`、`opencode`。安装器保存客户端独立凭据并安装本版 Skill。默认 `readonly`，需要写课题或运行研究时明确选择 `--preset topic-writer`。详见[研究版安装与接入](research-edition.md)。
+
 FinDashboard(缩写 `finboard`)不内置 LLM。研究 Agent 由**外部 Harness** 承担:
 Codex、DeepSeek Harness、ZCode、外部 OpenCode,或任何支持 streamable-http /
 stdio 的 MCP 客户端。Harness 通过 `packages/finboard-mcp` 的研究 MCP 工具工作,

@@ -3,6 +3,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Menu, Moon, Sun, ChevronLeft, ChevronRight, AlertTriangle } from "lucide-react";
 import { api } from "@/lib/api";
+import { RESEARCH_EDITION } from "@/lib/edition";
 import { useWebSocket } from "@/lib/ws";
 import { useTheme } from "@/components/ui/theme-provider";
 import { StatusDot } from "@/components/ui/status-badge";
@@ -176,7 +177,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
       >
         <SidebarContent collapsed={collapsed} />
-        <SystemStatus collapsed={collapsed} />
+        {!RESEARCH_EDITION && <SystemStatus collapsed={collapsed} />}
         <div className="border-t border-border p-2">
           <Button
             variant="ghost"
@@ -206,7 +207,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <SheetTitle className="sr-only">{tl({ zh: "导航菜单", en: "Navigation menu" })}</SheetTitle>
                 <div className="flex h-full flex-col bg-card">
                   <SidebarContent collapsed={false} onNavigate={() => setMobileOpen(false)} />
-                  <SystemStatus />
+                  {!RESEARCH_EDITION && <SystemStatus />}
                 </div>
               </SheetContent>
             </Sheet>

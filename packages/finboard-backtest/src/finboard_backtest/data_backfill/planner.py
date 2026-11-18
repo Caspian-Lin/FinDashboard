@@ -1024,7 +1024,16 @@ async def _resolve_item_types(
     if not item_symbols:
         return {}
     if scope.types:
-        return {code: scope.types.get(code, "unknown") for code in item_symbols}
+        extra_codes = tuple(code for code in item_symbols if code not in scope.types)
+        extra_types = (
+            await _instrument_rows(session, extra_codes)
+            if extra_codes and len(extra_codes) <= _MAX_SYMBOL_FILTER
+            else {}
+        )
+        return {
+            code: scope.types.get(code, extra_types.get(code, "unknown"))
+            for code in item_symbols
+        }
     if len(item_symbols) <= _MAX_SYMBOL_FILTER:
         return await _instrument_rows(session, item_symbols)
     return {}

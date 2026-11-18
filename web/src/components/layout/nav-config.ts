@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import type { LocalizedText } from "@/i18n";
+import { RESEARCH_EDITION } from "@/lib/edition";
 import {
   Home,
   Database,
@@ -97,4 +98,7 @@ export const navGroups: NavGroup[] = [
       { to: "/settings", label: { zh: "设置", en: "Settings" }, icon: Settings },
     ],
   },
-];
+].filter((group) => !RESEARCH_EDITION || !group.restricted).map((group) => ({
+  ...group,
+  items: group.items.filter((item) => !RESEARCH_EDITION || !["/settings", "/research/simulation"].includes(item.to)),
+}));

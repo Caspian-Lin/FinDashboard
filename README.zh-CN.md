@@ -126,6 +126,8 @@ MCP 注册表不存在下单、撤单、改持仓、连接券商、探测凭证�
 
 ## 快速开始
 
+Windows 用户可以从 [GitHub Releases](https://github.com/Caspian-Lin/FinDashboard/releases) 下载 Docker 研究版。在解压目录运行 `finboard setup --client codex`，也可选择 `dsh` 或 `opencode`。合成入门包支持离线完成首次研究。安装、数据准备、升级和备份见[研究版指南](docs/research-edition.md)。
+
 前置条件：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js 18+、PostgreSQL 16。
 
 ```bash
