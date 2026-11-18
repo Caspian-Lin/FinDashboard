@@ -67,7 +67,12 @@ function Install-Dsh {
     $path = Join-Path $profileRoot "cordis.patch.yml"
     $existing = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { "" }
     $existing = [regex]::Replace($existing, '(?ms)^# BEGIN FINDASHBOARD\r?\n.*?^# END FINDASHBOARD\r?\n?', "")
-    if ($existing.Trim() -ne "" -and $existing -notmatch '(?m)^-\s') {
+    $withoutComments = [regex]::Replace($existing, '(?m)^[ \t]*#.*$', "").Trim()
+    if ($withoutComments -eq "[]") {
+        $existing = [regex]::Replace($existing, '(?m)^[ \t]*\[\][ \t]*\r?$', "")
+        $withoutComments = ""
+    }
+    if ($withoutComments -ne "" -and $existing -notmatch '(?m)^-\s') {
         throw "DSH patch must be a YAML list. See research edition documentation."
     }
     $cliArgs = ConvertTo-Json -Compress -InputObject @($BridgeArgs + "-PrintToken")

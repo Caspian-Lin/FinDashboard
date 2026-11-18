@@ -4,15 +4,15 @@
 
 ## 安装与接入
 
-从 [GitHub Releases](https://github.com/Caspian-Lin/FinDashboard/releases) 下载 `FinDashboard-research-windows-amd64.zip`，解压后在该目录打开终端。核对 Release 附带的 `SHA256SUMS` 后运行：
+从 [GitHub Releases](https://github.com/Caspian-Lin/FinDashboard/releases) 下载 `FinDashboard-research-windows-amd64.zip`，解压后在该目录打开终端。核对 Release 附带的 `SHA256SUMS`，然后运行安装命令。
 
 ```powershell
 .\finboard.cmd setup --client codex
 ```
 
-OpenCode 用 `--client opencode`。DSH 用 `--client dsh`，默认写入 `desktop` profile，其他 profile 可用 `--profile headless` 等参数。DSH 首次运行时会创建 profile；安装后在 DSH 中打开命令输出的工作目录来加载 Skill。
+OpenCode 用 `--client opencode`。DSH 用 `--client dsh`，默认写入 `desktop` profile，其他 profile 可用 `--profile headless` 等参数。DSH 首次运行时会创建 profile。安装后在 DSH 中打开命令输出的工作目录来加载 Skill。
 
-安装器启动数据库、应用迁移、Web、研究 worker 与 HTTP MCP，并验证所签发凭据可以初始化 MCP。Codex 使用本地插件市场，OpenCode 使用本机 MCP 配置，DSH 使用当前 profile 的配置补丁。三个客户端都使用随包发布的 `finboard-research` Skill。首次接入默认 `readonly`。需要写课题、提交研究运行或提交研究代码时，在安装器中明确选择 `topic-writer`：
+安装器启动数据库、应用迁移、Web、研究 worker 与 HTTP MCP，并验证所签发凭据可以初始化 MCP。Codex 使用本地插件市场，OpenCode 使用本机 MCP 配置，DSH 使用当前 profile 的配置补丁。三个客户端都使用随包发布的 `finboard-research` Skill。首次接入默认 `readonly`。需要写课题、提交研究运行或提交研究代码时，在安装器中明确选择 `topic-writer`。
 
 ```powershell
 .\finboard.cmd setup --client codex --preset topic-writer
@@ -33,7 +33,7 @@ Web 默认入口为 `http://127.0.0.1:8176/`，MCP 为同端口的 `/mcp`。端�
 
 ### 离线入门包
 
-从同一 Release 单独下载 `synthetic-starter-v1.zip`。导入和样例研究可以在数据源离线时进行：
+从同一 Release 单独下载 `synthetic-starter-v1.zip`。导入和样例研究可以在数据源离线时进行。
 
 ```powershell
 .\finboard.cmd import --bundle .\synthetic-starter-v1.zip
@@ -79,6 +79,7 @@ GitHub Actions 构建研究镜像并在空库验证迁移、HTTP MCP、离线入
 | 计量项 | 基线 | 研究版 |
 | --- | ---: | ---: |
 | PostgreSQL linux/amd64 冷拉取压缩层 | 161,363,956 字节（bookworm） | 116,235,896 字节（alpine） |
+| 必需镜像去重压缩层总量（本地复压估计） | 348,853,760 字节 | 332,113,714 字节 |
 | 已有库启动至 HTTP MCP 响应 | 17.40 秒 | 15.89 秒 |
 | 入门包复核及登记 | 8.63 秒 | 8.56 秒 |
 | 入队请求往返 | 4.14 秒 | 3.47 秒 |
