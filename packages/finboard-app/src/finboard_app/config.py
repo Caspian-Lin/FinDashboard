@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     # 池在一次加载期内常驻并复用(max_tasks_per_child 摊销 Windows spawn 开销),
     # 0 表示沿用进程内协程池(单核,旧行为)。只影响研究/回测域。
     research_price_feature_process_workers: int = Field(default=4, ge=0, le=64)
+    research_price_feature_process_min_symbols: int = Field(default=0, ge=0)
 
     # ---- 回测 strategy 形态异步化(issue #189) ----
     # backtest_run(strategy 形态)自动切换异步的估算工作量阈值:工作量 ≈

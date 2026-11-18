@@ -1,5 +1,8 @@
 # FinBoard MCP 工具契约(详细)
 
+Docker 研究版沿用下列工具与授权。安装器默认选择 `readonly`，需要写课题或启动研究时明确选择
+`topic-writer`。`synthetic-starter-v1` 是离线合成行情发布，引用其运行结果时须标注合成来源。
+
 本文件列出研究 Agent(外部 Harness)可用的全部 MCP 工具,**工具名一律写真实
 注册名 `finboard_<family>_<operation>`**;家族标题里的 `finboard_<family>_*`
 只是分组。审计文档里的 `finboard.research.*` 是审计事件名,与工具名不是一回事,

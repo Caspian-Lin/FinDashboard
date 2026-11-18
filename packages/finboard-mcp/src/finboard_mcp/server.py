@@ -127,6 +127,9 @@ data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读�
 完整创建 / 吊销 / 预设 / TLS 边界见 docs/mcp-client-auth.md。
 
 == 研究流程全景 ==
+Docker 研究版离线入门发布 synthetic-starter-v1 仅含合成数据。引用这份发布的结果
+必须标明合成数据来源,不得作为真实市场证据。部署与数据导入见 docs/research-edition.md。
+
 数据获取(akshare/tushare)→ 因子分析(因子实验室)→ 策略规格(无代码版本化)→
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
