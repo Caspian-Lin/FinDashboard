@@ -143,6 +143,8 @@ make dev
 
 Open `http://localhost:5173`. The trading console uses a **Mock broker** by default. Configure database credentials in `.env`; do not enable QMT until the machine-verification gates in the project roadmap are complete.
 
+`make dev` reclaims eligible research sandbox inputs after more than 30 days of inactivity. See the [development guide](docs/dev-guide.md#4-一键启动开发环境) for retention and the opt-out setting.
+
 Useful checks:
 
 ```bash

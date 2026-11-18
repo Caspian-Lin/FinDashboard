@@ -188,6 +188,7 @@ class Settings(BaseSettings):
     research_sandbox_docker_bin: str = "docker"
     # run workspace 根目录:<root>/<RCR-id>/{code,data,out,stdout.txt,...}。
     research_sandbox_workspace_root: str = "data_cache/research_sandbox"
+    research_sandbox_cleanup_on_dev: bool = True
     # 输出质量门(issue #217):NaN 比例上限 / 覆盖率下限,不合格拒绝把
     # scores 落库为 feature snapshot(run failed=quality_gate_failed,
     # 错误信息指明阈值)。
