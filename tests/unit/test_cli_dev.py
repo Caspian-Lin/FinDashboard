@@ -269,7 +269,8 @@ def test_ensure_sandbox_image_noop_when_image_present() -> None:
 
 
 @pytest.mark.unit
-def test_ensure_sandbox_image_builds_when_missing() -> None:
+@pytest.mark.parametrize("error_prefix", ["Error response from daemon:", "Error:"])
+def test_ensure_sandbox_image_builds_when_missing(error_prefix: str) -> None:
     """镜像缺失时用与 CI 同源的 Dockerfile 自动构建。"""
     from finboard_app.cli import _ensure_sandbox_image
 
@@ -277,7 +278,8 @@ def test_ensure_sandbox_image_builds_when_missing() -> None:
     settings.research_sandbox_enabled = True
     settings.research_sandbox_docker_bin = "docker"
     settings.research_sandbox_image = "finboard-research-sandbox:0.3.0"
-    results = [MagicMock(returncode=1), MagicMock(returncode=0)]
+    missing = f"{error_prefix} No such image: {settings.research_sandbox_image}\n"
+    results = [MagicMock(returncode=1, stderr=missing), MagicMock(returncode=0)]
     with patch("finboard_app.cli.subprocess.run", side_effect=results) as run:
         assert _ensure_sandbox_image(settings) is True
     assert run.call_count == 2
@@ -285,6 +287,38 @@ def test_ensure_sandbox_image_builds_when_missing() -> None:
     assert build_cmd[0:2] == ["docker", "build"]
     assert "docker/research-sandbox/Dockerfile" in build_cmd
     assert "finboard-research-sandbox:0.3.0" in build_cmd
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "permission denied while trying to connect to the docker API at "
+        "npipe:////./pipe/dockerDesktopLinuxEngine",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+        "Error response from daemon: invalid reference format",
+        "",
+    ],
+)
+def test_ensure_sandbox_image_skips_build_when_inspect_fails(
+    stderr: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from finboard_app.cli import _ensure_sandbox_image
+
+    settings = MagicMock()
+    settings.research_sandbox_enabled = True
+    settings.research_sandbox_docker_bin = "docker"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.3.0"
+    with patch(
+        "finboard_app.cli.subprocess.run", return_value=MagicMock(returncode=1, stderr=stderr)
+    ) as run:
+        assert _ensure_sandbox_image(settings) is False
+
+    run.assert_called_once()
+    output = capsys.readouterr()
+    assert "不在本机" not in output.out + output.err
+    assert "跳过自动构建" in output.err
+    assert (stderr or "docker image inspect 退出码 1") in output.err
 
 
 @pytest.mark.unit
@@ -296,9 +330,11 @@ def test_ensure_sandbox_image_build_failure_warns_not_raises() -> None:
     settings.research_sandbox_enabled = True
     settings.research_sandbox_docker_bin = "docker"
     settings.research_sandbox_image = "finboard-research-sandbox:0.3.0"
-    results = [MagicMock(returncode=1), MagicMock(returncode=2)]
-    with patch("finboard_app.cli.subprocess.run", side_effect=results):
+    missing = f"Error response from daemon: No such image: {settings.research_sandbox_image}\n"
+    results = [MagicMock(returncode=1, stderr=missing), MagicMock(returncode=2)]
+    with patch("finboard_app.cli.subprocess.run", side_effect=results) as run:
         assert _ensure_sandbox_image(settings) is False
+    assert run.call_count == 2
 
 
 @pytest.mark.unit
