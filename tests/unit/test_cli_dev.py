@@ -265,7 +265,24 @@ def test_ensure_sandbox_image_noop_when_image_present() -> None:
     ) as run:
         assert _ensure_sandbox_image(settings) is False
     assert run.call_count == 1
-    assert run.call_args.args[0][:3] == ["docker", "image", "inspect"]
+    assert run.call_args.args[0] == ["docker", "image", "inspect", "--", settings.research_sandbox_image]
+
+
+@pytest.mark.unit
+def test_ensure_sandbox_image_does_not_build_digest_reference(capsys: pytest.CaptureFixture[str]) -> None:
+    from finboard_app.cli import _ensure_sandbox_image
+
+    settings = MagicMock()
+    settings.research_sandbox_enabled = True
+    settings.research_sandbox_docker_bin = "docker"
+    settings.research_sandbox_image = f"finboard-research-sandbox@sha256:{'a' * 64}"
+    missing = f"Error response from daemon: No such image: {settings.research_sandbox_image}\n"
+    with patch(
+        "finboard_app.cli.subprocess.run", return_value=MagicMock(returncode=1, stderr=missing)
+    ) as run:
+        assert _ensure_sandbox_image(settings) is False
+    run.assert_called_once()
+    assert "docker pull" in capsys.readouterr().err
 
 
 @pytest.mark.unit
