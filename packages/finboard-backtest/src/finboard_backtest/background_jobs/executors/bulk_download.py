@@ -70,9 +70,11 @@ class BulkDownloadExecutor:
         *,
         session_maker: async_sessionmaker[AsyncSession],
         settings_factory: SettingsFactory,
+        require_matching_cache_source: bool = False,
     ) -> None:
         self._session_maker = session_maker
         self._settings_factory = settings_factory
+        self._require_matching_cache_source = require_matching_cache_source
 
     async def execute(
         self,
@@ -189,7 +191,12 @@ class BulkDownloadExecutor:
             source, instruments, self._settings_factory, job_id=job.job_id
         )
         _validate_tushare_scope(provider_name, instruments)
-        provider = build_bar_provider(provider_name, self._settings_factory)
+        if self._require_matching_cache_source and provider_name == "tushare":
+            provider = build_bar_provider(
+                provider_name, self._settings_factory, allow_foreign_cache=False
+            )
+        else:
+            provider = build_bar_provider(provider_name, self._settings_factory)
 
         sym_objs = [make_symbol(ins.code) for ins in instruments]
         end = date.today()

@@ -109,11 +109,39 @@ $skillEntry
     Write-Host "For DSH skills, open this project folder: $workspace"
 }
 
+function Invoke-ClientChange([scriptblock]$Action) {
+    $lockPath = Join-Path $Root "$Client.lock"
+    try {
+        $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    } catch [IO.IOException] {
+        throw "Another $Client credential operation is in progress. Retry after it completes."
+    }
+    try { & $Action } finally { $lock.Dispose() }
+}
+
+function Complete-ClientRotation([string]$Path, $Credential) {
+    if (!$Credential.pending_revoke_id) { return }
+    [void](Invoke-Operator "client-revoke" (@{client_id = $Credential.pending_revoke_id} | ConvertTo-Json -Compress))
+    $Credential.PSObject.Properties.Remove("pending_revoke_id")
+    Write-File $Path ($Credential | ConvertTo-Json -Compress)
+}
+
 function Configure-Client {
+    Invoke-ClientChange { Set-ClientCredential }
+}
+
+function Set-ClientCredential {
     $path = Join-Path $Root "$Client.json"
     $old = if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } else { $null }
     $preset = if ($Options["--preset"]) { $Options["--preset"] } elseif ($old) { $old.preset } else { "readonly" }
     if ($preset -notin @("readonly", "topic-writer")) { throw "Invalid credential preset." }
+    Complete-ClientRotation $path $old
+    # Finish client registration before changing the credential read by existing bridges.
+    switch ($Client) {
+        "codex" { Install-Codex }
+        "dsh" { Install-Dsh }
+        "opencode" { Install-OpenCode }
+    }
     $valid = $false
     if ($old -and $old.preset -eq $preset) {
         try { $valid = Test-Credential (Get-Plaintext $old.sealed) } catch { $valid = $false }
@@ -135,19 +163,33 @@ function Configure-Client {
             Add-Type -AssemblyName System.Security
             $sealed = [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect(
                 $Utf8.GetBytes($token), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser))
-            Write-File $path (@{client_id = $id; preset = $preset; sealed = $sealed} | ConvertTo-Json -Compress)
+            $credential = [PSCustomObject]@{client_id = $id; preset = $preset; sealed = $sealed}
+            if ($old) {
+                $credential | Add-Member -NotePropertyName pending_revoke_id -NotePropertyValue $old.client_id
+            }
+            Write-File $path ($credential | ConvertTo-Json -Compress)
         } catch {
-            [void](Invoke-Operator "client-revoke" (@{client_id = $id} | ConvertTo-Json -Compress))
-            throw
+            $failure = $_
+            try {
+                [void](Invoke-Operator "client-revoke" (@{client_id = $id} | ConvertTo-Json -Compress))
+            } catch {
+                Write-Warning "Could not revoke the unused new credential. Its token was not installed."
+            }
+            throw $failure
         }
-        if ($old) {
-            [void](Invoke-Operator "client-revoke" (@{client_id = $old.client_id} | ConvertTo-Json -Compress))
-        }
-    }
-    switch ($Client) {
-        "codex" { Install-Codex }
-        "dsh" { Install-Dsh }
-        "opencode" { Install-OpenCode }
+        Complete-ClientRotation $path $credential
     }
     Write-Host "FinDashboard is ready at $Endpoint. Reopen $Client to use the $preset credential."
+}
+
+function Revoke-Client {
+    Invoke-ClientChange {
+        $path = Join-Path $Root "$Client.json"
+        if (Test-Path -LiteralPath $path) {
+            $credential = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            Complete-ClientRotation $path $credential
+            [void](Invoke-Operator "client-revoke" (@{client_id = $credential.client_id} | ConvertTo-Json -Compress))
+            [IO.File]::Delete($path)
+        }
+    }
 }

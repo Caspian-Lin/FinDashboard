@@ -110,6 +110,7 @@ class TushareBarProvider(AkShareProvider):
         usage_file: str | Path = "data_cache/tushare_usage.json",
         max_cache_io_concurrency: int = 1,
         read_cache_max_bytes: int | None = None,
+        allow_foreign_cache: bool = True,
     ) -> None:
         super().__init__(
             cache_dir=cache_dir,
@@ -122,6 +123,7 @@ class TushareBarProvider(AkShareProvider):
             read_cache_max_bytes=read_cache_max_bytes,
         )
         self._client = client if client is not None else self._create_client(token)
+        self._allow_foreign_cache = allow_foreign_cache
         self._budget = budget or shared_tushare_budget(
             requests_per_minute=requests_per_minute,
             daily_request_limit=daily_request_limit,
@@ -152,7 +154,11 @@ class TushareBarProvider(AkShareProvider):
 
         effective_end = expected_last_bar_date(end)
         metadata = await self._cache.metadata_for(symbol, period, adjust)
-        if _is_foreign_cache(metadata) and metadata.covers(start, effective_end):
+        if (
+            self._allow_foreign_cache
+            and _is_foreign_cache(metadata)
+            and metadata.covers(start, effective_end)
+        ):
             # issue #257:异源缓存(如 akshare 同步的 ETF/指数)已完整覆盖
             # 请求区间时直接读出返回,不再视为全量缺口,也不浪费 tushare 预算。
             logger.info(
@@ -200,7 +206,11 @@ class TushareBarProvider(AkShareProvider):
             on_status("checking_cache")
         effective_end = expected_last_bar_date(end)
         metadata = await self._cache.metadata_for(symbol, period, adjust)
-        if _is_foreign_cache(metadata) and metadata.covers(start, effective_end):
+        if (
+            self._allow_foreign_cache
+            and _is_foreign_cache(metadata)
+            and metadata.covers(start, effective_end)
+        ):
             logger.info(
                 "tushare.foreign_cache_hit",
                 symbol=symbol.code,
@@ -262,7 +272,7 @@ class TushareBarProvider(AkShareProvider):
                     range_end,
                     source="tushare",
                 )
-        if not current and foreign:
+        if not current and foreign and self._allow_foreign_cache:
             logger.warning(
                 "tushare.foreign_cache_fallback",
                 symbol=symbol.code,
@@ -273,8 +283,8 @@ class TushareBarProvider(AkShareProvider):
             return cached
         return current
 
-    @staticmethod
     def _cache_fetch_ranges(
+        self,
         metadata: CacheMetadata | None,
         start: date,
         effective_end: date,
@@ -288,7 +298,11 @@ class TushareBarProvider(AkShareProvider):
             # issue #257:异源缓存完整覆盖时按零缺口处理(read-through,
             # 由调用方具名记 log);不完整覆盖仍视为全量缺口——对 tushare
             # 可服务的股票,重建纯 tushare 缓存的既有语义保持不变。
-            if _is_foreign_cache(metadata) and metadata.covers(start, effective_end):
+            if (
+                self._allow_foreign_cache
+                and _is_foreign_cache(metadata)
+                and metadata.covers(start, effective_end)
+            ):
                 return ()
             return ((start, effective_end),)
         if metadata.covers(start, effective_end):

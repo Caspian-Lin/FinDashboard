@@ -81,7 +81,6 @@ function Initialize-State {
     if (!(Test-Path -LiteralPath $env:FINBOARD_DB_SECRET_FILE)) {
         Write-File $env:FINBOARD_DB_SECRET_FILE (To-Hex (New-RandomBytes 32))
     }
-    Write-File $StatePath ($State | ConvertTo-Json -Compress)
     Write-File $Bridge ([IO.File]::ReadAllText((Join-Path $PSScriptRoot "mcp-bridge.ps1")))
 }
 
@@ -132,6 +131,7 @@ switch ($Action) {
         Initialize-State
         if ($env:FINBOARD_IMAGE -ne "finboard-research:local") { Invoke-Stack pull }
         Invoke-Stack up -d --wait
+        Write-File $StatePath ($State | ConvertTo-Json -Compress)
         Configure-Client
     }
     "start" { Invoke-Stack up -d --wait; Write-Host $Endpoint }
@@ -151,13 +151,6 @@ switch ($Action) {
         Invoke-Stack up -d --wait
     }
     "source-status" { Invoke-Operator "source-status" "" | ConvertTo-Json -Depth 6 }
-    "revoke" {
-        $path = Join-Path $Root "$Client.json"
-        if (Test-Path -LiteralPath $path) {
-            $old = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-            Invoke-Operator "client-revoke" (@{client_id = $old.client_id} | ConvertTo-Json -Compress)
-            [IO.File]::Delete($path)
-        }
-    }
+    "revoke" { Revoke-Client }
     default { throw "Unknown command. See finboard help." }
 }

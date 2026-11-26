@@ -78,11 +78,11 @@ export default function AgentConnect() {
                 zh: "在安装包目录运行一条命令，选用 Codex、DeepSeek Harness 或 OpenCode。接入后重新打开客户端。",
                 en: "Run setup from the installer folder, then reopen Codex, DeepSeek Harness, or OpenCode.",
               })}</p>
-              <CodeBlock>{"finboard setup --client codex\nfinboard import --bundle synthetic-starter-v1.zip"}</CodeBlock>
+              <CodeBlock>{".\\finboard.cmd setup --client codex\n.\\finboard.cmd import --bundle synthetic-starter-v1.zip"}</CodeBlock>
               <code className="text-xs">{window.location.origin}/mcp</code>
               <p className="text-sm">{tl({
-                zh: "默认只读。用 --preset topic-writer 创建课题并运行研究。自备 Tushare 数据时使用 finboard source-configure。",
-                en: "Setup defaults to read-only. Select --preset topic-writer to create topics and run research. Use finboard source-configure to bring your own Tushare data.",
+                zh: "默认只读。用 --preset topic-writer 创建课题并运行研究。自备 Tushare 数据时使用 .\\finboard.cmd source-configure。",
+                en: "Setup defaults to read-only. Select --preset topic-writer to create topics and run research. Use .\\finboard.cmd source-configure to bring your own Tushare data.",
               })}</p>
               <p className="text-sm">{tl({
                 zh: "研究代码执行沙箱默认关闭。首个研究使用内置因子和无代码策略。",

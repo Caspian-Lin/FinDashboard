@@ -6,6 +6,7 @@ on:
     paths:
       - docker/research/**
       - scripts/*research*.py
+      - scripts/*research*.ps1
       - packages/**
       - migrations/**
       - web/**
@@ -61,9 +62,17 @@ jobs:
             .tmp/synthetic-starter-v1.zip
             .tmp/research-smoke.json
 
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Windows installer failure recovery
+        shell: powershell
+        run: ./scripts/test_research_installer.ps1
+
   release:
     if: startsWith(github.ref, 'refs/tags/research-v')
-    needs: verify
+    needs: [verify, windows-installer]
     runs-on: ubuntu-latest
     permissions:
       contents: write

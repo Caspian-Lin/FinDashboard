@@ -385,7 +385,7 @@ class DataBackfillExecutor:
                 queue=job.queue,
                 payload={
                     "symbols": repair_symbols,
-                    "source": item.source,
+                    "source": item.source.strip().lower(),
                     "adjust": "qfq",
                 },
                 attempt=job.attempt,
@@ -446,7 +446,8 @@ class DataBackfillExecutor:
                     "symbols": symbols,
                     **(
                         {"publish_source": "tushare"}
-                        if support.release_kind == "multi_asset_mixed" and item.source == "tushare"
+                        if support.release_kind == "multi_asset_mixed"
+                        and item.source.strip().lower() == "tushare"
                         else {}
                     ),
                 },
@@ -925,6 +926,7 @@ class DataBackfillExecutor:
             return BulkDownloadExecutor(
                 session_maker=self._session_maker,
                 settings_factory=settings_factory,
+                require_matching_cache_source=True,
             )
         if kind == "quality_repair":
             return QualityRepairExecutor(

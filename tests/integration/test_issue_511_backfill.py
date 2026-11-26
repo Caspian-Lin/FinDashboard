@@ -685,6 +685,43 @@ class TestDedupe:
 
 
 class TestSourceIsolation:
+    @pytest.mark.parametrize("source", ["tushare", "Tushare"])
+    async def test_tushare_bars_reuses_only_same_source_coverage(
+        self, db_session: AsyncSession, calendar: None, source: str
+    ) -> None:
+        await _seed_release(
+            db_session,
+            release_id="DR-bars-mixed",
+            dataset="bars",
+            kind="bars",
+            source="mixed",
+            adjustment="qfq",
+            start=_SEED_START,
+            end=_SEED_END,
+            symbols=_SYMBOLS,
+        )
+        await _seed_release(
+            db_session,
+            release_id="DR-bars-tushare",
+            dataset="bars",
+            kind="bars",
+            source="tushare",
+            adjustment="qfq",
+            start=_SEED_START,
+            end=date(2024, 1, 31),
+            symbols=_SYMBOLS,
+        )
+        result = await _submit(
+            db_session,
+            _spec(dataset=CatalogDataset.BARS, source=source, adjustment="qfq"),
+            key="tushare-bars-source",
+        )
+        item = result.plan.items[0]
+        assert [entry.id for entry in item.covered_by] == ["DR-bars-tushare"]
+        assert item.missing_ranges == ((date(2024, 2, 1), item.end),)
+        assert item.action.value == "sync_publish"
+        assert any("不同的来源/复权口径" in warning for warning in item.warnings)
+
     async def test_different_adjustment_is_not_reused(
         self, db_session: AsyncSession, calendar: None
     ) -> None:
@@ -875,11 +912,18 @@ class TestBarsExecution:
         assert harness.calls["dataset_publish"][0]["publish_source"] == "tushare"
         assert set(harness.calls["dataset_publish"][0]["symbols"]) == set(requested)
 
+    @pytest.mark.parametrize("source", [None, "Tushare"])
     async def test_bars_sync_uses_contract_payload_and_publishes(
-        self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
+        self,
+        db_session: AsyncSession,
+        maker: async_sessionmaker[AsyncSession],
+        calendar: None,
+        source: str | None,
     ) -> None:
         result = await _submit(
-            db_session, _spec(dataset=CatalogDataset.BARS, adjustment="qfq"), key="bars-exec"
+            db_session,
+            _spec(dataset=CatalogDataset.BARS, adjustment="qfq", source=source),
+            key="bars-exec",
         )
         assert result.plan.items[0].action.value == "sync_publish"
         assert result.plan.items[0].symbols == _SYMBOLS
@@ -897,7 +941,7 @@ class TestBarsExecution:
         publish_payload = harness.calls["dataset_publish"][0]
         assert publish_payload["publish_source"] == "tushare"
         assert publish_payload["release_id"] == release_id_for(
-            "bars", result.request_id, "qfq"
+            "bars", result.request_id, "qfq", source
         )
         assert publish_payload["symbols"] == list(_SYMBOLS)
 
@@ -918,7 +962,9 @@ class TestBarsExecution:
             anomaly_symbols=("000001.SZ",),
         )
         result = await _submit(
-            db_session, _spec(dataset=CatalogDataset.BARS, adjustment="qfq"), key="bars-repair"
+            db_session,
+            _spec(dataset=CatalogDataset.BARS, adjustment="qfq", source="Tushare"),
+            key="bars-repair",
         )
         item = result.plan.items[0]
         assert item.action.value == "repair"
@@ -930,6 +976,7 @@ class TestBarsExecution:
         assert error is None, error
         assert job_result is not None
         assert harness.calls["quality_repair"][0]["symbols"] == ["000001.SZ"]
+        assert harness.calls["quality_repair"][0]["source"] == "tushare"
         # 覆盖不缺:不再重跑整窗 bulk_download。
         assert harness.calls["bulk_download"] == []
         assert len(harness.calls["dataset_publish"]) == 1
