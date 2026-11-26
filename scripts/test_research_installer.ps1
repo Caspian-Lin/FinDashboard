@@ -94,6 +94,7 @@ try {
             if ($args[3] -eq $failedStep) { $global:LASTEXITCODE = 1 }
         }
 
+        $previousExitCode = $global:LASTEXITCODE
         $previousEnvironment = @{}
         foreach ($name in @("FINBOARD_INSTALL_ROOT", "FINBOARD_IMAGE", "FINBOARD_DB_SECRET_FILE", "FINBOARD_PORT")) {
             $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -118,6 +119,12 @@ try {
             }
             foreach ($name in @("state.json", "postgres-password", "mcp-bridge.ps1")) {
                 [IO.File]::Delete((Join-Path $Root $name))
+            }
+            # GitHub Actions' PowerShell wrapper propagates the last native exit code.
+            if ($null -eq $previousExitCode) {
+                Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+            } else {
+                $global:LASTEXITCODE = $previousExitCode
             }
         }
     }
