@@ -488,7 +488,7 @@ async def run_factor_series_container(
     run_dir = workspace / f"FSC-{uuid.uuid4().hex[:12]}"
     _stage_series_code(run_dir, code, spec.params)
 
-    with use_mount(mount_override.root if mount_override else run_dir / "data"):
+    async with use_mount(mount_override.root if mount_override else run_dir / "data"):
         if mount_override is not None:
             _validate_mount_override(spec, mount_override)
             mount = mount_override
@@ -729,6 +729,12 @@ def _validate_mount_override(
             "mount_spec_mismatch",
             f"mount_override 缺少挂载清单: {mount.manifest_path}",
         )
+    for dataset in mount.datasets:
+        if dataset.row_count and not (mount.root / dataset.file).is_file():
+            raise SandboxError(
+                "mount_spec_mismatch",
+                f"mount_override 缺少已登记的数据文件: {dataset.file}",
+            )
 
 
 def _stage_series_code(

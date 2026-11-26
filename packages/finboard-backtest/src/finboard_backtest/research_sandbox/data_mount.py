@@ -469,15 +469,18 @@ async def filter_window_data_mount(
         )
     ceiling = _end_of_window(new_window_end)
 
-    with use_mount(baseline.root), use_mount(out_root):
+    if await asyncio.to_thread(baseline.root.resolve) == await asyncio.to_thread(out_root.resolve):
+        raise SandboxMountError("截断挂载目录须与基线挂载目录不同")
+    async with use_mount(baseline.root), use_mount(out_root):
         import pyarrow.compute as pc
 
-        await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
         contributions: list[MountDataset] = []
         universe: set[str] = set()
         for dataset in baseline.datasets:
             source = baseline.root / dataset.file
             if not source.exists():
+                if dataset.row_count:
+                    raise SandboxMountError(f"基线挂载缺少已登记的数据文件: {dataset.file}")
                 continue
             table = await asyncio.to_thread(pq.read_table, source)
             if "available_at" not in table.column_names:

@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+import errno
+import hashlib
 import json
 import os
 import re
-import stat
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import AsyncIterator, Iterator
+from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
+from typing import TextIO
+
+from finboard_backtest.research_sandbox.mount_cleanup_paths import (
+    UnsafeMountPathError,
+    pin_mount,
+    plain_stat,
+    unlink_input,
+)
 
 _IDLE_SECONDS = 30 * 24 * 60 * 60
 _LEASE = ".mount.lock"
@@ -35,31 +46,32 @@ _DATA_FILES = frozenset(
 )
 
 
-class UnsafeMountPathError(OSError):
-    """路径不是普通文件或目录, 或存在重解析点。"""
-
-
-def _plain_stat(path: Path, *, directory: bool = False) -> os.stat_result:
-    info = path.lstat()
-    expected = stat.S_ISDIR if directory else stat.S_ISREG
-    if (
-        not expected(info.st_mode)
-        or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
-        or (not directory and info.st_nlink != 1)
-    ):
-        raise UnsafeMountPathError(str(path))
-    return info
+class _MountBusyError(BlockingIOError):
+    """另一个进程正在使用或回收同一个物理挂载。"""
 
 
 @contextmanager
-def _lock(mount: Path) -> Iterator[None]:
-    path = mount / _LEASE
+def _open_regular(path: Path, flags: int, dir_fd: int | None) -> Iterator[int]:
     with suppress(FileNotFoundError):
-        _plain_stat(path)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        plain_stat(path, dir_fd=dir_fd)
+    fd = os.open(
+        path.name if dir_fd is not None else path,
+        flags | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=dir_fd,
+    )
     try:
-        if not os.path.samestat(os.fstat(fd), _plain_stat(path)):
+        if not os.path.samestat(os.fstat(fd), plain_stat(path, dir_fd=dir_fd)):
             raise UnsafeMountPathError(str(path))
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _lock(mount: Path, dir_fd: int | None = None) -> Iterator[None]:
+    path = mount / _LEASE
+    with _open_regular(path, os.O_CREAT | os.O_RDWR, dir_fd) as fd:
         try:
             if sys.platform == "win32":
                 import msvcrt
@@ -70,25 +82,32 @@ def _lock(mount: Path) -> Iterator[None]:
 
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            raise BlockingIOError(str(path)) from exc
+            if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                raise _MountBusyError(str(path)) from exc
+            raise
         yield
-    finally:
-        os.close(fd)
 
 
-@contextmanager
-def use_mount(mount: Path) -> Iterator[None]:
+@asynccontextmanager
+async def use_mount(mount: Path) -> AsyncIterator[None]:
     """从物化或读入开始持有锁, 成功结束时登记最后使用时间。"""
     mount.parent.mkdir(parents=True, exist_ok=True)
     mount = mount.parent.resolve(strict=True) / mount.name
     mount.mkdir(exist_ok=True)
-    _plain_stat(mount, directory=True)
-    with _lock(mount):
+    plain_stat(mount, directory=True)
+    with ExitStack() as stack:
+        while True:
+            try:
+                stack.enter_context(_lock(mount))
+            except _MountBusyError:
+                await asyncio.sleep(0.05)
+            else:
+                break
         state = mount / _STATE
         pending = mount / f"{_STATE}.tmp"
         for path in (state, pending):
             with suppress(FileNotFoundError):
-                _plain_stat(path)
+                plain_stat(path)
         pending.write_text("in_progress\n", encoding="ascii")
         pending.replace(state)
         yield
@@ -105,25 +124,40 @@ class MountCleanup:
     skipped: Counter[str] = field(default_factory=Counter)
 
 
+@dataclass(frozen=True)
+class _ContainerArchive:
+    bound_mount: Path
+    ended_at: float
+    manifest_checksum: str | None
+
+
 def _safe_dir(root: Path, path: Path) -> None:
     parts = path.relative_to(root).parts
-    _plain_stat(root, directory=True)
+    plain_stat(root, directory=True)
     for part in parts:
         root /= part
-        _plain_stat(root, directory=True)
+        plain_stat(root, directory=True)
 
 
-def _read_object(path: Path) -> dict[str, object]:
-    _plain_stat(path)
-    with path.open(encoding="utf-8") as source:
+@contextmanager
+def _read_text(path: Path, dir_fd: int | None) -> Iterator[TextIO]:
+    with (
+        _open_regular(path, os.O_RDONLY, dir_fd) as fd,
+        open(fd, encoding="utf-8", closefd=False) as source,
+    ):
+        yield source
+
+
+def _read_object(path: Path, dir_fd: int | None) -> dict[str, object]:
+    with _read_text(path, dir_fd) as source:
         item = json.load(source)
     if not isinstance(item, dict):
         raise ValueError("expected object")
     return item
 
 
-def _mount_files(manifest: Path) -> set[str]:
-    payload = _read_object(manifest)
+def _mount_files(manifest: Path, dir_fd: int | None) -> set[str]:
+    payload = _read_object(manifest, dir_fd)
     version = payload.get("version")
     datasets = payload.get("datasets")
     if version not in (2, 3) or not isinstance(datasets, list) or not datasets:
@@ -149,50 +183,140 @@ def _mount_files(manifest: Path) -> set[str]:
     return files
 
 
-def _last_used(mount: Path, files: set[str]) -> float | None:
+def _last_used(
+    mount: Path,
+    files: set[str],
+    dir_fd: int | None,
+    parent_fd: int | None,
+    cut_archive: _ContainerArchive | None,
+) -> float | None:
     state = mount / _STATE
     try:
-        state_mtime = _plain_stat(state).st_mtime
+        with _read_text(state, dir_fd) as source:
+            last_used = (
+                os.fstat(source.fileno()).st_mtime if source.read() == "finished\n" else None
+            )
     except FileNotFoundError:
-        return _legacy_finished_at(mount, files)
-    return state_mtime if state.read_text(encoding="ascii") == "finished\n" else None
-
-
-def _legacy_finished_at(mount: Path, files: set[str]) -> float | None:
-    # 旧版本只在容器返回后归档三个文件。原生 FSP/FSE 旧版没有终态证据。
-    if mount.name != "data" or not (
-        mount.parent.name.startswith(("RCR-", "FSC-")) or _DECISION.fullmatch(mount.parent.name)
-    ):
+        last_used = _legacy_finished_at(mount, dir_fd, parent_fd, cut_archive)
+    if last_used is None:
         return None
-    archive = mount.parent / "container.json"
-    try:
-        payload = _read_object(archive)
-        if type(payload.get("exit_code")) is not int or not payload.get("container_id"):
+    for name in (*files, _MANIFEST):
+        with suppress(FileNotFoundError):
+            if plain_stat(mount / name, dir_fd=dir_fd).st_mtime > last_used:
+                return None
+    return last_used
+
+
+def _legacy_finished_at(
+    mount: Path,
+    dir_fd: int | None,
+    parent_fd: int | None,
+    cut_archive: _ContainerArchive | None,
+) -> float | None:
+    # 旧版 RCR/FSC 容器使用唯一目录。RR 决策目录可复用, 旧进程不持有挂载锁。
+    archive = cut_archive
+    if mount.name == "data" and mount.parent.name.startswith(("RCR-", "FSC-")):
+        archive = _container_archive(mount.parent, parent_fd)
+    if archive is None or archive.bound_mount != mount:
+        return None
+    if archive.manifest_checksum:
+        # 构建端对 UTF-8 文本计算校验和, Windows 落盘回读统一换行。
+        with _read_text(mount / _MANIFEST, dir_fd) as source:
+            checksum = hashlib.sha256(source.read().encode("utf-8")).hexdigest()
+        if checksum != archive.manifest_checksum:
             return None
-        ended_at = max(
-            _plain_stat(mount.parent / name).st_mtime
-            for name in ("container.json", "stdout.txt", "stderr.txt")
-        )
+    return archive.ended_at
+
+
+def _container_archive(run: Path, dir_fd: int | None) -> _ContainerArchive | None:
+    try:
+        with _read_text(run / "container.json", dir_fd) as source:
+            payload = json.load(source)
+            ended_at = os.fstat(source.fileno()).st_mtime
+        if not isinstance(payload, dict):
+            return None
+        container = payload.get("container_id")
+        command = payload.get("command")
+        if (
+            type(payload.get("exit_code")) is not int
+            or not isinstance(container, str)
+            or not container
+            or not isinstance(command, list)
+        ):
+            return None
+        if any(
+            plain_stat(run / name, dir_fd=dir_fd).st_mtime > ended_at
+            for name in ("stdout.txt", "stderr.txt")
+        ):
+            return None
     except (FileNotFoundError, ValueError):
         return None
-    # 终态归档必须晚于全部输入, 拒绝已被重建或重新开始使用的挂载。
-    for name in (*files, _MANIFEST):
-        try:
-            if _plain_stat(mount / name).st_mtime > ended_at:
-                return None
-        except FileNotFoundError:
+    prefix = "type=bind,source="
+    suffix = ",target=/data,readonly"
+    sources = [
+        Path(argument[len(prefix) : -len(suffix)])
+        for flag, argument in pairwise(command)
+        if flag == "--mount"
+        and isinstance(argument, str)
+        and argument.startswith(prefix)
+        and argument.endswith(suffix)
+    ]
+    if len(sources) != 1 or not sources[0].is_absolute():
+        return None
+    checksum = payload.get("mount_manifest_checksum")
+    return _ContainerArchive(sources[0], ended_at, checksum if isinstance(checksum, str) else None)
+
+
+def _legacy_cut_archives(root: Path, runs: list[Path]) -> dict[Path, _ContainerArchive]:
+    archives: dict[Path, _ContainerArchive] = {}
+    for run in runs:
+        if not run.name.startswith("FSC-") or not _RUN.fullmatch(run.name):
             continue
-    return ended_at
+        try:
+            _safe_dir(root, run)
+            with pin_mount(run) as (dir_fd, _):
+                archive = _container_archive(run, dir_fd)
+        except OSError:
+            continue
+        if archive is None or not archive.manifest_checksum:
+            continue
+        mount = archive.bound_mount
+        if (
+            mount.parent.parent == root
+            and mount.parent.name.startswith("FSC-")
+            and _RUN.fullmatch(mount.parent.name)
+            and _CUT.fullmatch(mount.name)
+        ):
+            previous = archives.get(mount)
+            if previous is None or previous.ended_at < archive.ended_at:
+                archives[mount] = archive
+    return archives
 
 
-def _reclaim(root: Path, mount: Path, cutoff: float, report: MountCleanup) -> None:
+def _reclaim(
+    root: Path,
+    mount: Path,
+    cutoff: float,
+    report: MountCleanup,
+    cut_archive: _ContainerArchive | None = None,
+) -> None:
     report.scanned_mounts += 1
     try:
         _safe_dir(root, mount)
-        with _lock(mount):
-            _safe_dir(root, mount)
-            files = _mount_files(mount / _MANIFEST)
-            last_used = _last_used(mount, files)
+        manifest = mount / _MANIFEST
+        if plain_stat(manifest).st_mtime >= cutoff:
+            report.skipped["within_retention"] += 1
+            return
+        if (
+            cut_archive is None
+            and not (mount / _STATE).exists()
+            and (mount.name != "data" or not mount.parent.name.startswith(("RCR-", "FSC-")))
+        ):
+            report.skipped["completion_unconfirmed"] += 1
+            return
+        with pin_mount(mount) as (dir_fd, parent_fd), _lock(mount, dir_fd):
+            files = _mount_files(manifest, dir_fd)
+            last_used = _last_used(mount, files, dir_fd, parent_fd, cut_archive)
             if last_used is None:
                 report.skipped["completion_unconfirmed"] += 1
                 return
@@ -203,9 +327,7 @@ def _reclaim(root: Path, mount: Path, cutoff: float, report: MountCleanup) -> No
             for name in sorted(files):
                 try:
                     _safe_dir(root, mount)
-                    path = mount / name
-                    size = _plain_stat(path).st_size
-                    path.unlink()
+                    size = unlink_input(mount / name, dir_fd)
                 except FileNotFoundError:
                     continue
                 except UnsafeMountPathError:
@@ -223,7 +345,7 @@ def _reclaim(root: Path, mount: Path, cutoff: float, report: MountCleanup) -> No
                 report.skipped["no_files_reclaimed"] += 1
     except UnsafeMountPathError:
         report.skipped["unsafe_path"] += 1
-    except BlockingIOError:
+    except _MountBusyError:
         report.skipped["active_mount"] += 1
     except (FileNotFoundError, ValueError):
         report.skipped["unverified_manifest"] += 1
@@ -237,7 +359,7 @@ def collect_idle_mounts(root: Path, *, now: float | None = None) -> MountCleanup
     cutoff = (time.time() if now is None else now) - _IDLE_SECONDS
     try:
         root = root.resolve(strict=True)
-        _plain_stat(root, directory=True)
+        plain_stat(root, directory=True)
         runs = list(root.iterdir())
     except FileNotFoundError:
         report.skipped["root_missing"] += 1
@@ -246,6 +368,7 @@ def collect_idle_mounts(root: Path, *, now: float | None = None) -> MountCleanup
         report.skipped["root_unavailable"] += 1
         return report
 
+    cut_archives = _legacy_cut_archives(root, runs)
     for run in runs:
         if not _RUN.fullmatch(run.name):
             report.skipped["unrecognized_layout"] += 1
@@ -254,7 +377,7 @@ def collect_idle_mounts(root: Path, *, now: float | None = None) -> MountCleanup
             _safe_dir(root, run)
             for child in run.iterdir():
                 if child.name == "data" or _CUT.fullmatch(child.name):
-                    _reclaim(root, child, cutoff, report)
+                    _reclaim(root, child, cutoff, report, cut_archives.get(child))
                 elif run.name.startswith("RR-") and _DECISION.fullmatch(child.name):
                     try:
                         _safe_dir(root, child)

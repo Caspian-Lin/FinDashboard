@@ -510,7 +510,7 @@ async def run_predefined_factor_series(
     run_dir = workspace / f"FSP-{uuid.uuid4().hex[:12]}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    with use_mount(mount_override.root if mount_override else run_dir / "data"):
+    async with use_mount(mount_override.root if mount_override else run_dir / "data"):
         benchmark = benchmark_only_symbols
         industry: dict[str, str | None] | None = (
             dict(industry_groups) if industry_groups is not None else None
@@ -742,7 +742,7 @@ async def build_window_eval_bundle(
     workspace = Path(settings.research_sandbox_workspace_root)
     run_dir = workspace / f"FSE-{uuid.uuid4().hex[:12]}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    with use_mount(run_dir / "data"):
+    async with use_mount(run_dir / "data"):
         mount = await build_window_data_mount(
             providers=providers,
             window_start=spec.window_start,

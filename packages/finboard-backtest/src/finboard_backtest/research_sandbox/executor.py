@@ -310,7 +310,7 @@ class ResearchCodeRunExecutor:
                 await progress(_TOTAL_STAGES, _TOTAL_STAGES, "research_code_run:failed")
                 return _failed_result(run.run_id, STATIC_VALIDATION_FAILED, summary)
             await session.commit()
-        with use_mount(run_dir / "data"):
+        async with use_mount(run_dir / "data"):
             await progress(2, _TOTAL_STAGES, "research_code_run:mount")
 
             if payload.mode == MODE_FACTOR_SERIES:

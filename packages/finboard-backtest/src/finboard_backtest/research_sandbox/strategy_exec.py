@@ -220,7 +220,7 @@ class StrategySandboxCaller:
     ) -> StrategyDecisionOutcome:
         """单决策日:物化挂载(PIT + 权重回显 + 约束视图)→ 容器 decide。"""
         decision_dir = self.run_dir / f"D{decision_index:04d}"
-        with use_mount(decision_dir / "data"):
+        async with use_mount(decision_dir / "data"):
             try:
                 mount = await build_data_mount(
                     providers=self.providers,
