@@ -8,7 +8,7 @@ import json
 import stat
 import tempfile
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -71,7 +71,8 @@ def _read_bundle(bundle: Path, staging: Path) -> tuple[ResearchDatasetRelease, s
             target = staging.joinpath(*path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-        days = {date.fromisoformat(day) for day in index["trading_days"]}
+        calendar = [date.fromisoformat(day) for day in index["trading_days"]]
+        days = set(calendar)
     release = verify_dataset_release(staging / STARTER_ID)
     if (
         release.release_id != STARTER_ID
@@ -79,13 +80,17 @@ def _read_bundle(bundle: Path, staging: Path) -> tuple[ResearchDatasetRelease, s
         or release.release_checksum != index["release_checksum"]
         or not release.is_usable
         or release.symbol_codes() != {*STARTER_SYMBOLS, STARTER_BENCHMARK}
-        or not days or min(days) != release.start_date or max(days) != release.end_date
+        or not calendar or calendar != sorted(days)
+        or calendar[0] != release.start_date or calendar[-1] != release.end_date
         or any(item.row_count != len(days) for item in release.instruments)
     ):
         raise ValueError("starter_bundle_release_mismatch")
     for item in release.instruments:
         table = pq.read_table(staging / STARTER_ID / item.artifact_path, columns=["timestamp"])
-        if {stamp.date() for stamp in table["timestamp"].to_pylist()} != days:
+        timestamps = table["timestamp"].to_pylist()
+        if table.num_rows != item.row_count or [
+            stamp.date() if isinstance(stamp, datetime) else None for stamp in timestamps
+        ] != calendar:
             raise ValueError("starter_bundle_calendar_mismatch")
     return release, days
 

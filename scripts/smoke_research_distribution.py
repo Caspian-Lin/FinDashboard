@@ -153,6 +153,10 @@ def smoke(base: str, bundle: Path, *, restart: bool) -> dict[str, Any]:
 
     read_only = credential("readonly")
     writer = credential("topic-writer")
+    for audit_path in ("/api/research/audit", "/api/research/audit/coverage", "/api/research/audit/RA-unknown"):
+        assert request(base, audit_path, expected=401)["error"] == "unauthorized"
+        assert request(base, audit_path, token=read_only, expected=403)["error"] == "permission_denied"
+        assert request(base, audit_path, token=writer, expected=403)["error"] == "permission_denied"
     init = {
         "protocolVersion": "2025-06-18", "capabilities": {},
         "clientInfo": {"name": "research-edition-smoke", "version": "1"},

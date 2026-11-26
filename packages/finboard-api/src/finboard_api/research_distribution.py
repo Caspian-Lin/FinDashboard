@@ -59,9 +59,8 @@ def create_app() -> FastAPI:
     sessions = session_factory(engine)
     # 单机分发通过 Compose 的 loopback 端口进入。独立 MCP 入口仍走原远程门禁。
     mcp = build_mcp_server().streamable_http_app(json_response=True, stateless_http=True)
-    authenticated_mcp = wrap_with_bearer_auth(
-        mcp, resolver=DatabaseIdentityResolver(sessions), public_paths=(),
-    )
+    resolve_identity = DatabaseIdentityResolver(sessions)
+    authenticated_mcp = wrap_with_bearer_auth(mcp, resolver=resolve_identity, public_paths=())
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -84,12 +83,26 @@ def create_app() -> FastAPI:
     app.add_exception_handler(FinboardError, finboard_error_handler)  # type: ignore[arg-type]
 
     @app.middleware("http")
-    async def same_origin(
+    async def enforce_research_access(
         request: Request, call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         origin = request.headers.get("origin")
         if origin and origin != f"http://{request.url.netloc}":
             return JSONResponse({"error": "origin_denied"}, status_code=403)
+        path = request.url.path
+        audit_path = "/api/research/audit"
+        if request.method in {"GET", "HEAD"} and (
+            path == audit_path or path.startswith(audit_path + "/")
+        ):
+            scheme, _, token = request.headers.get("authorization", "").partition(" ")
+            token = token.strip()
+            identity = await resolve_identity(token) if scheme.lower() == "bearer" and token else None
+            if identity is None:
+                return JSONResponse(
+                    {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"},
+                )
+            if "audit.read" not in identity.scopes:
+                return JSONResponse({"error": "permission_denied"}, status_code=403)
         return await call_next(request)
 
     for router in (
