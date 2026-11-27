@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncGenerator
 from datetime import date
 from typing import Any, cast
@@ -294,6 +295,46 @@ class TestDecisionLoadPrefetch:
         assert any(
             set(decisions[4:]).issubset(set(batch)) for batch in released_daily
         )
+
+    async def test_aclose_unwinds_prefetch_when_covariance_thread_is_blocked(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        started = asyncio.Event()
+        released = asyncio.Event()
+        resume_thread = threading.Event()
+        loop = asyncio.get_running_loop()
+        real_covariance = signal_engine._timed_covariance
+        calls = 0
+        lock = threading.Lock()
+
+        def block_first_background_estimate(price_series: Any, stage: str) -> Any:
+            nonlocal calls
+            with lock:
+                calls += 1
+                block = calls == 5
+            if not block:
+                return real_covariance(price_series, stage)
+            loop.call_soon_threadsafe(started.set)
+            try:
+                if not resume_thread.wait(timeout=5):
+                    raise TimeoutError("测试未释放阻塞的协方差线程")
+                return real_covariance(price_series, stage)
+            finally:
+                loop.call_soon_threadsafe(released.set)
+
+        monkeypatch.setattr(signal_engine, "_timed_covariance", block_first_background_estimate)
+        _, _, stream = await _make_stream(tmp_path)
+        try:
+            await stream.__anext__()
+            await asyncio.wait_for(started.wait(), timeout=2)
+            await asyncio.wait_for(stream.aclose(), timeout=2)
+            assert _prefetch_tasks() == []
+            assert not released.is_set()
+        finally:
+            resume_thread.set()
+            await stream.aclose()
+            if started.is_set():
+                await asyncio.wait_for(released.wait(), timeout=2)
 
     async def test_skip_prefix_crossing_chunk_prefetches_only_suffix(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch

@@ -2631,6 +2631,8 @@ async def iter_decision_load_contexts(
         # issue #475:消费者提前关闭 / 下游抛错时,预取任务必须显式
         # cancel + await;否则其 gather 子任务可能继续读盘并把半批对象
         # 留在事件循环中,形成 task 泄漏和额外内存驻留。
+        # to_thread 已开始的原生估计可在异步包装关闭后完成。等待该线程退出
+        # 会让 stall watchdog 无法及时结束加载段。
         if prefetch_task is not None:
             task = prefetch_task
             prefetch_task = None
