@@ -7,9 +7,9 @@
 1. 从同一 Release 获取 MSI 与 `SHA256SUMS-desktop`，核对文件的 SHA-256 后安装并打开 FinDashboard Research。
 2. 启动 Docker Desktop。在管理窗口确认本机端口后点击「安装并启动」。默认端口为 `8276`。安装器核对归档校验和和已导入镜像身份，兼容 Docker 使用镜像配置摘要或 OCI 描述符摘要的两种存储方式。随后通过 Compose 的禁止拉取模式启动服务并迁移数据库。
 3. 点击「导入样例」，再打开「研究工作台」。在「数据基座」可查询 `synthetic-starter-v1` 及冻结发布校验和。在工作台使用合成候选 `FBDEMO01.SH` 至 `FBDEMO08.SH` 和基准 `FBDEMOIDX.SH`，按研究版指南中的周频样例保存、发布无代码策略并发起研究。
-4. 使用 Codex 时先选「只读」并点击「接入或切换」，按提示重开 Codex。需要让 Codex 创建课题或提交运行时，选择「课题与研究运行」并重新接入。管理窗口显示当前作用域和验连状态，旧凭据由安装器撤销。 [固定样例的输入与步骤](research-edition.md#离线入门包)
+4. 使用 Codex 时先选「只读」并点击「接入 Codex」，按提示重开 Codex。需要让 Codex 创建课题或提交运行时，选择「课题与研究运行」，再点击「切换预设」。管理窗口显示当前作用域和验连状态，旧凭据由安装器撤销。 [固定样例的输入与步骤](research-edition.md#离线入门包)
 
-「操作记录」显示命令的进度、退出码、耗时、脱敏输出及等价 PowerShell 命令。端口占用时填写其它本机端口。Docker 不可用时先恢复 Docker，再刷新状态并重试。归档校验失败时重新下载同一 Release 的 MSI。
+「运行诊断」显示进度、退出码和耗时。展开「日志与命令」可查看脱敏输出并复制等价 PowerShell 命令。端口占用时填写其他本机端口。Docker 不可用时先恢复 Docker，再刷新状态并重试。归档校验失败时重新下载同一 Release 的 MSI。
 
 研究工作台在独立的 WebView2 窗口使用本机研究端口。主机操作由管理窗口提供。桌面版的 Docker 项目默认为 `finboard-research-desktop`，在线 ZIP 使用 `finboard-research`。
 
