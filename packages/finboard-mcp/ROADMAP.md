@@ -678,6 +678,8 @@ L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决
 ## 研究验证与复核（#501–#505）
 
 新增run_diagnostics/run_compare/decision_projection/research_stress，REST与MCP同源；SQL加载前护栏覆盖单决策detail和导出。正式验证kind=research_spec冻结已发布multi_factor基线，复用候选/排名/组合/风险/撮合/账本与逐操作store；预热不计绩效，覆盖/成交尾段预检，已用最终窗口拒绝，揭盲执行前持久化，子run逐阶段传递worker进度/取消。
+新研究运行可显式冻结 `parameters.covariance_policy_version=lazy_effective_v2`，按目标覆盖决定是否计算首次协方差，并使用生效矩阵生成输入摘要。缺省和历史重放沿用原版本。
+
 压力plan/get/queue分离，成本/滑点/资金真实子运行；explicit_overrides_v1启用研究费率覆盖优先，保留免税资产和旧manifest回放。registry支持真实覆盖，新自动压力显式stress_schema=executed_v1；UI区分执行/失败/不支持/历史未知。2Bar延迟、订单簿冲击、参数邻域和正式规格非空参数网格仍unsupported，不为兼容放松门。
 操作规程与外置模型fixture评测见docs/research/verification-playbook.md；同规格窗口契约见docs/research/formal-validation-contract.md。#505只产出有限研究证据与负/不足结论，不开启模拟/影子/实盘。
 

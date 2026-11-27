@@ -72,6 +72,7 @@ from finboard_backtest.research_run.config_overrides import (
     section_overrides,
 )
 from finboard_backtest.research_run.contracts import (
+    LAZY_COVARIANCE_POLICY_VERSION,
     CapitalTierOutcome,
     DecisionBundle,
     DecisionLedgerView,
@@ -112,6 +113,14 @@ logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class DeferredCovariance:
+    """候选池估计的覆盖范围和按需求值入口。"""
+
+    tickers: frozenset[str]
+    evaluate: Callable[[], CovarianceEstimate | None]
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioDecisionInput:
     """一个决策时点的冻结研究输入,不含目标、订单、成交或持仓结果。"""
 
@@ -145,6 +154,7 @@ class PortfolioDecisionInput:
     close_series_provider: Callable[[Sequence[str]], Mapping[str, Sequence[float]]] | None = (
         None
     )
+    deferred_covariance: DeferredCovariance | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -205,14 +215,17 @@ class PortfolioDecisionInput:
         不能只拿最终 hex。
         """
 
+        return self._checksum_payload(self.covariance)
+
+    def _checksum_payload(self, covariance: CovarianceEstimate | None) -> dict[str, object]:
         covariance_payload: object = None
-        if self.covariance is not None:
+        if covariance is not None:
             covariance_payload = {
-                "tickers": self.covariance.tickers,
-                "matrix": self.covariance.matrix.tolist(),
-                "shrinkage": self.covariance.shrinkage,
-                "n_observations": self.covariance.n_observations,
-                "method": self.covariance.method,
+                "tickers": covariance.tickers,
+                "matrix": covariance.matrix.tolist(),
+                "shrinkage": covariance.shrinkage,
+                "n_observations": covariance.n_observations,
+                "method": covariance.method,
             }
         checksum_payload: dict[str, object] = {
             "business_date": self.business_date,
@@ -764,14 +777,13 @@ class PortfolioPipelineAdapter:
             if declared_factors
             else {}
         )
+        covariance = _covariance_with_target_coverage(item, current_weights=current_weights)
         built = build_portfolio(
             PortfolioBuildInput(
                 signals=signals,
                 method=allocation_method,
                 constraints=constraints,
-                covariance=_covariance_with_target_coverage(
-                    item, current_weights=current_weights
-                ),
+                covariance=covariance,
                 sleeve_map=item.sleeve_map,
                 disabled_symbols=item.disabled_symbols,
                 current_weights=current_weights,
@@ -931,9 +943,12 @@ class PortfolioPipelineAdapter:
         # persist 阶段直接拼接,artifact 落库不再对同一截面二次编码
         # (checksum 值不变:同一份文本的 sha256,回归测试逐字节钉死)。
         input_fragments: dict[str, str] = {}
-        input_checksum = canonical_json_digest(
-            item.checksum_payload, capture=input_fragments
-        )
+        if manifest.uses_lazy_effective_covariance:
+            checksum_payload = item._checksum_payload(covariance)
+            checksum_payload["covariance_policy_version"] = LAZY_COVARIANCE_POLICY_VERSION
+        else:
+            checksum_payload = item.checksum_payload
+        input_checksum = canonical_json_digest(checksum_payload, capture=input_fragments)
         evidence = ResearchPipelineEvidence(
             manifest_input_checksum=manifest.input_checksum,
             input_checksum=input_checksum,
@@ -1201,12 +1216,16 @@ def _covariance_with_target_coverage(
     (artifact 审计如实记录替换后的矩阵);触发场景此前必然拒绝整条 run,
     故不触发场景的行为逐位不变。
     """
+    deferred = item.deferred_covariance
     covariance = item.covariance
+    covered = deferred.tickers if deferred is not None else (
+        frozenset(covariance.tickers) if covariance is not None else frozenset()
+    )
     needed = {signal.symbol for signal in item.signals} | set(current_weights)
-    missing = needed if covariance is None else needed - set(covariance.tickers)
+    missing = needed - covered
     provider = item.close_series_provider
     if not missing or provider is None:
-        return covariance
+        return deferred.evaluate() if deferred is not None else covariance
     # signal_engine 反向导入本模块:模块级互相导入会构成环,惰性导入
     # (与 _features_by_source 同处理)。
     from finboard_backtest.research_run.signal_engine import _timed_covariance
@@ -1219,14 +1238,14 @@ def _covariance_with_target_coverage(
             missing_count=len(missing),
             resolved=len(series),
         )
-        return covariance
+        return deferred.evaluate() if deferred is not None else covariance
     rebuilt = _timed_covariance(series, "target_covariance_rebuild")
     if rebuilt is None:
         logger.warning(
             "research_run.covariance_coverage_rebuild_failed",
             needed=len(needed),
         )
-        return covariance
+        return deferred.evaluate() if deferred is not None else covariance
     logger.warning(
         "research_run.covariance_coverage_rebuilt",
         missing=sorted(missing)[:10],

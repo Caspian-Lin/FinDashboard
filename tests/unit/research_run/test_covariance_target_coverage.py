@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -33,6 +34,7 @@ import numpy.typing as npt
 import pytest
 import structlog
 
+from finboard_app.research_run_submission import ResearchRunSubmitInput
 from finboard_backtest.portfolio import (
     PSD_MIN_EIGENVALUE,
     AssetLotInfo,
@@ -49,7 +51,9 @@ from finboard_backtest.research_run import (
 from finboard_backtest.research_run import (
     signal_engine as signal_engine_module,
 )
+from finboard_backtest.research_run.contracts import LAZY_COVARIANCE_POLICY_VERSION
 from finboard_backtest.research_run.portfolio_pipeline import (
+    DeferredCovariance,
     PortfolioDecisionInput,
     PortfolioPipelineAdapter,
     _covariance_with_target_coverage,
@@ -236,6 +240,99 @@ def _diagonal(symbols: tuple[str, ...], *, variance: float = 0.0004) -> Covarian
     )
 
 
+def test_covariance_version_submission_and_fingerprint_are_explicit(manifest_factory) -> None:
+    original = manifest_factory()
+    assert not original.uses_lazy_effective_covariance
+    assert "covariance_policy_version" not in original.parameters
+    body = {
+        "idempotency_key": "fixture-version",
+        "strategy_id": "fixture",
+        "strategy_version": 1,
+        "dataset_release_ids": ["fixture-bars"],
+        "code_version": "abcdef0",
+        "initial_capital": 100000,
+        "requested_by": "fixture",
+    }
+    omitted = ResearchRunSubmitInput.model_validate(body)
+    null = ResearchRunSubmitInput.model_validate({
+        **body, "parameters": {"covariance_policy_version": None},
+    })
+    assert omitted.parameters == null.parameters == {}
+    explicit = ResearchRunSubmitInput.model_validate({
+        **body, "parameters": {"covariance_policy_version": LAZY_COVARIANCE_POLICY_VERSION},
+    })
+    updated = replace(original, parameters=explicit.parameters)
+    assert updated.uses_lazy_effective_covariance
+    assert updated.input_checksum != original.input_checksum
+    invalid = {"covariance_policy_version": "obsolete"}
+    with pytest.raises(ValueError, match="covariance_policy_version"):
+        ResearchRunSubmitInput.model_validate({**body, "parameters": invalid})
+    with pytest.raises(ValueError, match="covariance_policy_version"):
+        replace(original, parameters=invalid)
+
+
+def test_deferred_coverage_rebuild_skips_first_estimate() -> None:
+    series = {
+        "A.SH": _prices(40, seed=0), "B.SH": _prices(40, seed=3),
+        "Z.SH": _prices(40, seed=7),
+    }
+
+    def unexpected() -> CovarianceEstimate:
+        pytest.fail("successful target rebuild must skip the first estimate")
+
+    initial = _diagonal(("A.SH", "B.SH"))
+    eager = _item(covariance=initial, provider=lambda codes: {code: series[code] for code in codes})
+    lazy = replace(
+        eager, covariance=None,
+        deferred_covariance=DeferredCovariance(frozenset(initial.tickers), unexpected),
+    )
+    weights = {"Z.SH": 0.02}
+    result = _covariance_with_target_coverage(lazy, current_weights=weights)
+    expected = _covariance_with_target_coverage(eager, current_weights=weights)
+    assert result is not None
+    assert expected is not None
+    assert result.tickers == expected.tickers
+    assert result.matrix.tobytes() == expected.matrix.tobytes()
+
+
+@pytest.mark.parametrize("fallback", ["complete", "no_provider", "missing_data", "short"])
+def test_deferred_initial_estimate_runs_once_when_needed(fallback: str) -> None:
+    covariance = _diagonal(("A.SH", "B.SH"))
+    calls = 0
+
+    def evaluate() -> CovarianceEstimate:
+        nonlocal calls
+        calls += 1
+        return covariance
+
+    series = {
+        "A.SH": [10.0, 10.1], "B.SH": [10.0, 10.2], "Z.SH": [10.0, 10.3],
+    }
+    provider = None if fallback == "no_provider" else (
+        (lambda codes: {"A.SH": series["A.SH"]})
+        if fallback == "missing_data" else (lambda codes: {code: series[code] for code in codes})
+    )
+    item = replace(
+        _item(covariance=None, provider=provider),
+        deferred_covariance=DeferredCovariance(frozenset(covariance.tickers), evaluate),
+    )
+    weights = {} if fallback == "complete" else {"Z.SH": 0.02}
+    assert _covariance_with_target_coverage(item, current_weights=weights) is covariance
+    assert calls == 1
+
+
+def test_deferred_estimate_failure_is_propagated() -> None:
+    def evaluate() -> CovarianceEstimate:
+        raise ValueError("fixture estimate failed")
+
+    item = replace(
+        _item(covariance=None),
+        deferred_covariance=DeferredCovariance(frozenset({"A.SH", "B.SH"}), evaluate),
+    )
+    with pytest.raises(ValueError, match="fixture estimate failed"):
+        _covariance_with_target_coverage(item, current_weights={})
+
+
 class TestTargetCoverageFallback:
     """C2:池内估计未覆盖目标标的(持仓掉出选股池)时按目标集合重建。"""
 
@@ -340,12 +437,14 @@ class TestPipelineCoverageIntegration:
     """E2E:持仓掉出选股池的第二期组合构建不再被目标覆盖校验拒绝。"""
 
     @staticmethod
-    async def _run(manifest_factory, *, provider: Any) -> list[Any]:
-        from dataclasses import replace
-
+    async def _run(
+        manifest_factory, *, provider: Any, versioned: bool = False,
+    ) -> list[Any]:
         manifest = manifest_factory(run_id="RR-coverage", idempotency_key="idem-coverage")
         manifest = replace(
             manifest,
+            parameters={"covariance_policy_version": LAZY_COVARIANCE_POLICY_VERSION}
+            if versioned else manifest.parameters,
             portfolio_config={
                 "overrides": {
                     "max_weight_per_asset": 0.5,
@@ -369,6 +468,14 @@ class TestPipelineCoverageIntegration:
             provider=provider,
             day=3,
         )
+        if versioned:
+            def unexpected() -> CovarianceEstimate:
+                pytest.fail("covered target rebuild should not require the first matrix")
+
+            second = replace(
+                second, covariance=None,
+                deferred_covariance=DeferredCovariance(frozenset({"A.SH"}), unexpected),
+            )
         adapter = PortfolioPipelineAdapter(
             strategy_kind="ma_cross", decision_inputs=(first, second)
         )
@@ -404,6 +511,41 @@ class TestPipelineCoverageIntegration:
         ]
         assert risk_outcomes
         assert risk_outcomes[0].passed
+
+    async def test_versioned_covariance_keeps_the_business_trajectory(
+        self, manifest_factory,
+    ) -> None:
+        pool = ("A.SH", "B.SH", "C.SH")
+        series = {symbol: _prices(40, seed=index) for index, symbol in enumerate(pool)}
+
+        def provider(codes: tuple[str, ...]) -> dict[str, list[float]]:
+            return {code: series[code] for code in codes}
+
+        legacy = await self._run(manifest_factory, provider=provider)
+        revised = await self._run(manifest_factory, provider=provider, versioned=True)
+        repeated = await self._run(manifest_factory, provider=provider, versioned=True)
+        for before, after, repeat in zip(legacy, revised, repeated, strict=True):
+            assert before.ledger == after.ledger
+            assert before.positions == after.positions
+            assert before.constraints == after.constraints
+            assert before.targets_after_constraints == after.targets_after_constraints
+            assert tuple(
+                replace(order, research_order_id="RR-fixture-order", instruction_id="RR-fixture-instruction")
+                for order in before.orders
+            ) == tuple(
+                replace(order, research_order_id="RR-fixture-order", instruction_id="RR-fixture-instruction")
+                for order in after.orders
+            )
+            assert tuple(
+                replace(fill, research_order_id="RR-fixture-order", research_fill_id="RR-fixture-fill")
+                for fill in before.fills
+            ) == tuple(
+                replace(fill, research_order_id="RR-fixture-order", research_fill_id="RR-fixture-fill")
+                for fill in after.fills
+            )
+            assert before.pipeline_evidence.input_checksum != after.pipeline_evidence.input_checksum
+            assert after.pipeline_evidence == repeat.pipeline_evidence
+            assert after == repeat
 
     async def test_held_symbol_outside_pool_still_rejected_without_provider(
         self, manifest_factory
