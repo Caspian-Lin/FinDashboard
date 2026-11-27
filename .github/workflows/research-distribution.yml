@@ -108,6 +108,7 @@ jobs:
     timeout-minutes: 35
     env:
       FINBOARD_DESKTOP_PR_BUILD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'feat/research-desktop-') }}
+      FINBOARD_DESKTOP_PR_HEAD: ${{ github.event.pull_request.head.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -176,14 +177,43 @@ jobs:
             if ($installer.ExitCode -ne 0) { throw "Windows Installer returned $($installer.ExitCode)." }
             $app = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter finboard-research-desktop.exe)
             if ($app.Count -ne 1) { throw 'Expected one installed desktop executable.' }
-            $installedArchive = Join-Path $app[0].DirectoryName 'edition/images.tar'
-            if ((Get-FileHash -LiteralPath $installedArchive -Algorithm SHA256).Hash -ne $archive.Hash) {
-              throw 'The MSI installation changed the offline image archive.'
+            $installedResource = Join-Path $app[0].DirectoryName 'edition'
+            $resources = [ordered]@{}
+            foreach ($file in @('images.tar', 'offline-manifest.json', 'starter.zip')) {
+              $original = Join-Path $edition $file
+              $expected = if ($file -ceq 'images.tar') { $archive.Hash } else {
+                (Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash
+              }
+              $installed = Join-Path $installedResource $file
+              if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -cne $expected) {
+                throw "The MSI installation changed $file."
+              }
+              $resources[$file] = @{
+                bytes = (Get-Item -LiteralPath $original).Length; sha256 = $expected.ToLowerInvariant()
+              }
             }
             $out = 'FinDashboard-research-offline-windows-amd64-pr.msi'
             Copy-Item -LiteralPath $msi[0].FullName -Destination $out
             $sha = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash.ToLowerInvariant()
             "$sha  $out" | Set-Content -Encoding ascii SHA256SUMS-desktop-pr
+            $sourceCommit = git rev-parse HEAD
+            if ($LASTEXITCODE -ne 0 -or $sourceCommit -cne $env:GITHUB_SHA -or
+                $env:FINBOARD_DESKTOP_PR_HEAD -cnotmatch '^[0-9a-f]{40}$') {
+              throw 'Cannot verify the source commit used to build the preview.'
+            }
+            $sourceTree = git log -1 --format=%T
+            if ($LASTEXITCODE -ne 0 -or $sourceTree -cnotmatch '^[0-9a-f]{40}$') {
+              throw 'Cannot verify the source tree used to build the preview.'
+            }
+            Copy-Item -LiteralPath (Join-Path $edition 'starter.zip') -Destination synthetic-starter-v1.zip
+            @{
+              schema_version = 1; channel = $manifest.channel
+              checkout_commit = $sourceCommit; source_tree = $sourceTree; pull_request_head = $env:FINBOARD_DESKTOP_PR_HEAD
+              run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT
+              msi = @{file = $out; bytes = (Get-Item -LiteralPath $out).Length; sha256 = $sha}
+              starter_file = 'synthetic-starter-v1.zip'; installed_resources = $resources
+              images = $manifest.images; administrative_install_verified = $true
+            } | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 desktop-pr-candidate.json
           }
       - uses: actions/upload-artifact@v4
         if: env.FINBOARD_DESKTOP_PR_BUILD == 'true'
@@ -192,6 +222,8 @@ jobs:
           path: |
             desktop/FinDashboard-research-offline-windows-amd64-pr.msi
             desktop/SHA256SUMS-desktop-pr
+            desktop/desktop-pr-candidate.json
+            desktop/synthetic-starter-v1.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
