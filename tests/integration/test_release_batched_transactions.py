@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -21,7 +22,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from finboard_data import DatasetReleaseSpec
+from finboard_data import DatasetReleaseSpec, ReleaseInstrumentSpec, ResearchDatasetRelease
 from finboard_data.cache import ParquetCache
 from finboard_data.releases import FrozenDatasetReleaseBuilder
 from finboard_persistence import (
@@ -107,9 +108,10 @@ async def test_materialization_runs_without_idle_in_transaction(
     async def spy(
         self: FrozenDatasetReleaseBuilder,
         spec: DatasetReleaseSpec,
+        instruments: Sequence[ReleaseInstrumentSpec],
         staging: Path,
         final_dir: Path,
-    ) -> None:
+    ) -> ResearchDatasetRelease | None:
         async with session_factory(_engine)() as probe:
             row: Any = (
                 await probe.execute(
@@ -122,7 +124,7 @@ async def test_materialization_runs_without_idle_in_transaction(
                 )
             ).scalar_one()
         observed["idle_in_transaction"] = int(row)
-        await original(self, spec, staging, final_dir)
+        return await original(self, spec, instruments, staging, final_dir)
 
     monkeypatch.setattr(FrozenDatasetReleaseBuilder, "_atomically_publish", spy)
 

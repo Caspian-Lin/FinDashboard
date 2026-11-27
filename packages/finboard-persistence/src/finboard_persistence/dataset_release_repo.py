@@ -9,7 +9,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from psycopg.errors import UniqueViolation
 from sqlalchemy import Select, insert, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_data.akshare_provider import (
@@ -93,15 +95,8 @@ class ResearchDatasetReleaseRepository:
         self,
         release: ResearchDatasetRelease,
     ) -> ResearchDatasetReleaseModel:
-        existing = await self._find_identity(
-            release.release_id,
-            release.dataset_name,
-            release.source,
-            release.version,
-        )
+        existing = await self._find_identity(release)
         if existing is not None:
-            if existing.release_checksum != release.release_checksum:
-                raise ImmutableReleaseError(f"发布身份已登记但 checksum 不同: {release.release_id}")
             return existing
         if not release.is_usable:
             raise ValueError("仅允许登记通过质量门的研究数据发布")
@@ -130,8 +125,25 @@ class ResearchDatasetReleaseRepository:
             manifest=release.as_dict(),
             published_at=release.published_at,
         )
-        self._session.add(row)
-        await self._session.flush()
+        try:
+            async with self._session.begin_nested():
+                self._session.add(row)
+                await self._session.flush()
+        except IntegrityError as exc:
+            violation = exc.orig
+            # Alembic 与 create_all 对 ID、checksum 可能命中不同名字的唯一索引。
+            if not isinstance(violation, UniqueViolation) or violation.diag.constraint_name not in {
+                "uq_research_dataset_release_id",
+                "uq_research_dataset_release_version",
+                "uq_research_dataset_release_checksum",
+                "ix_research_dataset_releases_release_id",
+                "ix_research_dataset_releases_release_checksum",
+            }:
+                raise
+            existing = await self._find_identity(release)
+            if existing is None:
+                raise
+            return existing
         await self._insert_instruments(release)
         return row
 
@@ -243,21 +255,20 @@ class ResearchDatasetReleaseRepository:
         return [_release_from_row(row) for row in rows]
 
     async def _find_identity(
-        self,
-        release_id: str,
-        dataset_name: str,
-        source: str,
-        version: str,
+        self, release: ResearchDatasetRelease
     ) -> ResearchDatasetReleaseModel | None:
         stmt = select(ResearchDatasetReleaseModel).where(
-            (ResearchDatasetReleaseModel.release_id == release_id)
+            (ResearchDatasetReleaseModel.release_id == release.release_id)
             | (
-                (ResearchDatasetReleaseModel.dataset_name == dataset_name)
-                & (ResearchDatasetReleaseModel.source == source)
-                & (ResearchDatasetReleaseModel.version == version)
+                (ResearchDatasetReleaseModel.dataset_name == release.dataset_name)
+                & (ResearchDatasetReleaseModel.source == release.source)
+                & (ResearchDatasetReleaseModel.version == release.version)
             )
         )
-        return (await self._session.execute(stmt)).scalars().first()
+        existing = (await self._session.execute(stmt)).scalars().first()
+        if existing is not None and existing.release_checksum != release.release_checksum:
+            raise ImmutableReleaseError(f"发布身份已登记但 checksum 不同: {release.release_id}")
+        return existing
 
 
 class ReleaseInstrumentCatalogRepository:
@@ -484,6 +495,7 @@ class ResearchDatasetReleaseService:
         self._builder = FrozenDatasetReleaseBuilder(
             cache_dir=cache_dir,
             release_root=release_root,
+            bars_compression="zstd",
             research_source=ResearchTableReleaseSource(
                 session,
                 session_factory=session_factory,

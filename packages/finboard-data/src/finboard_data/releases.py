@@ -16,6 +16,7 @@ data_releases/<release_id>/
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import re
@@ -30,7 +31,7 @@ from decimal import Decimal
 from enum import StrEnum
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from finboard_data.cache import CacheMetadata, CloseColumns, ParquetCache
@@ -1607,6 +1608,7 @@ class FrozenDatasetReleaseBuilder:
         release_root: str | Path,
         max_concurrency: int = 8,
         research_source: ResearchDataReleaseSource | None = None,
+        bars_compression: Literal["snappy", "zstd"] = "snappy",
     ) -> None:
         self._cache_dir = Path(cache_dir).resolve()
         self._release_root = Path(release_root).resolve()
@@ -1615,6 +1617,7 @@ class FrozenDatasetReleaseBuilder:
             raise ValueError("max_concurrency 必须 >= 1")
         self._max_concurrency = max_concurrency
         self._research_source = research_source
+        self._bars_compression = bars_compression
 
     @property
     def research_source(self) -> ResearchDataReleaseSource | None:
@@ -1662,7 +1665,7 @@ class FrozenDatasetReleaseBuilder:
         final_dir = self._release_root / spec.release_id
         if final_dir.exists():
             existing = await asyncio.to_thread(verify_dataset_release, final_dir)
-            _assert_same_release_identity(existing, spec)
+            _assert_same_release_identity(existing, spec, instruments)
             return existing
 
         staging = Path(
@@ -1675,6 +1678,7 @@ class FrozenDatasetReleaseBuilder:
             target_cache = ParquetCache(
                 staging / "bars",
                 max_io_concurrency=self._max_concurrency,
+                write_compression=self._bars_compression,
             )
             source_cache = ParquetCache(
                 self._cache_dir,
@@ -1921,8 +1925,8 @@ class FrozenDatasetReleaseBuilder:
             release = replace(release, release_checksum=checksum)
             await asyncio.to_thread(_write_manifest, staging, release)
 
-            await self._atomically_publish(spec, staging, final_dir)
-            return replace(release, storage_uri=spec.release_id)
+            winner = await self._atomically_publish(spec, instruments, staging, final_dir)
+            return release if winner is None else winner
         except Exception:
             await asyncio.to_thread(shutil.rmtree, staging, True)
             raise
@@ -1930,30 +1934,45 @@ class FrozenDatasetReleaseBuilder:
     async def _atomically_publish(
         self,
         spec: DatasetReleaseSpec,
+        instruments: Sequence[ReleaseInstrumentSpec],
         staging: Path,
         final_dir: Path,
-    ) -> None:
-        """把 staging 原子改名为最终发布目录(有界重试)。
+    ) -> ResearchDatasetRelease | None:
+        """发布本次 staging, 或复用并发发布成功的磁盘结果。
 
         Windows 上杀软 / 目录同步可能瞬时锁定刚写入的目录树,导致
         ``os.replace`` 抛 PermissionError(WinError 5,与 POSIX rename 语义
         不同);做有界退避重试,仍失败则原样抛出。最终目录若在等待期间出现
-        (并发发布完成),按「已存在」语义校验后返回,不重复覆盖。
+        (并发发布完成),按「已存在」语义校验并返回实际发布。
         """
         for attempt in range(4):
             if await asyncio.to_thread(final_dir.exists):
-                existing = await asyncio.to_thread(verify_dataset_release, final_dir)
-                _assert_same_release_identity(existing, spec)
-                return
+                break
             try:
                 # 最终目录不存在时 rename 在同一文件系统内为原子操作。
                 await asyncio.to_thread(staging.replace, final_dir)
-                return
+                return None
+            except OSError as exc:
+                can_be_existing = isinstance(exc, PermissionError) or exc.errno in {
+                    errno.EEXIST,
+                    errno.ENOTEMPTY,
+                }
+                if can_be_existing and await asyncio.to_thread(final_dir.exists):
+                    break
+                if not isinstance(exc, PermissionError) or attempt == 3:
+                    raise
+                await asyncio.sleep(0.05 * (attempt + 1))
+        existing = await asyncio.to_thread(verify_dataset_release, final_dir)
+        _assert_same_release_identity(existing, spec, instruments)
+        for attempt in range(4):
+            try:
+                await asyncio.to_thread(shutil.rmtree, staging)
+                break
             except PermissionError:
                 if attempt == 3:
                     raise
                 await asyncio.sleep(0.05 * (attempt + 1))
-        raise RuntimeError("发布目录原子改名未完成")
+        return existing
 
     async def _freeze_research_instrument(
         self,
@@ -4116,6 +4135,7 @@ def _validate_schema_compatibility(
 def _assert_same_release_identity(
     release: ResearchDatasetRelease,
     spec: DatasetReleaseSpec,
+    instruments: Sequence[ReleaseInstrumentSpec],
 ) -> None:
     actual = (
         release.release_id,
@@ -4157,6 +4177,10 @@ def _assert_same_release_identity(
     )
     if actual != expected:
         raise ImmutableReleaseError(f"release_id={spec.release_id} 已存在且规格不同,禁止覆盖")
+    if {(item.code, item.market) for item in release.instruments} != {
+        (item.code, item.market) for item in instruments
+    }:
+        raise ImmutableReleaseError(f"release_id={spec.release_id} 已存在且标的范围不同,禁止覆盖")
 
 
 def _release_checksum(release: ResearchDatasetRelease) -> str:

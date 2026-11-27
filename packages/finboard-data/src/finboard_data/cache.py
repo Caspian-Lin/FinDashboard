@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 
@@ -347,6 +347,7 @@ class ParquetCache:
         max_io_concurrency: int = 1,
         read_cache_max_elements: int | None = None,
         read_cache_max_bytes: int | None = None,
+        write_compression: Literal["snappy", "zstd"] = "snappy",
     ) -> None:
         if max_io_concurrency < 1:
             raise ValueError("max_io_concurrency 必须 >= 1")
@@ -363,6 +364,7 @@ class ParquetCache:
         self._read_bytes = 0
         self._write_ops = 0
         self._write_bytes = 0
+        self._write_compression = write_compression
         # issue #287:进程内读缓存(实例作用域)。键含文件 size + mtime_ns,
         # 任何写入(本实例 write / 外部进程改写)都会因键变化自然失效;
         # write 后再显式丢弃同路径条目,避免陈旧条目占用内存等 LRU 驱逐。
@@ -906,7 +908,10 @@ class ParquetCache:
         )
         if source is not None:
             table = table.replace_schema_metadata({b"finboard.source": source.encode()})
-        pq.write_table(table, path)
+        if self._write_compression == "zstd":
+            pq.write_table(table, path, compression="zstd", compression_level=3)
+        else:
+            pq.write_table(table, path)
         retained_ranges: tuple[tuple[date, date], ...] = ()
         if previous is not None and previous.source == source:
             retained_ranges = previous.covered_ranges

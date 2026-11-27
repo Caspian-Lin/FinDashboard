@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from finboard_data import DatasetReleaseSpec, ImmutableReleaseError
+from finboard_data import (
+    DatasetReleaseSpec,
+    FrozenReleaseProvider,
+    ImmutableReleaseError,
+    ResearchDatasetRelease,
+    verify_dataset_release,
+)
 from finboard_data.cache import ParquetCache
 from finboard_data.research import InstrumentProfile
 from finboard_persistence import (
@@ -27,6 +35,7 @@ from finboard_persistence import (
     resolve_release_symbols,
     session_factory,
 )
+from finboard_persistence.models import ResearchDatasetReleaseInstrumentModel
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
 
@@ -93,6 +102,92 @@ async def _seed_bars(cache_dir: Path) -> None:
             for offset in range(4)
         ]
         await cache.write(symbol, BarPeriod.D1, "qfq", bars)
+
+
+async def test_concurrent_formal_bars_publish_registers_the_zstd_winner_once(
+    _engine: AsyncEngine,  # noqa: PT019
+    db_session: AsyncSession,
+    tmp_path: Path,
+    test_stock: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del test_stock
+    await db_session.commit()
+    monkeypatch.setattr(
+        "finboard_data.trading_calendar._CACHE", {_START + timedelta(days=offset) for offset in range(4)}
+    )
+    cache_root = tmp_path / "cache"
+    release_root = tmp_path / "releases"
+    await _seed_bars(cache_root)
+    sessions = session_factory(_engine)
+    service = ResearchDatasetReleaseService(
+        None, cache_dir=cache_root, release_root=release_root, session_factory=sessions
+    )
+    spec = DatasetReleaseSpec(
+        release_id="integration-r77-zstd-concurrent",
+        dataset_name="multi_asset_daily_bars",
+        source="fixed_sample",
+        version="integration-zstd-concurrent",
+        start_date=_START,
+        end_date=_END,
+        code_version="integration-test",
+        required_capabilities=("stock",),
+    )
+    both_read = asyncio.Barrier(2)
+    find_identity = ResearchDatasetReleaseRepository._find_identity
+
+    async def read_before_either_insert(
+        repo: ResearchDatasetReleaseRepository, release: ResearchDatasetRelease
+    ) -> ResearchDatasetReleaseModel | None:
+        found = await find_identity(repo, release)
+        if found is None:
+            await asyncio.wait_for(both_read.wait(), timeout=10)
+        return found
+
+    monkeypatch.setattr(ResearchDatasetReleaseRepository, "_find_identity", read_before_either_insert)
+    try:
+        async with asyncio.TaskGroup() as group:
+            first_task = group.create_task(service.publish(spec, _SYMBOLS[:1]))
+            second_task = group.create_task(service.publish(spec, _SYMBOLS[:1]))
+        first, second = first_task.result(), second_task.result()
+        release_dir = release_root / spec.release_id
+        assert first == second == verify_dataset_release(release_dir)
+        assert list(release_root.iterdir()) == [release_dir]
+        artifact_path = release_dir / first.instruments[0].artifact_path
+        assert pq.read_metadata(artifact_path).row_group(0).column(0).compression == "ZSTD"
+
+        async with sessions() as restarted:
+            repo = ResearchDatasetReleaseRepository(restarted)
+            restored = await repo.require_usable(spec.release_id)
+            assert restored == first
+            count = await restarted.scalar(
+                select(func.count()).select_from(ResearchDatasetReleaseInstrumentModel).where(
+                    ResearchDatasetReleaseInstrumentModel.release_id == spec.release_id
+                )
+            )
+            assert count == 1
+            with pytest.raises(ImmutableReleaseError, match="checksum 不同"):
+                await repo.publish(replace(restored, release_checksum="0" * 64))
+
+        frozen = FrozenReleaseProvider(
+            release_root=release_root,
+            release_id=restored.release_id,
+            expected_checksum=restored.release_checksum,
+        )
+        visible = await frozen.fetch_point_in_time_bars(
+            Symbol(_SYMBOLS[0], Market.A_SHARE), BarPeriod.D1, _START, _END,
+            decision_at=datetime(2024, 1, 4, 7, 29, tzinfo=UTC),
+        )
+        assert [row.bar.timestamp.date() for row in visible] == [date(2024, 1, 2), date(2024, 1, 3)]
+        assert [row.bar.close for row in visible] == [Decimal("10.5"), Decimal("10.5")]
+    finally:
+        async with sessions.begin() as cleanup:
+            # 派生标的行通过外键级联清理,保留共享库内其他发布。
+            await cleanup.execute(
+                delete(ResearchDatasetReleaseModel).where(
+                    ResearchDatasetReleaseModel.release_id == spec.release_id
+                )
+            )
 
 
 async def test_service_publishes_files_and_queryable_immutable_record(

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from finboard_data import (
@@ -23,6 +26,7 @@ from finboard_data import (
     ReleaseInstrumentSpec,
     ReleaseIntegrityError,
     ReleaseLifecycleEvent,
+    ResearchDatasetRelease,
     default_execution_metadata,
     load_dataset_release,
     verify_dataset_release,
@@ -232,6 +236,117 @@ async def _seed(cache_dir: Path, instruments: list[ReleaseInstrumentSpec]) -> No
             "qfq",
             _bars(instrument.code, instrument.market),
         )
+
+
+@pytest.mark.asyncio
+async def test_zstd_bars_preserve_legacy_release_source_and_pit_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "finboard_data.trading_calendar._CACHE", {_START + timedelta(days=offset) for offset in range(4)}
+    )
+    cache_dir = tmp_path / "cache"
+    release_root = tmp_path / "releases"
+    instruments = [_stock()]
+    await _seed(cache_dir, instruments)
+    source = next(cache_dir.glob("*.parquet"))
+    source_bytes = source.read_bytes()
+    legacy_spec = _spec(required_capabilities=("stock",))
+    legacy = await FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir, release_root=release_root
+    ).publish(legacy_spec, instruments)
+    legacy_dir = release_root / legacy.release_id
+    legacy_file = legacy_dir / legacy.instruments[0].artifact_path
+    legacy_bytes = legacy_file.read_bytes()
+    manifest_bytes = (legacy_dir / RELEASE_MANIFEST_FILENAME).read_bytes()
+    legacy_writer = tmp_path / "legacy-writer.parquet"
+    pq.write_table(pq.read_table(source), legacy_writer)
+    assert source_bytes == legacy_writer.read_bytes()
+    pq.write_table(pq.read_table(legacy_file), legacy_writer)
+    assert legacy_bytes == legacy_writer.read_bytes()
+
+    zstd_builder = FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir, release_root=release_root, bars_compression="zstd"
+    )
+    compact = await zstd_builder.publish(
+        replace(legacy_spec, release_id="fixed-zstd", version="2024.zstd"), instruments
+    )
+    compact_dir = release_root / compact.release_id
+    compact_file = compact_dir / compact.instruments[0].artifact_path
+    assert pq.read_metadata(source).row_group(0).column(0).compression == "SNAPPY"
+    assert pq.read_metadata(legacy_file).row_group(0).column(0).compression == "SNAPPY"
+    assert pq.read_metadata(compact_file).row_group(0).column(0).compression == "ZSTD"
+    assert pq.read_table(legacy_file).equals(pq.read_table(compact_file), check_metadata=True)
+    assert verify_dataset_release(compact_dir) == compact
+    assert compact.instruments[0].artifact_checksum != legacy.instruments[0].artifact_checksum
+
+    assert await zstd_builder.publish(legacy_spec, instruments) == legacy
+    with pytest.raises(ImmutableReleaseError, match="标的范围不同"):
+        await zstd_builder.publish(legacy_spec, [replace(instruments[0], market=Market.HK)])
+    assert source.read_bytes() == source_bytes
+    assert legacy_file.read_bytes() == legacy_bytes
+    assert (legacy_dir / RELEASE_MANIFEST_FILENAME).read_bytes() == manifest_bytes
+
+    symbol = Symbol(instruments[0].code, instruments[0].market)
+    decision_at = datetime(2024, 1, 4, 7, 29, tzinfo=UTC)
+    older, newer = [
+        await FrozenReleaseProvider(
+            release_root=release_root,
+            release_id=release.release_id,
+            expected_checksum=release.release_checksum,
+        ).fetch_point_in_time_bars(symbol, BarPeriod.D1, _START, _END, decision_at=decision_at)
+        for release in (legacy, compact)
+    ]
+    assert newer == older
+    assert [item.bar.timestamp.date() for item in newer] == [date(2024, 1, 2), date(2024, 1, 3)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_scope", [True, False], ids=["same-scope", "different-scope"])
+async def test_concurrent_publish_returns_one_manifest_for_both_codecs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_scope: bool
+) -> None:
+    monkeypatch.setattr(
+        "finboard_data.trading_calendar._CACHE", {_START + timedelta(days=offset) for offset in range(4)}
+    )
+    cache_dir = tmp_path / "cache"
+    release_root = tmp_path / "releases"
+    instruments = [_stock()]
+    compact_instruments = instruments if same_scope else [*instruments, _stock("601318.SH")]
+    await _seed(cache_dir, compact_instruments)
+    spec = _spec(required_capabilities=("stock",))
+    legacy = FrozenDatasetReleaseBuilder(cache_dir=cache_dir, release_root=release_root)
+    compact = FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir, release_root=release_root, bars_compression="zstd"
+    )
+    staged = asyncio.Barrier(2)
+    publish_staged = FrozenDatasetReleaseBuilder._atomically_publish
+
+    async def wait_for_both(
+        builder: FrozenDatasetReleaseBuilder,
+        spec: DatasetReleaseSpec,
+        instruments: Sequence[ReleaseInstrumentSpec],
+        staging: Path,
+        final_dir: Path,
+    ) -> ResearchDatasetRelease | None:
+        await asyncio.wait_for(staged.wait(), timeout=10)
+        return await publish_staged(builder, spec, instruments, staging, final_dir)
+
+    monkeypatch.setattr(FrozenDatasetReleaseBuilder, "_atomically_publish", wait_for_both)
+    outcomes = await asyncio.gather(
+        legacy.publish(spec, instruments),
+        compact.publish(spec, compact_instruments),
+        return_exceptions=True,
+    )
+    published = verify_dataset_release(release_root / spec.release_id)
+    if same_scope:
+        assert all(outcome == published for outcome in outcomes)
+    else:
+        assert outcomes.count(published) == 1
+        conflicts = [outcome for outcome in outcomes if isinstance(outcome, ImmutableReleaseError)]
+        assert len(conflicts) == 1
+        assert "标的范围不同" in str(conflicts[0])
+    assert list(release_root.iterdir()) == [release_root / spec.release_id]
 
 
 @pytest.mark.asyncio
