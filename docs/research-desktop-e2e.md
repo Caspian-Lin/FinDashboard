@@ -17,6 +17,8 @@ python -m scripts.smoke_research_desktop --run-isolated `
 
 上述脚本覆盖 Windows 宿主命令、真实 Docker 和可选 Codex CLI。安装程序界面、工作台 WebView2、重开 Codex 后的真实对话以及 Windows 卸载界面须在单独的干净 Windows x64 环境验证。
 
+Windows CI 另用 MSI 管理安装验证安装布局与镜像归档 checksum。Rust 回归测试用实际 Windows PowerShell 验证含空格的安装路径可解析 `$PSScriptRoot`。本机面板可在系统深色和浅色外观、默认尺寸及最窄窗口下复测。用 Tab 检查焦点、状态刷新、诊断展开与卸载确认，检查日志和复制命令是否可读。
+
 1. 安装 Docker Desktop 与 WebView2 后，阻断 Docker Hub 和 GHCR，再从已校验的 MSI 安装。打开管理窗口，按界面完成启动和样例导入，记录 MSI 体积和首次就绪时间。
 2. 直接打开研究工作台，核对合成发布及校验和，完成一次样例研究。核对工作台内没有主机管理功能。
 3. 用界面接入 Codex 并依次切换两种权限。每次按提示重开客户端，在实际对话里读取同一课题，记录三次申请提交的结果。

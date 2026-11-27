@@ -164,6 +164,17 @@ jobs:
           $msi = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/$profile/bundle/msi/*.msi)
           if ($msi.Count -ne 1) { throw 'Expected one x64 MSI.' }
           if ($hasPayload) {
+            $installRoot = Join-Path $env:RUNNER_TEMP "finboard-preview-${env:GITHUB_RUN_ID}-${env:GITHUB_RUN_ATTEMPT}"
+            $installLog = "$installRoot.log"
+            $installArgs = '/a "' + $msi[0].FullName + '" TARGETDIR="' + $installRoot + '" /qn /l*v "' + $installLog + '"'
+            $installer = Start-Process msiexec.exe -ArgumentList $installArgs -WindowStyle Hidden -Wait -PassThru
+            if ($installer.ExitCode -ne 0) { throw "Windows Installer returned $($installer.ExitCode)." }
+            $app = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter finboard-research-desktop.exe)
+            if ($app.Count -ne 1) { throw 'Expected one installed desktop executable.' }
+            $installedArchive = Join-Path $app[0].DirectoryName 'edition/images.tar'
+            if ((Get-FileHash -LiteralPath $installedArchive -Algorithm SHA256).Hash -ne $archive.Hash) {
+              throw 'The MSI installation changed the offline image archive.'
+            }
             $out = 'FinDashboard-research-offline-windows-amd64-pr.msi'
             Copy-Item -LiteralPath $msi[0].FullName -Destination $out
             $sha = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash.ToLowerInvariant()

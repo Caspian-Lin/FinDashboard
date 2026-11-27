@@ -813,6 +813,7 @@ dependencies = [
 name = "finboard-research-desktop"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "regex",
  "serde",
  "serde_json",

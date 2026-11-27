@@ -194,6 +194,8 @@ pub fn execute(
     invocation: &Invocation,
     emit: impl Fn(Progress) + Sync,
 ) -> Result<OperationResult, String> {
+    // Tauri 可能返回扩展长度路径，Windows PowerShell 的文件提供程序不能用它解析 $PSScriptRoot。
+    let script = dunce::simplified(script);
     let arguments = invocation.args();
     let started = Instant::now();
     let system = std::env::var_os("SystemRoot").ok_or("无法定位 Windows PowerShell。")?;
@@ -255,6 +257,30 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_resolves_resource_root_from_extended_install_path() {
+        use std::fs;
+
+        let directory =
+            std::env::temp_dir().join(format!("finboard operator {}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("verify.ps1");
+        fs::write(
+            &script,
+            "$ErrorActionPreference = 'Stop'\n$fixture = Join-Path $PSScriptRoot 'verify.ps1'\nif (!(Test-Path -LiteralPath $fixture)) { exit 1 }\n",
+        )
+        .unwrap();
+        let extended = fs::canonicalize(&script).unwrap();
+        assert_ne!(&extended, dunce::simplified(&extended));
+        let result = execute(&extended, &Invocation::Stop, |_| {});
+        fs::remove_file(script).unwrap();
+        fs::remove_dir(directory).unwrap();
+        let result = result.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.command.contains(r"\\?\"));
+    }
 
     #[test]
     fn operations_only_produce_fixed_arguments() {
