@@ -60,6 +60,11 @@ from finboard_backtest.research_run.adapters import (
     SUPPORTED_RESEARCH_STRATEGIES,
     validate_strategy_dataset_capabilities,
 )
+from finboard_backtest.research_run.checkpoint_resume import (
+    ResumeCheckpointSpool,
+    ResumeLedgerSeed,
+    replay_resume_bundles,
+)
 from finboard_backtest.research_run.config_overrides import (
     effective_max_risk_contribution,
     merge_fee_overrides,
@@ -316,7 +321,7 @@ class PortfolioPipelineAdapter:
         )
         # issue #314:断点续算种子(resume_from 接受后非空)。decisions() 先
         # 原样产出前缀(零重算),再从其后继续组合构建,账本状态由种子接续。
-        self._resume_bundles: tuple[DecisionBundle, ...] | None = None
+        self._resume_bundles: tuple[DecisionBundle, ...] | ResumeCheckpointSpool | None = None
         self._resume_state: _PipelineState | None = None
 
     async def aprefetch_inputs(self, count: int) -> None:
@@ -385,7 +390,9 @@ class PortfolioPipelineAdapter:
         except StopAsyncIteration:
             return None
 
-    def resume_from(self, completed: Sequence[DecisionBundle]) -> bool:
+    def resume_from(
+        self, completed: Sequence[DecisionBundle] | ResumeCheckpointSpool,
+    ) -> bool:
         """断点续算种子(issue #314):接受已落库的决策前缀,跳过其重算。
 
         契约(validate-then-mutate):返回 False 或抛错时本适配器零突变,
@@ -405,8 +412,11 @@ class PortfolioPipelineAdapter:
             validation_inputs = self._inputs
         if len(completed) > len(validation_inputs):
             return False
+        decision_seeds: Sequence[DecisionBundle | ResumeLedgerSeed] = (
+            completed.seeds if isinstance(completed, ResumeCheckpointSpool) else completed
+        )
         previous_at: datetime | None = None
-        for index, bundle in enumerate(completed):
+        for index, bundle in enumerate(decision_seeds):
             if previous_at is not None and bundle.decision_at <= previous_at:
                 return False
             previous_at = bundle.decision_at
@@ -419,7 +429,7 @@ class PortfolioPipelineAdapter:
             ):
                 return False
         try:
-            seeded = _pipeline_state_from_resume(completed, validation_inputs)
+            seeded = _pipeline_state_from_resume(decision_seeds, validation_inputs)
         except Exception:
             logger.warning(
                 "research_run.resume_seed_rejected",
@@ -429,7 +439,9 @@ class PortfolioPipelineAdapter:
                 message="断点续算状态种子构建/校验失败,回退全量重算",
             )
             return False
-        self._resume_bundles = tuple(completed)
+        self._resume_bundles = (
+            completed if isinstance(completed, ResumeCheckpointSpool) else tuple(completed)
+        )
         self._resume_state = seeded
         return True
 
@@ -550,11 +562,12 @@ class PortfolioPipelineAdapter:
             seeds = self._resume_bundles
             if seeds is not None:
                 self._resume_bundles = None
-                pending = list(seeds)
+                pending = replay_resume_bundles(seeds)
                 del seeds
-                while pending:
-                    yield pending.pop(0)
+                for decision in pending:
+                    yield decision
                     start_index += 1
+                    del decision
 
             # issue #463:决策输入支持 Sequence(按索引读取,旧行为)或
             # AsyncIterator(逐期拉取,任一时刻常驻 O(1) 期次)。从
@@ -1700,7 +1713,7 @@ def _resume_stub_of(item: Any) -> _ResumeReplayStub:
 
 
 def _pipeline_state_from_resume(
-    completed: Sequence[DecisionBundle],
+    completed: Sequence[DecisionBundle | ResumeLedgerSeed],
     inputs: Sequence[Any],
 ) -> _PipelineState:
     """从已完成决策前缀精确重建组合管线账本状态(issue #314)。
@@ -1795,7 +1808,9 @@ def _pipeline_state_from_resume(
     return state
 
 
-def _verify_resume_state(state: _PipelineState, last: DecisionBundle) -> None:
+def _verify_resume_state(
+    state: _PipelineState, last: DecisionBundle | ResumeLedgerSeed,
+) -> None:
     """重放账本 vs 最后决策记录逐项对照(不一致即拒绝种子,fail-closed)。"""
 
     recorded = {item.symbol: item for item in last.positions}

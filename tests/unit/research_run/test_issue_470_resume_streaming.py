@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -29,6 +29,8 @@ from finboard_backtest.research_run import (
     to_json_value,
 )
 from finboard_backtest.research_run.checkpoint_resume import (
+    DecisionCheckpoint,
+    ResumeCheckpointSpool,
     _FeatureMetadata,
     _rebuild_feature,
 )
@@ -89,6 +91,54 @@ async def test_streaming_prefix_equals_list_version(
     streamed = await _streamed_prefix(store, run_id)
     assert len(listed) == 3
     assert streamed == listed
+
+
+async def test_checkpoint_spool_replays_exact_decisions_with_one_current_bundle(
+    manifest_factory, decision_factory,
+) -> None:
+    store, run_id = await _completed_run(manifest_factory, decision_factory)
+    expected = await _streamed_prefix(store, run_id)
+    spool = ResumeCheckpointSpool()
+    assert await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=True, spool=spool,
+    ) == []
+    assert [seed.business_date for seed in spool.seeds] == [row.business_date for row in expected]
+    assert spool.current is None
+    file = spool._file
+    assert file is not None
+    for decision, original in zip(spool.replay(), expected, strict=True):
+        assert spool.current is not None
+        assert spool.current.decision is decision
+        assert spool.current.stages is not None
+        assert to_json_value(decision) == to_json_value(original)
+    assert spool.current is None
+    assert len(spool) == 0
+    assert file.closed
+
+
+async def test_checkpoint_spool_failure_discards_partial_readback(
+    manifest_factory, decision_factory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, run_id = await _completed_run(manifest_factory, decision_factory)
+    spool = ResumeCheckpointSpool()
+    append = spool.append
+    files: list[BinaryIO | None] = []
+
+    def broken_append(checkpoint: DecisionCheckpoint) -> None:
+        if files:
+            raise OSError("spool write failed")
+        append(checkpoint)
+        files.append(spool._file)
+
+    monkeypatch.setattr(spool, "append", broken_append)
+    assert await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=True, spool=spool,
+    ) == []
+    assert len(spool) == 0
+    file = files[0]
+    assert file is not None
+    assert file.closed
+    assert tuple(spool.replay()) == ()
 
 
 @pytest.mark.parametrize("cancel_externally", [False, True])
@@ -171,6 +221,9 @@ async def test_streaming_prefix_truncates_with_list_version(
     streamed = await _streamed_prefix(store, run_id)
     assert len(listed) == 1
     assert streamed == listed
+    spool = ResumeCheckpointSpool()
+    await ResearchRunCoordinator(store)._load_resume_prefix(run_id, reuse_sections=True, spool=spool)
+    assert list(spool.replay()) == listed
 
 
 async def test_digests_match_full_listing_projection(

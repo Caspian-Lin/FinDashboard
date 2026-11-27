@@ -17,6 +17,7 @@ from finboard_backtest.portfolio.contracts import MAX_WEIGHT_EPSILON
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.checkpoint_resume import (
     DecisionCheckpoint,
+    ResumeCheckpointSpool,
     iter_decision_checkpoints,
 )
 from finboard_backtest.research_run.contracts import (
@@ -241,6 +242,7 @@ class ResearchRunCoordinator:
         resume_progress = progress if record.status in {
             ResearchRunStatus.INTERRUPTED, ResearchRunStatus.FAILED,
         } else None
+        resume_spool: ResumeCheckpointSpool | None = None
         try:
             adapter.validate_manifest(manifest)
             try:
@@ -267,17 +269,26 @@ class ResearchRunCoordinator:
             confirms_checkpoint = getattr(adapter, "is_accepted_checkpoint", None)
             checksum_store = self._store if isinstance(self._store, CheckpointChecksumStore) else None
             reuse_sections = callable(confirms_checkpoint) and checksum_store is not None
+            if callable(getattr(adapter, "resume_from_checkpoint_spool", None)):
+                resume_spool = ResumeCheckpointSpool()
             resume_prefix = await self._load_resume_prefix(
                 manifest.run_id, reuse_sections=reuse_sections,
                 progress=resume_progress if reuse_sections else None,
+                spool=resume_spool,
             )
-            resume_seconds = time.monotonic() - resume_started if resume_prefix else None
+            offered_prefix = (
+                resume_spool if resume_spool is not None
+                else [item.decision for item in resume_prefix]
+            )
+            resume_seconds = time.monotonic() - resume_started if offered_prefix else None
             checkpoints: deque[DecisionCheckpoint] = deque()
-            if resume_prefix and self._offer_resume(
-                manifest.run_id, adapter, [item.decision for item in resume_prefix]
-            ) and reuse_sections:
-                checkpoints.extend(resume_prefix)
-            # 仅在线性复查期间保留相同种子的身份引用,逐期弹出。
+            if offered_prefix and self._offer_resume(manifest.run_id, adapter, offered_prefix):
+                if reuse_sections:
+                    checkpoints.extend(resume_prefix)
+            elif resume_spool is not None:
+                resume_spool.close()
+            # 兼容旧种子协议,仅在线性复查期间保留其身份引用。
+            del offered_prefix
             resume_prefix = []
             reused_checkpoints = 0
             position_quantities: dict[tuple[str, ResearchPositionSide], Decimal] = (
@@ -333,7 +344,10 @@ class ResearchRunCoordinator:
                             position_quantities=position_quantities,
                             seen_fill_ids=seen_fill_ids,
                         )
-                        checkpoint = checkpoints.popleft() if checkpoints else None
+                        checkpoint = (
+                            resume_spool.current if resume_spool is not None
+                            else checkpoints.popleft() if checkpoints else None
+                        )
                         if checkpoint is not None and (
                             checkpoint.decision is not raw_decision
                             or not callable(confirms_checkpoint)
@@ -497,6 +511,9 @@ class ResearchRunCoordinator:
                 error_code=type(exc).__name__,
                 error_summary=build_failure_summary(exc, failure_ctx, manifest),
             )
+        finally:
+            if resume_spool is not None:
+                resume_spool.close()
 
     async def cancel(self, run_id: str, *, commit: bool = True) -> ResearchRunRecord:
         """Cancel a queued/running/interrupted/failed run.
@@ -740,6 +757,7 @@ class ResearchRunCoordinator:
 
     async def _load_resume_prefix(
         self, run_id: str, *, reuse_sections: bool, progress: ProgressHook | None = None,
+        spool: ResumeCheckpointSpool | None = None,
     ) -> list[DecisionCheckpoint]:
         """读回已完整落库的决策前缀(issue #314 入口;流式,#470 前半场)。
 
@@ -753,20 +771,23 @@ class ResearchRunCoordinator:
         """
 
         prefix: list[DecisionCheckpoint] = []
+        append = spool.append if spool is not None else prefix.append
+        count = 0
         next_progress_at = time.monotonic()
         try:
             rows = self._store.iter_artifacts(run_id)
             bundles = iter_decision_checkpoints(run_id, rows, reuse_sections=reuse_sections)
             try:
                 async for bundle in bundles:
-                    prefix.append(bundle)
+                    append(bundle)
+                    count += 1
                     if progress is not None and time.monotonic() >= next_progress_at:
                         # 让 worker 从实际完成校验的组判断活性。已落库计数由原阶段上报。
                         # 读回游标可能占用连接池的唯一连接,上报不能等待完整的取连接超时。
                         with contextlib.suppress(TimeoutError):
                             async with asyncio.timeout(0.25):
                                 await _report_progress(
-                                    progress, 0, None, f"research_run:resume_readback {len(prefix)}",
+                                    progress, 0, None, f"research_run:resume_readback {count}",
                                 )
                         next_progress_at = time.monotonic() + 5.0
             finally:
@@ -777,17 +798,19 @@ class ResearchRunCoordinator:
                     if close is not None:
                         await close()
         except Exception:
+            if spool is not None:
+                spool.close()
             logger.warning(
                 "research_run.resume_artifacts_unreadable",
                 run_id=run_id,
                 exc_info=True,
             )
             return []
-        if prefix:
+        if count:
             logger.info(
                 "research_run.resume_prefix_loaded",
                 run_id=run_id,
-                completed_decisions=len(prefix),
+                completed_decisions=count,
             )
         return prefix
 
@@ -795,7 +818,7 @@ class ResearchRunCoordinator:
         self,
         run_id: str,
         adapter: ResearchStrategyAdapter,
-        prefix: list[DecisionBundle],
+        prefix: list[DecisionBundle] | ResumeCheckpointSpool,
     ) -> bool:
         """把已完成决策前缀提议给适配器(可选协议,issue #304 getattr 先例)。
 
@@ -804,7 +827,11 @@ class ResearchRunCoordinator:
         失败时零突变,重算路径与既有语义完全一致(幂等去重兜底)。
         """
 
-        hook = getattr(adapter, "resume_from", None)
+        hook_name = (
+            "resume_from_checkpoint_spool" if isinstance(prefix, ResumeCheckpointSpool)
+            else "resume_from"
+        )
+        hook = getattr(adapter, hook_name, None)
         if not callable(hook):
             logger.info(
                 "research_run.resume_unsupported",

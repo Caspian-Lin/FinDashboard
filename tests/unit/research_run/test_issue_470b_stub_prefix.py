@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -91,6 +91,7 @@ from .test_issue_314_checkpoint_resume import (
     _artifact_fingerprint,
     _plain_snapshot,
     _signal_setup,
+    _user_factor_snapshot,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -601,6 +602,68 @@ class TestStubPrefixResumeEndToEnd:
         assert resumed.result is not None
         assert resumed.result.factor_screen is not None
         assert resumed.result.factor_screen["n_periods"] == 3
+
+    @pytest.mark.slow
+    @pytest.mark.timeout(900)
+    async def test_user_factor_long_prefix_matches_uninterrupted_run(self) -> None:
+        """272 期检查点 + 第 273 期续跑,保持 u_ screen 和阶段证据。"""
+        count = 273
+        snapshot_ids = tuple(f"user-factor-{index:03d}" for index in range(count))
+        snapshots = {
+            snapshot_id: replace(
+                _user_factor_snapshot(DECISION_AT + timedelta(days=index)),
+                snapshot_id=snapshot_id,
+            )
+            for index, snapshot_id in enumerate(snapshot_ids)
+        }
+        manifest = _signal_manifest(
+            _signal_spec(rank_threshold=0.5),
+            run_id="RR-470-user-factor-long-prefix",
+            idempotency_key="470-user-factor-long-prefix",
+            snapshot_ids=snapshot_ids,
+        )
+        factory = _factory_for(_closes_provider(n_days=count + 40))
+
+        async def snapshot_provider(snapshot_id: str) -> Any:
+            return snapshots.get(snapshot_id)
+
+        store = InMemoryResearchRunStore()
+        coordinator = ResearchRunCoordinator(store)
+        interrupted = await coordinator.execute(
+            manifest,
+            _InterruptAfterKSignalAdapter(
+                k=count - 1, manifest=manifest,
+                release_provider_factory=factory, snapshot_provider=snapshot_provider,
+            ),
+        )
+        assert interrupted.status is ResearchRunStatus.INTERRUPTED
+        assert len(await store.list_artifact_digests(manifest.run_id)) == (count - 1) * 13
+        resumed = await coordinator.execute(
+            manifest,
+            SignalEnginePipelineAdapter(
+                manifest=manifest, release_provider_factory=factory, snapshot_provider=snapshot_provider,
+            ),
+        )
+        control_manifest = replace(
+            manifest, run_id="RR-470-user-factor-long-control",
+            idempotency_key="470-user-factor-long-control",
+        )
+        control = await coordinator.execute(
+            control_manifest,
+            SignalEnginePipelineAdapter(
+                manifest=control_manifest, release_provider_factory=factory,
+                snapshot_provider=snapshot_provider,
+            ),
+        )
+        assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
+        assert control.status is ResearchRunStatus.COMPLETED, control.error_summary
+        assert resumed.result is not None
+        assert resumed.result.factor_screen is not None
+        assert resumed.result.factor_screen["n_periods"] == count
+        assert resumed.result_checksum == control.result_checksum
+        assert _artifact_fingerprint(await store.list_artifacts(manifest.run_id)) == (
+            _artifact_fingerprint(await store.list_artifacts(control_manifest.run_id))
+        )
 
     @pytest.mark.parametrize("changed", ["features_date", "orders_date", "feature_integer", "feature_iso", "feature_extra"])
     async def test_resume_detects_checksum_consistent_payload_drift(self, changed: str) -> None:

@@ -24,12 +24,17 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from contextlib import aclosing
+import copyreg
+import pickle
+import tempfile
+from collections import deque
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, aclosing
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from decimal import Decimal
-from typing import NamedTuple, cast
+from types import MappingProxyType
+from typing import BinaryIO, NamedTuple, cast
 
 import structlog
 
@@ -98,6 +103,104 @@ class DecisionCheckpoint:
     decision: DecisionBundle
     # 只有候选池与特征恢复后能逐字节往返时才提供。保留轻量证据,释放原载荷。
     stages: dict[ResearchRunStage, CheckpointStage] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeLedgerSeed:
+    business_date: date
+    decision_at: datetime
+    fills: tuple[ResearchFill, ...]
+    positions: tuple[ResearchPosition, ...]
+    ledger: LedgerSnapshot
+    risk_state: ResearchRiskState
+
+
+def _restore_mapping_proxy(values: dict[object, object]) -> Mapping[object, object]:
+    return MappingProxyType(values)
+
+
+def _reduce_mapping_proxy(
+    value: Mapping[object, object],
+) -> tuple[Callable[[dict[object, object]], Mapping[object, object]], tuple[dict[object, object]]]:
+    return _restore_mapping_proxy, (dict(value),)
+
+
+class ResumeCheckpointSpool:
+    """在协调器与组合管线之间保存已验证的重决策前缀。
+
+    内存只保留账本种子与当前重决策。临时文件只由当前进程打开,
+    仅回读自己已校验并重建的对象。内容不参与任何产物或 checksum。
+    """
+
+    def __init__(self) -> None:
+        self._file: BinaryIO | None = None
+        self._files = ExitStack()
+        self.seeds: list[ResumeLedgerSeed] = []
+        self.has_user_features = False
+        self.current: DecisionCheckpoint | None = None
+
+    def __len__(self) -> int:
+        return len(self.seeds)
+
+    def append(self, checkpoint: DecisionCheckpoint) -> None:
+        from finboard_data.factor_lab import is_user_factor_name
+
+        file = self._file
+        if file is None:
+            file = cast(
+                BinaryIO,
+                self._files.enter_context(
+                    tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115 - 由 ExitStack 管理
+                ),
+            )
+            self._file = file
+        writer = pickle.Pickler(file, protocol=pickle.HIGHEST_PROTOCOL)
+        writer.dispatch_table = {
+            **copyreg.dispatch_table,
+            MappingProxyType: _reduce_mapping_proxy,
+        }
+        writer.dump(checkpoint)
+        decision = checkpoint.decision
+        self.seeds.append(ResumeLedgerSeed(
+            decision.business_date, decision.decision_at, decision.fills,
+            decision.positions, decision.ledger, decision.risk_state,
+        ))
+        if not self.has_user_features:
+            self.has_user_features = any(
+                is_user_factor_name(feature.feature_id) for feature in decision.features
+            )
+
+    def replay(self) -> Iterator[DecisionBundle]:
+        if self._file is None:
+            return
+        self._file.seek(0)
+        try:
+            for _ in range(len(self)):
+                checkpoint = pickle.load(self._file)
+                if not isinstance(checkpoint, DecisionCheckpoint):
+                    raise ValueError("临时断点文件记录类型错误")
+                self.current = checkpoint
+                yield checkpoint.decision
+                self.current = None
+                del checkpoint
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        self.current = None
+        self.seeds.clear()
+        self.has_user_features = False
+        self._file = None
+        self._files.close()
+
+
+def replay_resume_bundles(
+    source: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
+) -> Iterator[DecisionBundle]:
+    if isinstance(source, ResumeCheckpointSpool):
+        return source.replay()
+    pending = deque(source)
+    return (pending.popleft() for _ in range(len(pending)))
 
 
 def decision_artifact_index(run_id: str, artifact_id: str) -> int | None:
