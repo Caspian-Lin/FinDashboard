@@ -1,4 +1,4 @@
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { oosLabel } from "@/lib/research-semantics";
 import FormalExperimentDialog from "@/components/research/FormalExperimentDialog";
 import { ValidationEvidence } from "@/components/research/ValidationEvidence";
@@ -843,6 +843,7 @@ export default function Experiments() {
   const [outcomeFilter, setOutcomeFilter] = React.useState("all");
   const [statusFilter, setStatusFilter] = React.useState<string>("all");
   const selectedId = params.get("experiment");
+  const sourceTopicId = params.get("topic");
   const setSelectedId = (id: string | null) => setParams(id ? { experiment: id } : {});
   const [createOpen, setCreateOpen] = React.useState(false);
   const [formalOpen, setFormalOpen] = React.useState(false);
@@ -1126,6 +1127,9 @@ export default function Experiments() {
                   <ScrollArea className="max-h-[560px] pr-3">
                     <div className="space-y-5">
                       <ExperimentOutcome detail={detail} />
+                      {sourceTopicId && <Link className="text-sm text-primary underline" to={`/research/topics?topic=${encodeURIComponent(sourceTopicId)}`}>
+                        {tl({ zh: "回原课题执行与复核", en: "Return to the Topic to Execute and Review" })}
+                      </Link>}
                       <div>
                         <p className="text-xs font-medium text-muted-foreground">
                           {tl({ zh: "假设", en: "Hypothesis" })}
@@ -1321,9 +1325,9 @@ export default function Experiments() {
         </div>
       </div>
 
-      {formalOpen && <FormalExperimentDialog onClose={() => setFormalOpen(false)} onCreated={(id) => {
+      {formalOpen && <FormalExperimentDialog onClose={() => setFormalOpen(false)} onCreated={(id, topicId) => {
         setFormalOpen(false);
-        setSelectedId(id);
+        setParams({ experiment: id, topic: topicId });
       }} />}
       <CreateExperimentDialog open={createOpen} onOpenChange={setCreateOpen} />
 

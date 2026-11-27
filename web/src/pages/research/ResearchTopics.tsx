@@ -486,6 +486,7 @@ function ContextCard({ topicId }: { topicId: string }) {
 function TopicArtifactsCard({ topic }: { topic: Topic }) {
   const qc = useQueryClient();
   const [notice, setNotice] = useState("");
+  const [unsealJobId, setUnsealJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [formalOpen, setFormalOpen] = useState(false);
   const [confirmUnseal, setConfirmUnseal] = useState<{ link: TopicArtifactLink; operationId: string } | null>(null);
@@ -508,6 +509,7 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
       }),
     onSuccess: (receipt) => {
       setConfirmUnseal(null);
+      setUnsealJobId(typeof receipt.job_id === "string" ? receipt.job_id : null);
       setError(null);
       setNotice(
         `已提交一次性揭盲执行（${String(receipt.job_id ?? receipt.entity_id)}）；揭盲后不可重做。`,
@@ -549,7 +551,10 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
           服务端会在同一事务写入链接与研究审计。
         </p>
       )}
-      {notice && <p className="text-sm text-primary" role="status">{notice}</p>}
+      {notice && <p className="text-sm text-primary" role="status">
+        {notice}
+        {unsealJobId && <Link className="ml-2 underline" to={`/jobs?job=${encodeURIComponent(unsealJobId)}`}>查看揭盲任务</Link>}
+      </p>}
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
