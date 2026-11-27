@@ -34,14 +34,22 @@ async def describe_backtest_inputs(
     )):
         raise ValueError("invalid_backtest_fees: use nonnegative costs")
     selection = FactorSelectionParams.model_validate(request["selection"])
-    unpublished = await ResearchDatasetRepository(session).selection_inputs_gate(selection.to_domain())
+    batches, unpublished = await ResearchDatasetRepository(session).resolve_selection_batches(selection.to_domain())
     if unpublished:
         raise ValueError("dataset_unpublished: " + ", ".join(unpublished))
-    benchmark = BenchmarkConfig(**(request.get("benchmark") or {}))
-    return {
-        "preview_checksum": payload_checksum({"request": request, "provider_name": provider}),
-        "request": {**request, "params": definition.params_model.model_validate(request["params"]).model_dump(mode="json")},
+    effective_selection = selection.model_dump(mode="json")
+    effective_selection["dataset_versions"] = {
+        **selection.dataset_versions,
+        **{name: batch.dataset_version for name, batch in batches.items()},
+    }
+    resolved = {
+        "request": {
+            **request,
+            "params": definition.params_model.model_validate(request["params"]).model_dump(mode="json"),
+            "selection": effective_selection,
+        },
         "provider_name": provider,
-        "benchmark": benchmark.as_dict(),
+        "benchmark": BenchmarkConfig(**(request.get("benchmark") or {})).as_dict(),
         "matching": MatchingModel().as_dict(),
     }
+    return {"preview_checksum": payload_checksum(resolved), **resolved}

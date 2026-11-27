@@ -942,8 +942,8 @@ export default function Backtest() {
           <DialogHeader>
             <DialogTitle>{tl({ zh: "核对探索回测输入", en: "Review Exploratory Backtest Inputs" })}</DialogTitle>
             <DialogDescription>{tl({
-              zh: "按所选数据源和历史窗口进行纸面撮合。正式样本外验证走研究实验。",
-              en: "Paper matching uses this source and historical window. Formal out-of-sample testing is available in Experiments.",
+              zh: "按所选数据源与历史窗口纸面撮合。预检锁定选股批次与运行参数，行情源在任务执行时读取。",
+              en: "Paper matching uses this source and historical window. Preflight pins selection batches and parameters. Bars are read when the job runs.",
             })}</DialogDescription>
           </DialogHeader>
           {backtestPreview.data && (
@@ -952,6 +952,11 @@ export default function Backtest() {
                 <dd>{strategyName} · {backtestPreview.data.matching.matching_model_version} / {backtestPreview.data.matching.asset_rules_version}</dd></div>
               <div><dt className="text-muted-foreground">{tl({ zh: "数据来源与窗口", en: "Source and window" })}</dt>
                 <dd>{backtestPreview.data.provider_name} · {backtestPreview.data.request.start} – {backtestPreview.data.request.end}</dd></div>
+              {Object.keys(backtestPreview.data.request.selection.dataset_versions).length > 0 && (
+                <div><dt className="text-muted-foreground">{tl({ zh: "选股数据版本", en: "Selection data versions" })}</dt>
+                  <dd className="break-words">{Object.entries(backtestPreview.data.request.selection.dataset_versions)
+                    .map(([name, version]) => `${name} · ${version}`).join(" / ")}</dd></div>
+              )}
               <div><dt className="text-muted-foreground">{tl({ zh: "基准（配置）", en: "Configured benchmark" })}</dt>
                 <dd>{backtestPreview.data.benchmark.symbol ?? tl({ zh: "等权候选池", en: "Equal-weight candidate pool" })}</dd></div>
               <div><dt className="text-muted-foreground">{tl({ zh: "佣金率 / 最低佣金 / 卖出税 / 滑点", en: "Commission rate / minimum / sell tax / slippage" })}</dt>
