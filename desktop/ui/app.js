@@ -30,6 +30,7 @@ let busy = false;
 function setResult(message, error = false) {
   ui['result-status'].textContent = message;
   ui['result-status'].dataset.error = String(error);
+  if (error && !ui['diagnostic-details'].hidden) ui['diagnostic-details'].open = true;
 }
 
 function reconcile() {
@@ -49,6 +50,7 @@ function reconcile() {
   ui.import.disabled = busy || !running;
   ui.preset.disabled = busy || !running;
   ui.attach.disabled = busy || !running;
+  ui.attach.textContent = !status?.preset ? '接入 Codex' : ui.preset.value === status.preset ? '重新接入' : '切换预设';
   ui['open-workbench'].disabled = busy || !running;
   ui.preserve.disabled = busy || !engine || !hasInstance || purging;
   ui.preserve.textContent = preserving ? '继续保留数据卸载' : '卸载并保留研究数据';
@@ -66,9 +68,10 @@ function renderStatus(next) {
   const phaseLabels = { initializing: '等待完成安装', retained: '研究数据已保留', preserving: '等待继续卸载', purging: '等待继续清理' };
   badge.textContent = next.running ? '服务就绪' : (serviceLabels[next.docker] ?? phaseLabels[next.phase] ?? (next.installed ? '已停止' : '待安装'));
   badge.dataset.tone = next.running ? 'good' : next.docker === 'linux' ? 'neutral' : 'warning';
+  const installHint = next.phase === 'retained' ? '启动后可继续使用保留的研究数据。'
+    : next.installed ? '启动后可打开工作台。' : '首次启动会加载离线镜像并创建数据库。';
   ui['service-detail'].textContent = next.repair || (next.running
-    ? `Docker Desktop 已连接 · 127.0.0.1:${next.port}`
-    : '服务就绪后，可以导入样例、接入 Codex 或打开工作台。');
+    ? `Docker Desktop 已连接 · 127.0.0.1:${next.port}` : installHint);
   ui.port.value = String(next.port);
   if (next.preset in presets) ui.preset.value = next.preset;
   ui['codex-state'].textContent = next.pending_revocation
@@ -86,11 +89,14 @@ function startRecord() {
   ui.log.textContent = '';
   ui.log.hidden = true;
   ui.command.hidden = true;
+  ui['diagnostic-details'].hidden = true;
+  ui['diagnostic-details'].open = false;
   ui['result-meta'].textContent = '';
 }
 
 function addLog({ stream, line }) {
   if (!line) return;
+  ui['diagnostic-details'].hidden = false;
   ui.log.hidden = false;
   ui.log.append(document.createTextNode(`${stream === 'stderr' ? '[stderr] ' : ''}${line}\n`));
   ui.log.scrollTop = ui.log.scrollHeight;
@@ -116,6 +122,7 @@ async function perform(operation) {
     const result = await run(operation);
     ui['command-text'].value = result.command;
     ui.command.hidden = false;
+    ui['diagnostic-details'].hidden = false;
     ui['result-meta'].textContent = `退出码 ${result.exit_code} · ${result.elapsed_seconds.toFixed(1)} s`;
 
     if (operation.kind === 'status') {
@@ -158,11 +165,21 @@ function setStatusUnknown() {
 function closePurge() {
   ui['purge-form'].hidden = true;
   ui.confirmation.value = '';
+  ui['show-purge'].setAttribute('aria-expanded', 'false');
   reconcile();
+}
+
+function updateNavigation() {
+  const section = location.hash || '#overview';
+  for (const link of document.querySelectorAll('.rail-links a')) {
+    if (link.hash === section) link.setAttribute('aria-current', 'location');
+    else link.removeAttribute('aria-current');
+  }
 }
 
 ui.refresh.addEventListener('click', () => perform({ kind: 'status' }));
 ui.port.addEventListener('input', reconcile);
+ui.preset.addEventListener('change', reconcile);
 ui['service-form'].addEventListener('submit', (event) => {
   event.preventDefault();
   perform({ kind: 'install', port: Number(ui.port.value) });
@@ -173,6 +190,7 @@ ui.attach.addEventListener('click', () => perform({ kind: 'attach', preset: ui.p
 ui.preserve.addEventListener('click', () => perform({ kind: 'uninstall_preserve' }));
 ui['show-purge'].addEventListener('click', () => {
   ui['purge-form'].hidden = false;
+  ui['show-purge'].setAttribute('aria-expanded', 'true');
   ui.confirmation.focus();
 });
 ui['cancel-purge'].addEventListener('click', () => {
@@ -187,6 +205,8 @@ ui['purge-form'].addEventListener('submit', (event) => {
 ui['open-workbench'].addEventListener('click', async () => {
   if (busy) return;
   busy = true;
+  startRecord();
+  setResult('正在打开研究工作台…');
   reconcile();
   try {
     await core.invoke('desktop_open_workbench');
@@ -209,6 +229,9 @@ ui.copy.addEventListener('click', async () => {
   }
 });
 
+ui['maintenance-link'].addEventListener('click', () => { ui.maintenance.open = true; });
+window.addEventListener('hashchange', updateNavigation);
+updateNavigation();
 reconcile();
 if (core) perform({ kind: 'status' });
 else setStatusUnknown();
