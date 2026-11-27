@@ -12,6 +12,16 @@
 调用服务、把统一业务错误映射成 HTTP / MCP 错误。本文件冻结这条链路的对外契约，
 任何改动都要先改这里再改代码。
 
+## 显式预览与启动
+
+课题和「研究运行」使用同一已发布策略选择器。选择版本、发布锚定的因子快照或序列、资本和决策频率后，通过 `POST /api/research/runs/preflight` 读取冻结输入、策略窗口、基准、组合约束和费用假设。`GET /api/research/runs/factor-series-options` 从冻结发布查选择元数据。预览不登记运行或创建后台任务。`GET /api/research/strategy-specs?published_only=true` 显示已发布版本，包含其最新版仍是草稿的策略。
+
+可以在预览中提供 `preview_window` 以选择冻结发布范围内的日期、预热交易日和尾部估值交易日。服务端按交易日历解析决策窗，并检查数据发布仍与策略锁定集合一致。提交时携带预览 `manifest.data_scope` 中的 `scope` 和 `resolution_id`，由服务端重算校验。
+
+确认后用原输入及 `expected_manifest_checksum` 单独提交。服务端再次执行预检，摘要变化返回 `409 run_preflight_drift`。用户核对新预览后再启动。旧调用可继续省略该字段。组合约束写入 `portfolio_config.overrides`，费用覆盖写入 `fee_config.overrides` 并选择 `fee_policy_version=explicit_overrides_v1`。
+
+`finboard_run_queue` 可用 `preview_only=true` 执行同一预检。调用仍需既有 `research.run` 作用域。
+
 ## 1. 分层与职责
 
 ```text

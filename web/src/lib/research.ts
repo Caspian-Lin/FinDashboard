@@ -38,7 +38,34 @@ export interface ResearchRunSummary {
   job_id?: string | null;
 }
 
+interface ResearchRunPreviewWindow {
+  start: string;
+  end: string;
+  warmup_sessions: number;
+  tail_sessions: number;
+}
+
+export interface ResearchRunPreview {
+  run_id: string;
+  manifest_checksum: string;
+  manifest: Record<string, unknown>;
+}
+
+interface FactorSeriesOption {
+  series_id: string;
+  code_artifact: string;
+  code_commit: string;
+  release_id: string;
+  dataset_release_ids: string[];
+  window_start: string;
+  window_end: string;
+}
+
 export interface ResearchRunQueueIn {
+  factor_series_ids?: string[];
+  expected_manifest_checksum?: string;
+  data_scope?: Record<string, unknown>;
+  data_scope_resolution_id?: string;
   idempotency_key: string;
   strategy_id: string;
   strategy_version: number;
@@ -89,6 +116,16 @@ export interface ResearchRunDetail extends ResearchRunSummary {
 }
 
 export const researchRunApi = {
+  preview: (body: ResearchRunQueueIn & { preview_window?: ResearchRunPreviewWindow }) =>
+    fetchJSON<ResearchRunPreview>("/research/runs/preflight", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  factorSeriesOptions: (releaseIds: string[]) => {
+    const params = new URLSearchParams();
+    releaseIds.forEach((id) => params.append("release_id", id));
+    return fetchJSON<FactorSeriesOption[]>(`/research/runs/factor-series-options?${params}`);
+  },
   queue: (body: ResearchRunQueueIn) =>
     fetchJSON<ResearchRunSummary>(`/research/runs`, {
       method: "POST",
@@ -532,9 +569,11 @@ export const strategySpecApi = {
       `/research/strategy-specs/${strategyId}/rollback`,
       { method: "POST", body: JSON.stringify({ target_version: targetVersion, expected_version: expectedVersion }) },
     ).then(normalizeStrategySpec),
-  list: (limit?: number) => {
-    const q = limit ? `?limit=${limit}` : "";
-    return fetchJSON<StrategySpecWire[]>(`/research/strategy-specs${q}`).then((items) =>
+  list: (limit?: number, publishedOnly = false) => {
+    const query = new URLSearchParams();
+    if (limit !== undefined) query.set("limit", String(limit));
+    if (publishedOnly) query.set("published_only", "true");
+    return fetchJSON<StrategySpecWire[]>(`/research/strategy-specs${query.size ? "?" + query.toString() : ""}`).then((items) =>
       items.map(normalizeStrategySpec),
     );
   },

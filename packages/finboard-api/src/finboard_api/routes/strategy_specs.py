@@ -431,9 +431,11 @@ async def rollback_strategy_spec(
 @router.get("", response_model=list[StrategySpecVersionOut])
 async def list_strategy_specs(
     limit: int = Query(default=100, ge=1, le=500),
+    published_only: bool = False,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[StrategySpecVersionOut]:
-    rows = await ResearchStrategySpecRepository(session).list_latest(limit=limit)
+    repo = ResearchStrategySpecRepository(session)
+    rows = await repo.list_published(limit=limit) if published_only else await repo.list_latest(limit=limit)
     return [_version_out(row) for row in rows]
 
 

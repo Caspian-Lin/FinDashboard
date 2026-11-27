@@ -1,3 +1,4 @@
+import ResearchRunSetup from "@/components/research/ResearchRunSetup";
 import StrategyExplanation from "@/components/research/StrategyExplanation";
 import { runSchedule } from "@/lib/research-semantics";
 import { ResearchHint } from "@/components/research/ResearchHint";
@@ -62,13 +63,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import {
-  factorLabApi,
   researchRunApi,
   runningRunLabel,
-  strategySpecApi,
-  featureSnapshotNames,
-  featureSnapshotSymbolCount,
-  type ResearchStrategySpec,
   type ResearchRunQueueIn,
   type ResearchRunSummary,
 } from "@/lib/research";
@@ -128,23 +124,6 @@ function initialCapital(run: ResearchRunSummary): number | null {
 function actorType(run: ResearchRunSummary): string {
   const value = run.manifest?.actor_type;
   return typeof value === "string" && value !== "" ? value : "human";
-}
-
-function specReleaseIds(strategy: ResearchStrategySpec | undefined): string[] {
-  const plan = manifestRecord(strategy?.spec, "validation_plan");
-  const ids = plan?.dataset_release_ids;
-  return Array.isArray(ids) ? ids.filter((item): item is string => typeof item === "string") : [];
-}
-
-function specNeedsFactorSnapshot(strategy: ResearchStrategySpec | undefined): boolean {
-  const graph = manifestRecord(strategy?.spec, "feature_graph");
-  const nodes = graph?.nodes;
-  if (!Array.isArray(nodes)) return false;
-  return nodes.some((node) => {
-    if (!node || typeof node !== "object") return false;
-    const item = node as Record<string, unknown>;
-    return item.kind === "factor" || item.kind === "risk_factor";
-  });
 }
 
 function JsonBlock({
@@ -347,57 +326,6 @@ function CreateResearchRunDialog({
 }) {
   const { tl } = useT();
   const queryClient = useQueryClient();
-  const [strategyId, setStrategyId] = useState("");
-  const [factorSnapshotIds, setFactorSnapshotIds] = useState<string[]>([]);
-  const [initialCapital, setInitialCapital] = useState("100000");
-  const [requestedBy, setRequestedBy] = useState("console");
-  const [idempotencyKey, setIdempotencyKey] = useState("");
-
-  const strategiesQuery = useQuery({
-    queryKey: ["spec-list", "queue"],
-    queryFn: () => strategySpecApi.list(100),
-    enabled: open,
-  });
-  const selectedStrategy = strategiesQuery.data?.find(
-    (item) => `${item.strategy_id}@${item.version}` === strategyId,
-  );
-  const releaseIds = specReleaseIds(selectedStrategy);
-  const needsFactorSnapshot = specNeedsFactorSnapshot(selectedStrategy);
-  const releaseKey = releaseIds.join(",");
-  const snapshotsQuery = useQuery({
-    queryKey: ["feature-snapshots", "queue", releaseKey],
-    queryFn: async () => {
-      // 验证计划可引用多份数据发布;快照须按全部所选发布并集匹配(此前只查第一份)。
-      const perRelease = await Promise.all(
-        releaseIds.map((id) => factorLabApi.features(id, 100)),
-      );
-      const seen = new Set<string>();
-      return perRelease.flat().filter((snapshot) => {
-        if (seen.has(snapshot.snapshot_id)) return false;
-        seen.add(snapshot.snapshot_id);
-        return true;
-      });
-    },
-    enabled: open && releaseIds.length > 0 && needsFactorSnapshot,
-  });
-
-  useEffect(() => {
-    if (!open) return;
-    setStrategyId("");
-    setFactorSnapshotIds([]);
-    setInitialCapital("100000");
-    setRequestedBy("console");
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      setIdempotencyKey(`research-${crypto.randomUUID()}`);
-    } else {
-      setIdempotencyKey(`research-${Date.now()}`);
-    }
-  }, [open]);
-
-  useEffect(() => {
-    setFactorSnapshotIds([]);
-  }, [strategyId]);
-
   const queueMutation = useMutation({
     mutationFn: (body: ResearchRunQueueIn) => researchRunApi.queue(body),
     onSuccess: (run) => {
@@ -407,175 +335,30 @@ function CreateResearchRunDialog({
     },
   });
 
-  const factorSnapshotReady = !needsFactorSnapshot || factorSnapshotIds.length > 0;
-  const capital = Number(initialCapital);
-  const valid =
-    !!selectedStrategy &&
-    selectedStrategy.published &&
-    releaseIds.length > 0 &&
-    factorSnapshotReady &&
-    capital >= 100000 &&
-    capital <= 500000 &&
-    requestedBy.trim() !== "" &&
-    idempotencyKey.trim().length >= 8;
-
-  const submit = () => {
-    if (!selectedStrategy || !valid) return;
-    queueMutation.mutate({
-      idempotency_key: idempotencyKey.trim(),
-      strategy_id: selectedStrategy.strategy_id,
-      strategy_version: selectedStrategy.version,
-      dataset_release_ids: releaseIds,
-      factor_snapshot_ids: factorSnapshotIds,
-      parameters: {},
-      validation_config: {},
-      portfolio_config: {},
-      risk_config: {},
-      execution_config: {},
-      fee_config: {},
-      benchmark_config: {},
-      code_version: "web-ui-v1",
-      initial_capital: capital,
-      requested_by: requestedBy.trim(),
-    });
+  const dismiss = (next: boolean) => {
+    if (queueMutation.isPending && !next) return;
+    queueMutation.reset();
+    onOpenChange(next);
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={dismiss}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{tl({ zh: "排队研究运行", en: "Queue research run" })}</DialogTitle>
+          <DialogTitle>{tl({ zh: "新建研究运行", en: "New research run" })}</DialogTitle>
           <DialogDescription>
-            {tl({
-              zh: "冻结已发布策略、数据发布和因子快照。此操作只登记 queued 任务，不会在网页请求中执行回测。",
-              en: "Freezes the published strategy, data releases, and factor snapshots. This only registers a queued job; the backtest is not executed in the web request.",
-            })}
+            {tl({ zh: "先对照生效输入，再启动离线研究任务。", en: "Review effective inputs before queuing the offline research job." })}
           </DialogDescription>
         </DialogHeader>
-
-        <Alert variant="info">
-          <AlertTitle>{tl({ zh: "执行边界", en: "Execution boundary" })}</AlertTitle>
-          <AlertDescription>
-            {tl({
-              zh: "提交后需要受控的离线 worker/CLI 消费 queued 任务。运行完成后才可进入组合、模拟盘和研究报告；页面不会自动启动任何运行。",
-              en: "After submission, a controlled offline worker/CLI consumes the queued job. Portfolio, simulation, and research report become available only after the run completes; the page never starts runs automatically.",
-            })}
-          </AlertDescription>
-        </Alert>
-
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="research-run-strategy">{tl({ zh: "已发布策略规格", en: "Published strategy spec" })}</Label>
-            <Select value={strategyId} onValueChange={setStrategyId}>
-              <SelectTrigger id="research-run-strategy">
-                <SelectValue placeholder={tl({ zh: "选择已发布策略", en: "Select a published strategy" })} />
-              </SelectTrigger>
-              <SelectContent>
-                {(strategiesQuery.data ?? [])
-                  .filter((item) => item.published)
-                  .map((item) => (
-                    <SelectItem
-                      key={`${item.strategy_id}@${item.version}`}
-                      value={`${item.strategy_id}@${item.version}`}
-                    >
-                      <span className="font-mono">{item.strategy_id}@v{item.version}</span>
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-            {strategiesQuery.isError && (
-              <p className="text-xs text-destructive">{tl({ zh: "策略规格加载失败，请关闭后重试。", en: "Failed to load strategy specs. Please close and retry." })}</p>
-            )}
-            {!strategiesQuery.isLoading && (strategiesQuery.data ?? []).filter((item) => item.published).length === 0 && (
-              <p className="text-xs text-warning">
-                {tl({ zh: "暂无已发布策略。请先到 ", en: "No published strategies yet. Save and publish a version in " })}
-                <Link className="underline" to="/research/strategy">{tl({ zh: "策略 Studio", en: "Strategy Studio" })}</Link>
-                {tl({ zh: " 保存并发布版本。", en: " first." })}
-              </p>
-            )}
-          </div>
-
-          <div className="rounded-md border border-border bg-muted/20 p-3 text-xs">
-            <p className="font-medium text-foreground">{tl({ zh: "冻结数据发布", en: "Frozen data releases" })}</p>
-            {releaseIds.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-1">
-                {releaseIds.map((id) => (
-                  <Badge key={id} variant="info" className="font-mono text-[10px]">{id}</Badge>
-                ))}
-              </div>
-            ) : (
-              <p className="mt-1 text-muted-foreground">{tl({ zh: "选择策略后显示其验证计划要求。", en: "Select a strategy to see its validation plan requirements." })}</p>
-            )}
-          </div>
-
-          {needsFactorSnapshot && (
-            <div className="space-y-2 rounded-md border border-warning/30 bg-warning/5 p-3">
-              <Label>{tl({ zh: "冻结因子快照（至少 1 个）", en: "Frozen factor snapshots (at least 1)" })}</Label>
-              {snapshotsQuery.isLoading ? (
-                <p className="text-xs text-muted-foreground">{tl({ zh: "正在加载与数据发布匹配的快照…", en: "Loading snapshots matching the data release…" })}</p>
-              ) : snapshotsQuery.data && snapshotsQuery.data.length > 0 ? (
-                <div className="space-y-1">
-                  {snapshotsQuery.data.map((snapshot) => {
-                    const checked = factorSnapshotIds.includes(snapshot.snapshot_id);
-                    return (
-                      <label key={snapshot.snapshot_id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => setFactorSnapshotIds((current) => checked ? current.filter((id) => id !== snapshot.snapshot_id) : [...current, snapshot.snapshot_id])}
-                        />
-                        <span className="font-mono">{snapshot.snapshot_id}</span>
-                        <span className="text-muted-foreground">
-                          {tl({
-                            zh: `${featureSnapshotSymbolCount(snapshot)} 标的 · ${featureSnapshotNames(snapshot).length} 个因子`,
-                            en: `${featureSnapshotSymbolCount(snapshot)} symbols · ${featureSnapshotNames(snapshot).length} factors`,
-                          })}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-xs text-warning">
-                  {tl({ zh: "暂无匹配快照。请先在 ", en: "No matching snapshots yet. Generate and publish a feature snapshot in the " })}
-                  <Link className="underline" to="/research/factors">{tl({ zh: "因子实验室", en: "Factor Lab" })}</Link>
-                  {tl({ zh: " 生成并发布特征快照。", en: " first." })}
-                </p>
-              )}
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="research-run-capital">{tl({ zh: "初始资金", en: "Initial capital" })}</Label>
-              <Input id="research-run-capital" type="number" min={100000} max={500000} value={initialCapital} onChange={(event) => setInitialCapital(event.target.value)} />
-              <p className="text-[11px] text-muted-foreground">{tl({ zh: "研究运行允许 ¥100,000–¥500,000。", en: "Research runs allow ¥100,000–¥500,000." })}</p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="research-run-requested-by">{tl({ zh: "发起人", en: "Requested by" })}</Label>
-              <Input id="research-run-requested-by" value={requestedBy} onChange={(event) => setRequestedBy(event.target.value)} placeholder="analyst@finboard" />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="research-run-idempotency">{tl({ zh: "幂等键", en: "Idempotency key" })}</Label>
-            <Input id="research-run-idempotency" value={idempotencyKey} onChange={(event) => setIdempotencyKey(event.target.value)} className="font-mono text-xs" />
-            <p className="text-[11px] text-muted-foreground">{tl({ zh: "相同幂等键重复提交不会生成第二个研究运行。", en: "Resubmitting with the same idempotency key will not create a second research run." })}</p>
-          </div>
-        </div>
-
-        {queueMutation.isError && (
-          <Alert variant="destructive">
-            <AlertTitle>{tl({ zh: "排队失败", en: "Failed to queue" })}</AlertTitle>
-            <AlertDescription>{errorMessage(queueMutation.error, tl({ zh: "研究运行未登记，请检查策略、数据和因子快照", en: "Research run not registered. Check the strategy, data, and factor snapshots" }))}</AlertDescription>
-          </Alert>
+        {open && (
+          <ResearchRunSetup
+            onStart={(payload) => queueMutation.mutate(payload)}
+            pending={queueMutation.isPending}
+            error={queueMutation.error}
+            onRepreview={() => queueMutation.reset()}
+            onCancel={() => dismiss(false)}
+          />
         )}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={queueMutation.isPending}>{tl({ zh: "取消", en: "Cancel" })}</Button>
-          <Button onClick={submit} disabled={!valid || queueMutation.isPending}>
-            <Plus className="mr-2 h-4 w-4" />
-            {queueMutation.isPending ? tl({ zh: "登记中…", en: "Registering…" }) : tl({ zh: "登记 queued 运行", en: "Register queued run" })}
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

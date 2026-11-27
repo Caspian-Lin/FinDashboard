@@ -8,6 +8,8 @@ import { Label } from "@/components/ui/label";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/states";
 import { EvidenceFields } from "@/components/research/StrategyExplanation";
 import { ResearchMemoryArticle } from "@/components/research/ResearchMemoryArticle";
+import ResearchRunSetup from "@/components/research/ResearchRunSetup";
+import type { ResearchRunQueueIn } from "@/lib/research";
 import { ResearchTimestamp } from "@/components/research/ResearchTimestamp";
 import { TopicDataCard } from "@/components/data/TopicDataCard";
 import {
@@ -26,17 +28,9 @@ import {
   type TopicDraftUpdate,
   type TopicInput,
   type TopicRunLink,
-  type TopicRunStartInput,
   type RoundInput,
   type MemoryDetail,
 } from "@/lib/research-workspace";
-import {
-  factorLabApi,
-  featureSnapshotNames,
-  featureSnapshotSymbolCount,
-  strategySpecApi,
-  type ResearchStrategySpec,
-} from "@/lib/research";
 import { fetchJSON } from "@/lib/api";
 
 const EMPTY_DRAFT: TopicDraftInput = { title: "", question: "" };
@@ -550,7 +544,7 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
           服务端会在同一事务写入链接与研究审计。
         </p>
       )}
-      {notice && <p className="text-sm text-primary">{notice}</p>}
+      {notice && <p className="text-sm text-primary" role="status">{notice}</p>}
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -702,33 +696,6 @@ const TOPIC_RUN_STATES: Record<string, string> = {
 };
 const TERMINAL_TOPIC_RUN_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
-function manifestRecord(
-  manifest: Record<string, unknown> | undefined,
-  key: string,
-): Record<string, unknown> | undefined {
-  const value = manifest?.[key];
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function specReleaseIds(strategy: ResearchStrategySpec | undefined): string[] {
-  const plan = manifestRecord(strategy?.spec, "validation_plan");
-  const ids = plan?.dataset_release_ids;
-  return Array.isArray(ids) ? ids.filter((item): item is string => typeof item === "string") : [];
-}
-
-function specNeedsFactorSnapshot(strategy: ResearchStrategySpec | undefined): boolean {
-  const graph = manifestRecord(strategy?.spec, "feature_graph");
-  const nodes = graph?.nodes;
-  if (!Array.isArray(nodes)) return false;
-  return nodes.some((node) => {
-    if (!node || typeof node !== "object") return false;
-    const item = node as Record<string, unknown>;
-    return item.kind === "factor" || item.kind === "risk_factor";
-  });
-}
-
 function newOperationId(prefix: string): string {
   const token =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -740,15 +707,9 @@ function newOperationId(prefix: string): string {
 function TopicRunsCard({ topic }: { topic: Topic }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [strategyKey, setStrategyKey] = useState("");
-  const [snapshotIds, setSnapshotIds] = useState<string[]>([]);
-  const [seriesIds, setSeriesIds] = useState("");
-  const [initialCapital, setInitialCapital] = useState("100000");
-  const [codeVersion, setCodeVersion] = useState("web-ui-v1");
-  const [requestedBy, setRequestedBy] = useState("user:api");
   const [operationId, setOperationId] = useState("");
-  const [idempotencyKey, setIdempotencyKey] = useState("");
   const [notice, setNotice] = useState("");
+  const [receipt, setReceipt] = useState<{ run_id: string; job_id?: string | null } | null>(null);
   const runsQuery = useQuery({
     queryKey: ["topic-runs", topic.topic_id],
     queryFn: () => topicRunApi.list(topic.topic_id),
@@ -757,39 +718,21 @@ function TopicRunsCard({ topic }: { topic: Topic }) {
       return items.some((item) => !TERMINAL_TOPIC_RUN_STATES.has(item.state)) ? 5_000 : false;
     },
   });
-  const strategiesQuery = useQuery({
-    queryKey: ["spec-list", "topic-run"],
-    queryFn: () => strategySpecApi.list(100),
-    enabled: open,
-  });
-  const selectedStrategy = strategiesQuery.data?.find(
-    (item) => `${item.strategy_id}@${item.version}` === strategyKey,
-  );
-  const releaseIds = specReleaseIds(selectedStrategy);
-  const needsSnapshot = specNeedsFactorSnapshot(selectedStrategy);
-  const snapshotsQuery = useQuery({
-    queryKey: ["feature-snapshots", "topic-run", releaseIds.join(",")],
-    queryFn: async () => {
-      const perRelease = await Promise.all(
-        releaseIds.map((id) => factorLabApi.features(id, 100)),
-      );
-      const seen = new Set<string>();
-      return perRelease.flat().filter((snapshot) => {
-        if (seen.has(snapshot.snapshot_id)) return false;
-        seen.add(snapshot.snapshot_id);
-        return true;
-      });
-    },
-    enabled: open && needsSnapshot && releaseIds.length > 0,
-  });
-
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ["topic-runs", topic.topic_id] });
     void qc.invalidateQueries({ queryKey: ["topic-context", topic.topic_id] });
   };
   const start = useMutation({
-    mutationFn: (body: TopicRunStartInput) => topicRunApi.start(topic.topic_id, body),
+    mutationFn: (body: ResearchRunQueueIn) => {
+      if (!topic.goal) throw new Error("课题缺少有效的目标版本");
+      return topicRunApi.start(topic.topic_id, {
+        ...body,
+        goal_version: topic.goal.version,
+        operation_id: operationId,
+      });
+    },
     onSuccess: (receipt) => {
+      setReceipt(receipt);
       setOpen(false);
       setNotice(
         receipt.created
@@ -803,7 +746,7 @@ function TopicRunsCard({ topic }: { topic: Topic }) {
     mutationFn: (run: TopicRunLink) =>
       topicRunApi.retry(topic.topic_id, run.run_id, {
         idempotency_key: newOperationId("topic-retry"),
-        requested_by: requestedBy.trim() || "user:api",
+        requested_by: "user:web",
         operation_id: newOperationId("OP-topic-retry"),
       }),
     onSuccess: (receipt) => {
@@ -820,59 +763,14 @@ function TopicRunsCard({ topic }: { topic: Topic }) {
   });
 
   const openForm = () => {
-    setOpen(true);
-    setStrategyKey("");
-    setSnapshotIds([]);
-    setSeriesIds("");
-    setInitialCapital("100000");
-    setCodeVersion("web-ui-v1");
-    setRequestedBy("user:api");
+    start.reset();
     setOperationId(newOperationId("OP-topic-run"));
-    setIdempotencyKey(newOperationId("topic-run"));
     setNotice("");
-  };
-  const capital = Number(initialCapital);
-  const validForm =
-    !!selectedStrategy &&
-    !selectedStrategy.status?.startsWith("draft") &&
-    releaseIds.length > 0 &&
-    (!needsSnapshot || snapshotIds.length > 0) &&
-    Number.isFinite(capital) &&
-    capital >= 100000 &&
-    capital <= 500000 &&
-    requestedBy.trim() !== "" &&
-    codeVersion.trim().length >= 7 &&
-    operationId.trim() !== "" &&
-    idempotencyKey.trim().length >= 8;
-
-  const submit = () => {
-    if (!selectedStrategy || !validForm || !topic.goal) return;
-    start.mutate({
-      idempotency_key: idempotencyKey.trim(),
-      strategy_id: selectedStrategy.strategy_id,
-      strategy_version: selectedStrategy.version,
-      dataset_release_ids: releaseIds,
-      factor_snapshot_ids: snapshotIds,
-      factor_series_ids: seriesIds
-        .split(",")
-        .map((id) => id.trim())
-        .filter(Boolean),
-      parameters: {},
-      validation_config: {},
-      portfolio_config: {},
-      risk_config: {},
-      execution_config: {},
-      fee_config: {},
-      benchmark_config: {},
-      code_version: codeVersion.trim(),
-      initial_capital: capital,
-      requested_by: requestedBy.trim(),
-      goal_version: topic.goal.version,
-      operation_id: operationId.trim(),
-    });
+    setReceipt(null);
+    setOpen(true);
   };
 
-  const mutationError = start.error ?? retry.error ?? cancel.error;
+  const mutationError = retry.error ?? cancel.error;
   const runItems = runsQuery.data?.items ?? [];
   return (
     <section aria-label="课题研究运行" className="space-y-3 rounded-lg border border-border p-4">
@@ -890,114 +788,26 @@ function TopicRunsCard({ topic }: { topic: Topic }) {
         <p className="text-xs text-warning">只有 active 课题可以发起或重试运行。</p>
       )}
       {notice && <p className="text-sm text-primary">{notice}</p>}
+      {receipt && (
+        <div className="flex flex-wrap gap-3 text-sm">
+          <Link className="text-primary underline" to={`/research/runs?run=${encodeURIComponent(receipt.run_id)}`}>查看研究运行</Link>
+          {receipt.job_id && <Link className="text-primary underline" to={`/jobs?job=${encodeURIComponent(receipt.job_id)}`}>跟进后台任务</Link>}
+        </div>
+      )}
       {mutationError && (
         <p role="alert" className="text-sm text-destructive">
           {String(mutationError)}
         </p>
       )}
       {open && topic.goal && (
-        <form
-          className="space-y-4 rounded-lg border border-border p-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submit();
-          }}
-        >
-          <h4 className="font-medium">冻结输入并发起运行（目标版本 {topic.goal.version}）</h4>
-          <div className="space-y-1">
-            <Label htmlFor="topic-run-strategy">已发布策略规格</Label>
-            <select
-              id="topic-run-strategy"
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-              value={strategyKey}
-              onChange={(event) => {
-                setStrategyKey(event.target.value);
-                setSnapshotIds([]);
-              }}
-            >
-              <option value="">选择已发布策略</option>
-              {(strategiesQuery.data ?? [])
-                .filter((item) => !item.status?.startsWith("draft"))
-                .map((item) => (
-                  <option key={`${item.strategy_id}@${item.version}`} value={`${item.strategy_id}@${item.version}`}>
-                    {item.strategy_id}@v{item.version}
-                  </option>
-                ))}
-            </select>
-          </div>
-          <div className="rounded-md border border-border bg-muted/20 p-3 text-xs">
-            <p className="font-medium">冻结数据发布（来自策略验证计划）</p>
-            {releaseIds.length > 0 ? (
-              <p className="mt-1 break-all font-mono">{releaseIds.join("、")}</p>
-            ) : (
-              <p className="mt-1 text-muted-foreground">选择策略后显示。</p>
-            )}
-          </div>
-          {needsSnapshot && (
-            <div className="space-y-2 rounded-md border border-warning/30 bg-warning/5 p-3">
-              <Label>冻结因子快照（至少 1 个）</Label>
-              {snapshotsQuery.isLoading ? (
-                <p className="text-xs text-muted-foreground">正在加载与发布匹配的快照…</p>
-              ) : snapshotsQuery.data && snapshotsQuery.data.length > 0 ? (
-                snapshotsQuery.data.map((snapshot) => {
-                  const checked = snapshotIds.includes(snapshot.snapshot_id);
-                  return (
-                    <label key={snapshot.snapshot_id} className="flex items-center gap-2 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() =>
-                          setSnapshotIds((current) =>
-                            checked
-                              ? current.filter((id) => id !== snapshot.snapshot_id)
-                              : [...current, snapshot.snapshot_id],
-                          )
-                        }
-                      />
-                      <span className="font-mono">{snapshot.snapshot_id}</span>
-                      <span className="text-muted-foreground">
-                        {featureSnapshotSymbolCount(snapshot)} 标的 ·{" "}
-                        {featureSnapshotNames(snapshot).length} 因子
-                      </span>
-                    </label>
-                  );
-                })
-              ) : (
-                <p className="text-xs text-warning">暂无匹配快照；请先在因子实验室生成。</p>
-              )}
-            </div>
-          )}
-          <Field
-            label="因子序列 ID（可选，逗号分隔 FS-）"
-            value={seriesIds}
-            onChange={setSeriesIds}
-          />
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="初始资金" value={initialCapital} onChange={setInitialCapital} required />
-            <Field label="代码版本" value={codeVersion} onChange={setCodeVersion} required />
-            <Field label="发起人" value={requestedBy} onChange={setRequestedBy} required />
-            <Field label="operation_id（幂等锚）" value={operationId} onChange={setOperationId} required />
-          </div>
-          <Field
-            label="运行幂等键"
-            value={idempotencyKey}
-            onChange={setIdempotencyKey}
-            required
-          />
-          {start.isError && (
-            <p role="alert" className="text-sm text-destructive">
-              {String(start.error)}
-            </p>
-          )}
-          <div className="flex gap-2">
-            <Button type="submit" disabled={!validForm || start.isPending}>
-              登记 queued 运行
-            </Button>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-              取消
-            </Button>
-          </div>
-        </form>
+        <ResearchRunSetup
+          key={`${topic.topic_id}:${topic.goal.version}:${operationId}`}
+          onStart={(payload) => start.mutate(payload)}
+          pending={start.isPending}
+          error={start.error}
+          onRepreview={() => start.reset()}
+          onCancel={() => setOpen(false)}
+        />
       )}
       {runsQuery.isLoading ? (
         <LoadingState />

@@ -347,19 +347,31 @@ async def queue_run(
     app: McpAppContext,
     *,
     payload: dict[str, Any],
+    preview_only: bool = False,
 ) -> ToolEnvelope:
-    """冻结输入 + 登记 queued ResearchRun(写,不执行回测)。"""
+    """复用提交门控预览生效输入或登记 queued 运行。"""
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
         body = ResearchRunSubmitInput.from_json_payload(payload)
+        if preview_only:
+            async with app.session_maker() as session:
+                service = ResearchRunSubmissionService(
+                    session, sandbox_enabled=app.settings.research_sandbox_enabled
+                )
+                try:
+                    report = await service.preflight(body, _mcp_operation_context(app))
+                except ResearchOperationError as exc:
+                    raise _mcp_error(exc) from exc
+                return report.as_dict()
         return await enqueue_research_run(app, body)
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.run.queue",
         arguments={"strategy_id": payload.get("strategy_id"),
-                   "strategy_version": payload.get("strategy_version")},
+                   "strategy_version": payload.get("strategy_version"),
+                   "preview_only": preview_only},
         handler=_do,
     )
 
@@ -652,6 +664,8 @@ def register(mcp: MCPServer) -> None:
             "factor_snapshot_ids。未声明绑定的普通运行引用 draft/retired 仍被"
             "秒级拒绝;promote 侧四向校验兜底,screen 运行不可挪作他版代码"
             "的证据。"
+            "preview_only=true 只返回 preflight 生效清单和 manifest_checksum。"
+            "执行可携带 expected_manifest_checksum。发现漂移时拒绝提交。"
             "返回精简回执(issue #206):run_id/job_id/status/checksum/"
             "execution_mode/created_at,全量详情走 finboard_run_get。"
         ),
@@ -659,8 +673,9 @@ def register(mcp: MCPServer) -> None:
     async def _queue(
         payload: dict[str, Any],
         ctx: Context = None,  # type: ignore[assignment]
+        preview_only: bool = False,
     ) -> ToolEnvelope:
-        return await queue_run(app_context(ctx), payload=payload)
+        return await queue_run(app_context(ctx), payload=payload, preview_only=preview_only)
 
     @mcp.tool(
         name="finboard_run_cancel",

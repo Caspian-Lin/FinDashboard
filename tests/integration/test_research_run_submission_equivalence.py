@@ -583,6 +583,79 @@ async def test_error_equivalence(
 # --------------------------------------------------------------------------- #
 # 3) 幂等 + 并发
 # --------------------------------------------------------------------------- #
+async def test_run_preview_does_not_queue_and_drift_is_rejected(
+    engine: AsyncEngine, client: httpx.AsyncClient, mcp_app: McpAppContext
+) -> None:
+    await _seed(engine)
+    payload = _payload("equiv-preview-key")
+    preview = await client.post("/api/research/runs/preflight", json=payload)
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["manifest"]["strategy_version"] == payload["strategy_version"]
+    assert body["manifest_checksum"] == manifest_from_json(body["manifest"]).checksum
+    mcp = await run_tools.queue_run(mcp_app, payload=payload, preview_only=True)
+    assert mcp.status == "ok", mcp.error
+    assert mcp.data["manifest_checksum"] == body["manifest_checksum"]
+    assert await _counts(engine) == (0, 0)
+
+    changed = await client.post(
+        "/api/research/runs",
+        json={
+            **payload,
+            "initial_capital": 300000,
+            "expected_manifest_checksum": body["manifest_checksum"],
+        },
+    )
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["detail"]["code"] == "run_preflight_drift"
+    assert await _counts(engine) == (0, 0)
+
+    started = await client.post(
+        "/api/research/runs",
+        json={**payload, "expected_manifest_checksum": body["manifest_checksum"]},
+    )
+    assert started.status_code == 201, started.text
+    assert started.json()["manifest_checksum"] == body["manifest_checksum"]
+    assert await _counts(engine) == (1, 1)
+
+
+async def test_preview_window_uses_frozen_calendar_and_reuses_scope_on_submit(
+    engine: AsyncEngine, client: httpx.AsyncClient,
+) -> None:
+    await _seed(engine)
+    spec = _spec("integration_equiv_window")
+    spec = spec.model_copy(update={
+        "validation_plan": spec.validation_plan.model_copy(update={"benchmark_symbol": SYMBOLS[0]}),
+    })
+    await _publish_spec(engine, spec)
+    payload = _payload("equiv-window-preview-key", strategy_id=spec.strategy_id)
+    preview = await client.post(
+        "/api/research/runs/preflight",
+        json={
+            **payload,
+            "preview_window": {"start": "2024-06-01", "end": "2024-06-14", "warmup_sessions": 2},
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    frozen = body["manifest"]["data_scope"]
+    assert frozen["scope"]["locked_release_ids"] == [BARS_RELEASE]
+    assert frozen["window"]["decision_start"] == "2024-06-03"
+    assert await _counts(engine) == (0, 0)
+
+    started = await client.post(
+        "/api/research/runs",
+        json={
+            **payload,
+            "data_scope": frozen["scope"],
+            "data_scope_resolution_id": frozen["resolution_id"],
+            "expected_manifest_checksum": body["manifest_checksum"],
+        },
+    )
+    assert started.status_code == 201, started.text
+    assert started.json()["manifest_checksum"] == body["manifest_checksum"]
+
+
 async def test_same_key_twice_creates_one_run_and_one_job(
     engine: AsyncEngine, client: httpx.AsyncClient
 ) -> None:
