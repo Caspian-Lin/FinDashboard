@@ -522,6 +522,10 @@ class TestPipelineCoverageIntegration:
             return {code: series[code] for code in codes}
 
         legacy = await self._run(manifest_factory, provider=provider)
+        assert [decision.pipeline_evidence.input_checksum for decision in legacy] == [
+            "11029ca4f3f644326cdc0d8f3148c09a338bd8abf0965151e979c08edd7af021",
+            "c22ae1bd2bc4eee69adbcdd70d54ae47f45cf875a51fb0cc799c69622ef1513e",
+        ]
         revised = await self._run(manifest_factory, provider=provider, versioned=True)
         repeated = await self._run(manifest_factory, provider=provider, versioned=True)
         for before, after, repeat in zip(legacy, revised, repeated, strict=True):
