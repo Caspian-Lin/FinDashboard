@@ -26,6 +26,7 @@ import {
   jobKindLabel,
 } from "@/lib/jobs";
 import { TaskCenterNav } from "@/components/jobs/TaskCenterNav";
+import { dataHref } from "@/lib/data-links";
 import { dayBound } from "@/lib/task-center";
 import { workspaceApi } from "@/lib/research-workspace";
 import { Input } from "@/components/ui/input";
@@ -555,11 +556,13 @@ function JobRow({
 }
 
 function JobDetail({ job }: { job: JobOut }) {
-  const { t } = useT();
+  const { t, tl } = useT();
   // kind=research_run 时单查最新任务(issue #306/#308):run_status 只在
   // GET /api/jobs/{id} 透传(列表不 join),展开详情即实时可见 run/job 两表
   // 一致性与决策级进度;运行中随轮询刷新。
   const isResearchRun = job.kind === "research_run";
+  const backfillId = job.kind === "data_backfill" && typeof job.payload.request_id === "string"
+    ? job.payload.request_id : null;
   const { data: live } = useQuery({
     queryKey: ["job", job.job_id],
     queryFn: () => api.getJob(job.job_id),
@@ -600,6 +603,9 @@ function JobDetail({ job }: { job: JobOut }) {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
         {evidence.data?.topic_ids.map((id) => <Link className="text-primary underline" key={id} to={`/research/topics?topic=${encodeURIComponent(id)}`}>{t("taskCenter.topic")} {id}</Link>)}
         {evidence.data?.run_ids.map((id) => <Link className="text-primary underline" key={id} to={`/research/runs?run=${encodeURIComponent(id)}`}>{t("taskCenter.run")} {id}</Link>)}
+        {backfillId && <Link className="text-primary underline" to={dataHref({ tab: "sync", backfill: backfillId })}>
+          {tl({ zh: "查看补数请求", en: "View Backfill Request" })}
+        </Link>}
         <Link className="text-primary underline" to={`/research/audit?job=${encodeURIComponent(job.job_id)}`}>{t("taskCenter.audit")}</Link>
         {evidence.isError && <span className="text-muted-foreground">{t("taskCenter.linksUnavailable")}</span>}
       </div>

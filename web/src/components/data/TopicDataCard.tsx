@@ -96,8 +96,8 @@ export function TopicDataCard({ topicId, className, bare }: TopicDataCardProps) 
               icon={<Database className="h-6 w-6" />}
               title={tl({ zh: "本课题还没有引用数据发布", en: "This topic references no releases yet" })}
               description={tl({
-                zh: "先做范围预检(补数请求接入位,见 #511),或把已有发布 ID 写进轮次 source_refs。",
-                en: "Start with a scope precheck (backfill entry point, #511) or add release IDs to round source_refs.",
+                zh: "先预检并补齐缺口，或从数据目录选择已有冻结发布。",
+                en: "Preview and fill gaps, or choose an existing frozen release in the data catalog.",
               })}
               action={
                 <Button asChild variant="outline" size="sm">

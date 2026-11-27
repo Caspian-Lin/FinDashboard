@@ -56,6 +56,7 @@ export interface DataHrefParts {
   tab?: DataTab;
   dataset?: string | null;
   release?: string | null;
+  backfill?: string | null;
   view?: "catalog" | "ops" | string | null;
   sub?: string | null;
   topic?: string | null;
@@ -75,6 +76,7 @@ export function dataHref(parts: DataHrefParts): string {
   const ordering: (keyof DataHrefParts)[] = [
     "dataset",
     "release",
+    "backfill",
     "view",
     "sub",
     "topic",

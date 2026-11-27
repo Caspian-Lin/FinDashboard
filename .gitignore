@@ -101,3 +101,7 @@ desktop.ini
 
 # docker compose 的 postgres 数据目录(本机实际用 WSL 原生 PG,compose 仅作回退)
 .docker-data/
+
+# Browser test output
+/web/playwright-report/
+/web/test-results/

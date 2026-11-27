@@ -99,7 +99,7 @@ export function OverviewTab({ entries, entriesLoading, entriesError, entriesErro
     {
       href: dataHref({ tab: "sync" }),
       label: { zh: "同步与发布", en: "Sync & Publish" },
-      description: { zh: "同步计划、发布入口与补数接入位", en: "Sync plan, publish entries, backfill slot" },
+      description: { zh: "同步状态、发布与共享补数", en: "Sync status, publishing, and shared backfill" },
       icon: <FolderClock className="h-4 w-4" />,
     },
     {

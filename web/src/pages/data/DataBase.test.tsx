@@ -347,15 +347,15 @@ describe("数据基座页面(#512)", () => {
     expect(await screen.findByText("全局缺口摘要")).toBeInTheDocument();
   });
 
-  it("同步与发布是可用的只读状态面板,#511 接入位禁用", async () => {
+  it("同步与发布保留已有入口，空补数计划禁用", async () => {
     const user = userEvent.setup();
     renderPage("/data");
     await user.click(await screen.findByRole("tab", { name: "同步与发布" }));
-    expect(await screen.findByText("第一阶段:只读状态面板")).toBeInTheDocument();
-    expect(screen.getByText("补数请求 · 接入位")).toBeInTheDocument();
-    const pending = screen.getByRole("button", { name: "范围预检(待接入)" });
+    expect(await screen.findByText("同步与补数")).toBeInTheDocument();
+    expect(screen.getByText("共享数据补数")).toBeInTheDocument();
+    const pending = screen.getByRole("button", { name: "范围预检" });
     expect(pending).toBeDisabled();
-    expect(screen.getByRole("button", { name: "提交补数请求(待接入)" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认提交补数请求" })).toBeDisabled();
     // 既有入口链接可达(行情拉取与发布向导)
     expect(screen.getByRole("link", { name: /行情拉取与发布向导/ })).toHaveAttribute(
       "href",

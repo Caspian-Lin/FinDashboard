@@ -192,6 +192,10 @@ def smoke(base: str, bundle: Path, *, restart: bool) -> dict[str, Any]:
     })
     topic_id = topic["topic_id"]
     call(base, read_only, "finboard_topic_read", {"topic_id": topic_id, "view": "context"})
+    web_topic = request(base, f"/api/research/topics/{topic_id}")
+    assert web_topic["topic_id"] == topic_id
+    assert web_topic["title"] == "Synthetic starter research"
+    assert web_topic["goal"]["version"] == "v1"
     scope = {
         "universe": {"explicit_symbols": [f"FBDEMO{i:02d}.SH" for i in range(1, 9)]},
         "decision": {"start": "2024-01-02", "end": "2024-02-23"},
