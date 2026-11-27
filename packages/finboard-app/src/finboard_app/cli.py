@@ -76,7 +76,7 @@ from finboard_shared.types import KillSwitchLevel
 _CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", 1)
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
     from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
@@ -1542,7 +1542,11 @@ def build_executor_registry(
     return registry
 
 
-async def _run_worker(settings: Settings) -> None:
+async def _run_worker(
+    settings: Settings,
+    *,
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]] | None = None,
+) -> None:
     # #471 终验教训:worker 两次原生死亡(exit 139,无 Python 异常)而 WER
     # 无记录 —— faulthandler 常开,原生崩溃(段错误/栈溢出)瞬间把全部线程
     # 的 Python 栈打到 stderr(启动器已重定向到 worker 日志文件),崩溃
@@ -1551,7 +1555,10 @@ async def _run_worker(settings: Settings) -> None:
 
     faulthandler.enable(all_threads=True)
     setup_logging(settings)
-    components = build_kernel_components(settings)
+    if database is None:
+        components = build_kernel_components(settings)
+        database = components.engine, components.session_maker
+    engine, sessions = database
     from finboard_backtest.background_jobs.worker import (
         WorkerConfig,
         default_worker_id,
@@ -1565,12 +1572,12 @@ async def _run_worker(settings: Settings) -> None:
     # issue #306:属主检查 —— 兄弟 worker 活跃持有的 run 跳过误标;lease 活跃
     # 判定阈值与 worker lease 超时同源。
     await _recover_research_runs(
-        components.session_maker,
+        sessions,
         lease_active_seconds=settings.worker_lease_timeout_seconds,
     )
 
     registry = build_executor_registry(
-        settings, components.session_maker, worker_id=default_worker_id()
+        settings, sessions, worker_id=default_worker_id()
     )
     # issue #518:worker 进程内的拒绝/失败审计走独立会话(成功写在各服务同事务)。
     from finboard_app.research_audit import (
@@ -1580,7 +1587,7 @@ async def _run_worker(settings: Settings) -> None:
         configure_research_audit_recorder as _configure_audit,
     )
 
-    _configure_audit(_AuditRecorder(session_maker=components.session_maker))
+    _configure_audit(_AuditRecorder(session_maker=sessions))
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -1607,8 +1614,8 @@ async def _run_worker(settings: Settings) -> None:
         kind_concurrency=dict(_KIND_CONCURRENCY),
     )
     await run_bg_worker(
-        engine=components.engine,
-        session_maker=components.session_maker,
+        engine=engine,
+        session_maker=sessions,
         registry=registry,
         config=config,
     )

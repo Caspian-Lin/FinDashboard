@@ -1,0 +1,17 @@
+.git
+.env*
+.venv
+.uv-cache
+.mypy_cache
+.ruff_cache
+.pytest*
+.tmp
+.docker-data
+.coverage
+data_cache
+data_releases
+web/node_modules
+web/dist
+**/__pycache__
+**/*.pyc
+docs/research/rounds/*/streams

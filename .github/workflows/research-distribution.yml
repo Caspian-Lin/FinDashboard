@@ -1,0 +1,132 @@
+name: Docker research edition
+
+on:
+  pull_request:
+    branches: [dev, main, "m/**"]
+    paths:
+      - docker/research/**
+      - scripts/*research*.py
+      - scripts/*research*.ps1
+      - packages/**
+      - migrations/**
+      - web/**
+      - uv.lock
+      - .github/workflows/research-distribution.yml
+  push:
+    tags: ["research-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      FINBOARD_IMAGE: finboard-research:local
+      FINBOARD_DB_SECRET_FILE: ${{ github.workspace }}/.tmp/postgres-password
+      FINBOARD_PORT: 18176
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build linux/amd64 runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/research/Dockerfile
+          platforms: linux/amd64
+          tags: finboard-research:local
+          load: true
+          cache-from: type=gha,scope=research-distribution
+          cache-to: type=gha,scope=research-distribution,mode=max
+      - name: Build the separate deterministic starter bundle offline
+        run: |
+          mkdir -p .tmp
+          openssl rand -hex 32 > "$FINBOARD_DB_SECRET_FILE"
+          docker run --rm --network none --entrypoint python \
+            --user "$(id -u):$(id -g)" -v "$PWD:/src" finboard-research:local \
+            /src/scripts/build_research_starter.py /src/.tmp/synthetic-starter-v1.zip
+      - name: Migrate an empty database and run the offline starter study
+        run: |
+          set -o pipefail
+          docker compose -f docker/research/compose.yaml pull postgres
+          FINBOARD_SMOKE_OFFLINE=1 python scripts/smoke_research_distribution.py .tmp/synthetic-starter-v1.zip | tee .tmp/research-smoke.json
+      - name: Print diagnostics
+        if: failure()
+        run: docker compose -f docker/research/compose.yaml logs --tail=80
+      - uses: actions/upload-artifact@v4
+        with:
+          name: research-edition-evidence
+          include-hidden-files: true
+          path: |
+            .tmp/synthetic-starter-v1.zip
+            .tmp/research-smoke.json
+
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Windows installer failure recovery
+        shell: powershell
+        run: ./scripts/test_research_installer.ps1
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/research-v')
+    needs: [verify, windows-installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: research-edition-evidence
+          path: dist
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set image name
+        id: image
+        shell: bash
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}-research" >> "$GITHUB_OUTPUT"
+      - name: Publish the versioned research image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/research/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.ref }}:${{ github.ref_name }}
+          push: true
+          provenance: false
+          cache-from: type=gha,scope=research-distribution
+      - name: Publish the optional sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/research-sandbox/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.ref }}-sandbox:${{ github.ref_name }}
+          push: true
+          provenance: false
+      - name: Package the installer and attach release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+          SANDBOX_IMAGE: ${{ steps.image.outputs.ref }}-sandbox:${{ github.ref_name }}
+        run: |
+          python scripts/package_research_edition.py dist/FinDashboard-research-windows-amd64.zip "$IMAGE"
+          python scripts/measure_research_images.py "$IMAGE" postgres:16-alpine --max-mib 384 > dist/research-image-sizes.json
+          python scripts/measure_research_images.py "$SANDBOX_IMAGE" > dist/sandbox-image-size.json
+          test "$(wc -c < dist/FinDashboard-research-windows-amd64.zip)" -le 262144
+          test "$(wc -c < dist/synthetic-starter-v1.zip)" -le 262144
+          cd dist
+          sha256sum FinDashboard-research-windows-amd64.zip synthetic-starter-v1.zip > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+            --title "FinDashboard Research $GITHUB_REF_NAME" \
+            --notes-file ../docs/research-edition.md \
+            FinDashboard-research-windows-amd64.zip synthetic-starter-v1.zip SHA256SUMS research-smoke.json research-image-sizes.json sandbox-image-size.json

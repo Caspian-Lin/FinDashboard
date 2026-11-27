@@ -127,6 +127,8 @@ The MCP registry has no order placement, cancellation, position mutation, broker
 
 ## Quick start
 
+On Windows, download the Docker Research Edition installer from [GitHub Releases](https://github.com/Caspian-Lin/FinDashboard/releases). Run `.\finboard.cmd setup --client codex` from the extracted installer directory, or select `dsh` or `opencode`. An optional synthetic starter bundle supports an offline first study. See the [Research Edition guide](docs/research-edition.md) for setup, data, upgrades, and backup.
+
 Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 18+, and PostgreSQL 16.
 
 ```bash

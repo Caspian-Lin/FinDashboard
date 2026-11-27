@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useT } from "@/i18n";
+import { RESEARCH_EDITION } from "@/lib/edition";
 
 /* ============================================================ */
 /* 外部 Agent 接入与迁移(#519 接入 / #520 退役内置工作台)        */
@@ -69,7 +70,28 @@ export default function AgentConnect() {
       />
 
       <div className="space-y-4">
-        <Alert>
+        {RESEARCH_EDITION && (
+          <Card>
+            <CardHeader><CardTitle>{tl({ zh: "Docker 研究版", en: "Docker Research Edition" })}</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm">{tl({
+                zh: "在安装包目录运行一条命令，选用 Codex、DeepSeek Harness 或 OpenCode。接入后重新打开客户端。",
+                en: "Run setup from the installer folder, then reopen Codex, DeepSeek Harness, or OpenCode.",
+              })}</p>
+              <CodeBlock>{".\\finboard.cmd setup --client codex\n.\\finboard.cmd import --bundle synthetic-starter-v1.zip"}</CodeBlock>
+              <code className="text-xs">{window.location.origin}/mcp</code>
+              <p className="text-sm">{tl({
+                zh: "默认只读。用 --preset topic-writer 创建课题并运行研究。自备 Tushare 数据时使用 .\\finboard.cmd source-configure。",
+                en: "Setup defaults to read-only. Select --preset topic-writer to create topics and run research. Use .\\finboard.cmd source-configure to bring your own Tushare data.",
+              })}</p>
+              <p className="text-sm">{tl({
+                zh: "研究代码执行沙箱默认关闭。首个研究使用内置因子和无代码策略。",
+                en: "The custom code sandbox is disabled by default. The first study uses built-in factors and a no-code strategy.",
+              })}</p>
+            </CardContent>
+          </Card>
+        )}
+        {!RESEARCH_EDITION && <Alert>
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>
             {tl({ zh: "内置研究工作台已退役(#520)", en: "Built-in workbench retired (#520)" })}
@@ -80,7 +102,7 @@ export default function AgentConnect() {
               en: "The former OpenCode Web workbench (iframe), managed container, and /api/opencode gateway are removed. Old /research/workbench deep links redirect here with the ?topic= parameter preserved; manual research flows (topics, runs, factors, OOS, simulation) remain fully available.",
             })}
           </AlertDescription>
-        </Alert>
+        </Alert>}
 
         <Alert>
           <ShieldCheck className="h-4 w-4" />
@@ -186,6 +208,7 @@ export default function AgentConnect() {
           </CardContent>
         </Card>
 
+        {!RESEARCH_EDITION && <>
         {/* 接入三步 */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Card>
@@ -311,6 +334,7 @@ docker run --rm -v opencode-config:/d:ro -v "$PWD:/out" alpine \\
             </p>
           </CardContent>
         </Card>
+        </>}
       </div>
     </div>
   );
