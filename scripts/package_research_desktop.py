@@ -46,13 +46,16 @@ def _write_image_archive(path: Path, tags: tuple[str, ...]) -> None:
             raise RuntimeError("Docker failed to save the offline images")
 
 
-def package(output: Path, config: Path, starter: Path, app: str, postgres: str, version: str) -> None:
+def package(
+    output: Path, config: Path, starter: Path, app: str, postgres: str, version: str, *, preview: bool = False,
+) -> None:
     match = _VERSION.fullmatch(version)
     if match is None or any(int(part) > limit for part, limit in zip(match.groups(), (255, 255, 65535), strict=True)):
         raise ValueError("MSI version must be a numeric major.minor.patch within Windows Installer limits")
     root = Path(__file__).resolve().parents[1]
     sources = (app, postgres)
-    tags = (f"finboard-research-desktop/app:{version}", f"finboard-research-desktop/postgres:{version}")
+    tag_version = f"preview-{version}" if preview else version
+    tags = (f"finboard-research-desktop/app:{tag_version}", f"finboard-research-desktop/postgres:{tag_version}")
     identities = [_inspect(source) for source in sources]
     output = output.resolve()
     config = config.resolve()
@@ -94,14 +97,19 @@ def package(output: Path, config: Path, starter: Path, app: str, postgres: str, 
             "archive_sha256": checksum,
             "images": [{"tag": tag, "id": image_id} for tag, image_id in zip(tags, identities, strict=True)],
         }
+        if preview:
+            manifest["channel"] = "preview"
         (staged / "offline-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         staged.rename(output)
 
     relative = Path(os.path.relpath(output, config.parent)).as_posix()
-    config.write_text(json.dumps({
+    bundle_config = {
         "version": version,
         "bundle": {"resources": {relative: "edition/"}},
-    }, indent=2) + "\n", encoding="utf-8")
+    }
+    if preview:
+        bundle_config.update(productName="FinDashboard Research Preview", identifier="com.findashboard.research.preview")
+    config.write_text(json.dumps(bundle_config, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"archive_bytes": (output / "images.tar").stat().st_size, **manifest}))
 
 
@@ -113,5 +121,9 @@ if __name__ == "__main__":
     parser.add_argument("--app-image", required=True)
     parser.add_argument("--postgres-image", default=POSTGRES_IMAGE)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--preview", action="store_true")
     options = parser.parse_args()
-    package(options.output, options.config, options.starter, options.app_image, options.postgres_image, options.version)
+    package(
+        options.output, options.config, options.starter, options.app_image, options.postgres_image,
+        options.version, preview=options.preview,
+    )

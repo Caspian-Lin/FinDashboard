@@ -202,6 +202,22 @@ try {
         )
     }
     Write-File (Join-Path $DesktopResourceRoot "offline-manifest.json") ($manifest | ConvertTo-Json -Depth 6)
+    $originalAppData = $env:LOCALAPPDATA
+    try {
+        $env:LOCALAPPDATA = $fixtureRoot
+        $env:FINBOARD_DESKTOP_TEST_ROOT = $null
+        $env:FINBOARD_DESKTOP_TEST_PROJECT = $null
+        $previewRoot = Resolve-DesktopRoot @{channel = "preview"}
+        Require ($previewRoot -ceq (Join-Path $fixtureRoot "FinDashboard\DesktopPreview")) "Preview must have separate local state."
+        Require ($DesktopProject -ceq "finboard-research-desktop-preview" -and $DesktopDefaultPort -eq 8376) "Preview must have a separate Compose project and port."
+        $releaseRoot = Resolve-DesktopRoot $manifest
+        Require ($releaseRoot -ceq (Join-Path $fixtureRoot "FinDashboard\Desktop")) "Release state must remain in its normal location."
+        Require ($DesktopProject -ceq "finboard-research-desktop" -and $DesktopDefaultPort -eq 8276) "Release must use its own Compose project and port."
+    } finally {
+        $env:LOCALAPPDATA = $originalAppData
+        $env:FINBOARD_DESKTOP_TEST_ROOT = $instanceRoot
+        $env:FINBOARD_DESKTOP_TEST_PROJECT = $fixtureProject
+    }
     Add-FixtureResource "volume" "$($secondProject)_research" $secondProject "foreign-owner"
     Add-FixtureResource "container" "$secondProject-gateway-1" $secondProject "foreign-owner"
 

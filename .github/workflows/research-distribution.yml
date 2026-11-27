@@ -49,8 +49,10 @@ jobs:
             /src/scripts/build_research_starter.py /src/.tmp/synthetic-starter-v1.zip
       - name: Migrate an empty database and run the offline starter study
         run: |
-          set -o pipefail
-          docker compose -f docker/research/compose.yaml pull postgres
+          set -euo pipefail
+          PG_IMAGE=$(python -c 'from scripts.package_research_desktop import POSTGRES_IMAGE; print(POSTGRES_IMAGE)')
+          docker pull --platform linux/amd64 "$PG_IMAGE"
+          docker image tag "$PG_IMAGE" postgres:16-alpine
           FINBOARD_SMOKE_OFFLINE=1 python scripts/smoke_research_distribution.py .tmp/synthetic-starter-v1.zip | tee .tmp/research-smoke.json
       - name: Print diagnostics
         if: failure()
@@ -62,6 +64,33 @@ jobs:
           path: |
             .tmp/synthetic-starter-v1.zip
             .tmp/research-smoke.json
+      - name: Prepare the actual offline resources for desktop PRs
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'feat/research-desktop-')
+        run: |
+          set -euo pipefail
+          PG_IMAGE=$(python -c 'from scripts.package_research_desktop import POSTGRES_IMAGE; print(POSTGRES_IMAGE)')
+          VERSION=$(python - <<'PY'
+          import os
+          run = int(os.environ["GITHUB_RUN_NUMBER"]) - 1
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"]) - 1
+          if not (0 <= run < 65536 and 0 <= attempt < 256):
+              raise ValueError("GitHub run and attempt must fit the MSI preview version")
+          minor, patch = divmod(run, 256)
+          print(f"250.{minor}.{patch * 256 + attempt}")
+          PY
+          )
+          python scripts/package_research_desktop.py desktop/src-tauri/resources/edition \
+            --config desktop/src-tauri/tauri.offline.conf.json --starter .tmp/synthetic-starter-v1.zip \
+            --app-image "$FINBOARD_IMAGE" --postgres-image "$PG_IMAGE" --version "$VERSION" --preview
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'feat/research-desktop-')
+        with:
+          name: offline-desktop-pr-assets
+          path: |
+            desktop/src-tauri/resources/edition
+            desktop/src-tauri/tauri.offline.conf.json
+          compression-level: 0
+          retention-days: 3
 
   windows-installer:
     runs-on: windows-latest
@@ -72,8 +101,11 @@ jobs:
         run: ./scripts/test_research_installer.ps1
 
   desktop-check:
+    needs: verify
     runs-on: windows-latest
     timeout-minutes: 35
+    env:
+      FINBOARD_DESKTOP_PR_BUILD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'feat/research-desktop-') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -89,19 +121,62 @@ jobs:
       - name: Exercise the Windows desktop installer and recovery paths
         shell: powershell
         run: ./scripts/test_research_desktop_host.ps1
-      - name: Validate WiX packaging with a small resource fixture
+      - uses: actions/download-artifact@v4
+        if: env.FINBOARD_DESKTOP_PR_BUILD == 'true'
+        with:
+          name: offline-desktop-pr-assets
+          path: desktop/src-tauri
+      - name: Validate WiX packaging
         working-directory: desktop
         run: |
-          New-Item -ItemType Directory src-tauri/resources/edition -Force | Out-Null
-          Copy-Item ../docker/research/finboard.ps1 src-tauri/resources/edition/finboard.ps1
-          '{"bundle":{"resources":{"resources/edition":"edition/"}}}' |
-            Set-Content -Encoding ascii src-tauri/tauri.offline.conf.json
+          $hasPayload = $env:FINBOARD_DESKTOP_PR_BUILD -eq 'true'
+          if ($hasPayload) {
+            $edition = 'src-tauri/resources/edition'
+            foreach ($file in @('offline-manifest.json','images.tar','starter.zip','image.txt','finboard.ps1','finboard.cmd','desktop-host.ps1','installer-clients.ps1','mcp-bridge.ps1','compose.yaml','compose.desktop.yaml','finboard-research/SKILL.md')) {
+              if (!(Test-Path -LiteralPath (Join-Path $edition $file) -PathType Leaf)) {
+                throw "The offline preview resource $file is missing."
+              }
+            }
+            $manifest = Get-Content -LiteralPath (Join-Path $edition 'offline-manifest.json') -Raw | ConvertFrom-Json
+            $archive = Get-FileHash -LiteralPath (Join-Path $edition 'images.tar') -Algorithm SHA256
+            if ($manifest.channel -cne 'preview' -or $archive.Hash.ToLowerInvariant() -cne $manifest.archive_sha256) {
+              throw 'The offline preview manifest or image checksum does not match.'
+            }
+          }
+          if (!$hasPayload) {
+            New-Item -ItemType Directory src-tauri/resources/edition -Force | Out-Null
+            Copy-Item ../docker/research/finboard.ps1 src-tauri/resources/edition/finboard.ps1
+            '{"bundle":{"resources":{"resources/edition":"edition/"}}}' |
+              Set-Content -Encoding ascii src-tauri/tauri.offline.conf.json
+          }
           npm ci --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run build -- --debug --ci -- --locked
+          if ($hasPayload) {
+            $profile = 'release'
+            npm run build -- --ci -- --locked
+          } else {
+            $profile = 'debug'
+            npm run build -- --debug --ci -- --locked
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $msi = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/debug/bundle/msi/*.msi)
-          if ($msi.Count -ne 1) { throw 'Expected one x64 fixture MSI.' }
+          $msi = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/$profile/bundle/msi/*.msi)
+          if ($msi.Count -ne 1) { throw 'Expected one x64 MSI.' }
+          if ($hasPayload) {
+            $out = 'FinDashboard-research-offline-windows-amd64-pr.msi'
+            Copy-Item -LiteralPath $msi[0].FullName -Destination $out
+            $sha = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$sha  $out" | Set-Content -Encoding ascii SHA256SUMS-desktop-pr
+          }
+      - uses: actions/upload-artifact@v4
+        if: env.FINBOARD_DESKTOP_PR_BUILD == 'true'
+        with:
+          name: research-desktop-pr-msi
+          path: |
+            desktop/FinDashboard-research-offline-windows-amd64-pr.msi
+            desktop/SHA256SUMS-desktop-pr
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
 
   release:
     if: startsWith(github.ref, 'refs/tags/research-v')

@@ -1,7 +1,6 @@
 # Windows host operations for the MSI. The research WebView never runs these commands.
 $DesktopOwnerLabel = "io.findashboard.desktop.instance"
 $DesktopDockerHost = "npipe:////./pipe/dockerDesktopLinuxEngine"
-$DesktopDefaultPort = 8276
 $DesktopResourceRoot = $PSScriptRoot
 
 function Test-DesktopPort($Value) {
@@ -24,9 +23,15 @@ function Assert-DesktopPath([string]$Path) {
     }
 }
 
-function Resolve-DesktopRoot {
+function Resolve-DesktopRoot($Manifest) {
     $script:DesktopProject = "finboard-research-desktop"
+    $script:DesktopDefaultPort = 8276
     $root = Join-Path $env:LOCALAPPDATA "FinDashboard/Desktop"
+    if ($Manifest.channel -ceq "preview") {
+        $script:DesktopProject = "finboard-research-desktop-preview"
+        $script:DesktopDefaultPort = 8376
+        $root = Join-Path $env:LOCALAPPDATA "FinDashboard/DesktopPreview"
+    }
     if ($env:FINBOARD_DESKTOP_TEST_ROOT -or $env:FINBOARD_DESKTOP_TEST_PROJECT) {
         $project = $env:FINBOARD_DESKTOP_TEST_PROJECT
         if ($project -cnotmatch '^finboard-research-desktop-test-[a-z0-9]{8,24}$' -or
@@ -85,7 +90,8 @@ function Read-DesktopManifest {
     $manifest = Read-DesktopJson (Join-Path $DesktopResourceRoot "offline-manifest.json") (
         "desktop_invalid_manifest: The offline package manifest is missing or unreadable."
     )
-    if ($manifest.schema_version -ne 1 -or $manifest.archive_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+    if ($manifest.schema_version -ne 1 -or $manifest.archive_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        ($null -ne $manifest.channel -and $manifest.channel -cne "preview")) {
         throw "desktop_invalid_manifest: Reinstall the matching offline MSI."
     }
     Assert-DesktopImages $manifest.images $true
@@ -517,7 +523,8 @@ function Invoke-DesktopAction {
     if ($Options.ContainsKey("--port") -and !(Test-DesktopPort $Options["--port"])) {
         throw "desktop_invalid_arguments: Choose a port between 1024 and 65535."
     }
-    $Root = Resolve-DesktopRoot
+    $manifest = Read-DesktopManifest
+    $Root = Resolve-DesktopRoot $manifest
     $StatePath = Join-Path $Root "state.json"
     $Bridge = Join-Path $Root "mcp-bridge.ps1"
     $Client = "codex"
@@ -556,7 +563,6 @@ function Invoke-DesktopAction {
             if ($State -and $State.lifecycle -cin @("ready", "retained") -and !(Test-DesktopVolumePair $resources)) {
                 throw "desktop_missing_volume: Restore both original Desktop data volumes from backup before starting."
             }
-            $manifest = Read-DesktopManifest
             $port = if ($Options["--port"]) { [int]$Options["--port"] } elseif ($State) { $State.port } else { $DesktopDefaultPort }
             if (!$State) {
                 $State = [PSCustomObject]@{
