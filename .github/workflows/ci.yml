@@ -94,13 +94,44 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check sandbox image inputs
+        id: sandbox-inputs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        shell: bash
+        run: |
+          # PR 比较实际检出的合并树与 base，push 比较推送前后的提交。
+          # 新分支或基线不可读时执行镜像自检。
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --quiet "$BASE_SHA" HEAD -- \
+            docker/research-sandbox/ \
+            packages/finboard-research-kit/ \
+            .dockerignore \
+            .github/workflows/ci.yml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build docker/research-sandbox
+        if: steps.sandbox-inputs.outputs.changed == 'true'
         run: |
           docker build -f docker/research-sandbox/Dockerfile \
             -t finboard-research-sandbox:ci .
 
       - name: Smoke check kit import & version
+        if: steps.sandbox-inputs.outputs.changed == 'true'
         run: |
           docker run --rm --network none --read-only \
             --cap-drop ALL --user 65532 \
