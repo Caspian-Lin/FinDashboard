@@ -46,6 +46,7 @@ _ALL_WORKER_KINDS = frozenset(
         "factor_series_build",
         "validation_experiment",
         "data_backfill",
+        "release_bundle",
     }
 )
 

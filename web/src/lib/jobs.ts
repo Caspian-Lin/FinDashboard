@@ -31,6 +31,7 @@ export const JOB_KINDS: { value: string; label: LocalizedText }[] = [
   { value: "feature_snapshot", label: { zh: "特征快照", en: "Feature snapshot" } },
   { value: "bulk_download", label: { zh: "批量下载", en: "Bulk download" } },
   { value: "dataset_publish", label: { zh: "数据集发布", en: "Dataset publish" } },
+  { value: "release_bundle", label: { zh: "发布包导入或导出", en: "Release bundle import or export" } },
   { value: "backtest_run", label: { zh: "回测", en: "Backtest" } },
   { value: "data_sync", label: { zh: "数据同步", en: "Data sync" } },
   { value: "quality_repair", label: { zh: "质量修复", en: "Quality repair" } },
