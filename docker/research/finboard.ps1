@@ -3,7 +3,7 @@ $Action = $args | Select-Object -First 1
 $DesktopHostScript = Join-Path $PSScriptRoot "desktop-host.ps1"
 $Options = @{}
 for ($i = 1; $i -lt $args.Count; $i += 2) {
-    if ($args[$i] -notin @("--client", "--preset", "--port", "--profile", "--bundle", "--mode", "--confirm") -or
+    if ($args[$i] -notin @("--client", "--preset", "--port", "--profile", "--bundle", "--mode", "--confirm", "--name") -or
         $i + 1 -ge $args.Count -or $Options.ContainsKey($args[$i])) {
         throw "Invalid arguments. See finboard help."
     }
@@ -20,7 +20,10 @@ finboard revoke --client codex|dsh|opencode
     if (Test-Path -LiteralPath $DesktopHostScript -PathType Leaf) {
         Write-Host @"
 finboard desktop-status | desktop-install [--port 8276] | desktop-stop | desktop-import
-finboard desktop-attach --preset readonly|topic-writer
+finboard desktop-attach --client codex|dsh|opencode --preset readonly|topic-writer [--profile desktop]
+finboard desktop-detach --client codex|dsh|opencode
+finboard desktop-client-issue --name NAME [--preset readonly|topic-writer]
+finboard desktop-client-revoke --name NAME
 finboard desktop-uninstall --mode preserve|purge [--confirm DELETE-THIS-INSTANCE]
 "@
     }

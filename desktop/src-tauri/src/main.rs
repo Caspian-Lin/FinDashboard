@@ -280,6 +280,8 @@ mod tests {
             elapsed_seconds: 0.0,
             command: String::new(),
             source: None,
+            connection: None,
+            workspace: None,
             status: Some(
                 serde_json::from_value(serde_json::json!({
                     "docker": "linux", "installed": true, "has_instance": true,

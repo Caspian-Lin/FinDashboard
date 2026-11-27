@@ -69,16 +69,45 @@
         <button id="import" type="button">导入样例</button>
       </section>
 
-      <section class="panel codex" aria-labelledby="codex-title">
+      <section class="panel codex" aria-labelledby="harness-title">
         <div class="panel-heading feature-heading">
           <span class="panel-icon code-icon" aria-hidden="true">›_</span>
-          <h2 id="codex-title">Codex 接入</h2>
+          <h2 id="harness-title">Agent 接入</h2>
         </div>
-        <p id="codex-state" aria-live="polite">服务就绪后可接入 Codex。</p>
+        <p id="harness-state" aria-live="polite">服务就绪后可接入客户端。</p>
         <p id="scopes" class="scope" hidden></p>
         <div class="actions">
+          <label class="field"><span>客户端</span><select id="harness"><option value="codex">Codex CLI</option><option value="dsh">DeepSeek Harness</option><option value="opencode">OpenCode</option></select></label>
+          <label class="field" id="harness-profile-field" hidden><span>DSH profile</span><select id="harness-profile"></select></label>
           <label class="field"><span>授权预设</span><select id="preset"><option value="readonly">只读</option><option value="topic-writer">课题与研究运行</option></select></label>
-          <button id="attach" type="button">接入或切换</button>
+          <button id="attach" type="button">接入并验连</button>
+          <button id="detach" type="button">撤销接入</button>
+        </div>
+        <div id="workspace-actions" class="actions" hidden>
+          <button id="workspace-open" type="button">打开工作区</button>
+          <button id="workspace-copy" type="button">复制工作区路径</button>
+          <input id="workspace-address" aria-label="客户端工作区路径" readonly hidden>
+        </div>
+      </section>
+
+      <section class="panel generic-panel" aria-labelledby="generic-title">
+        <h2 id="generic-title">通用 MCP 客户端</h2>
+        <form id="generic-form" class="actions">
+          <label class="field"><span>客户端名称</span><input id="generic-name" maxlength="32" pattern="[a-z0-9][a-z0-9_\-]{0,31}" placeholder="research-tool" required></label>
+          <label class="field"><span>授权预设</span><select id="generic-preset"><option value="readonly">只读</option><option value="topic-writer">课题与研究运行</option></select></label>
+          <button id="generic-issue" type="submit">签发接入配置</button>
+        </form>
+        <p id="generic-state" role="status">签发后的配置可复制一次。同名重新签发会撤销旧凭据。</p>
+        <div id="generic-current" class="actions" hidden>
+          <label class="field"><span>已签发客户端</span><select id="generic-list"></select></label>
+          <button id="generic-revoke" type="button">撤销所选凭据</button>
+        </div>
+        <div id="generic-connection" class="connection-result" hidden>
+          <label class="field"><span>本次签发的接入配置</span><textarea id="generic-config" rows="4" readonly></textarea></label>
+          <div class="actions">
+            <button id="generic-copy" type="button">复制配置</button>
+            <button id="generic-close" type="button">完成</button>
+          </div>
         </div>
       </section>
 

@@ -18,9 +18,14 @@ function element(id) {
   };
 }
 
-async function loadWorkbench({ storage = new Map(), running = true, clipboardDenied = false, sourceDiagnostic } = {}) {
+async function loadWorkbench({
+  storage = new Map(), running = true, clipboardDenied = false, sourceDiagnostic, connection,
+  profiles = [], clients = [],
+} = {}) {
   const nodes = new Map(Array.from(page.matchAll(/\bid="([^"]+)"/g), ([, id]) => [id, element(id)]));
   nodes.get('workbench-target').value = 'in_app';
+  nodes.get('harness').value = 'codex';
+  nodes.get('generic-preset').value = 'readonly';
   const calls = [];
   const copies = [];
   let port = 8376;
@@ -43,9 +48,12 @@ async function loadWorkbench({ storage = new Map(), running = true, clipboardDen
           if (args.operation.kind.startsWith('source_')) {
             return { exit_code: 0, elapsed_seconds: 0, command: 'source-operation', source: sourceDiagnostic };
           }
+          if (args.operation.kind === 'client_issue') {
+            return { exit_code: 0, elapsed_seconds: 0, command: 'desktop-client-issue', connection };
+          }
           return {
             exit_code: 0, elapsed_seconds: 0, command: 'status',
-            status: { running, installed: true, docker: 'linux', port, scopes: [] },
+            status: { running, installed: true, docker: 'linux', port, scopes: [], dsh_profiles: profiles, clients },
           };
         },
       } },
@@ -143,4 +151,36 @@ test('Tushare configuration distinguishes a saved credential from a failed resta
   assert.match(session.nodes.get('source-state').textContent, /已保存.*重启未确认/);
   assert.equal(session.nodes.get('source-state').dataset.error, 'true');
   assert.doesNotMatch(session.nodes.get('command-text').value, /fake-tushare-token/);
+});
+
+test('each harness restores its own preset and sends the selected DSH profile', async () => {
+  const session = await loadWorkbench({
+    profiles: ['desktop', 'research-team'],
+    clients: [{ name: 'codex', preset: 'topic-writer', scopes: ['research.read', 'research.run'], credential_active: true }],
+  });
+  assert.equal(session.nodes.get('preset').value, 'topic-writer');
+  session.nodes.get('harness').value = 'dsh';
+  session.nodes.get('harness').handlers.change();
+  assert.equal(session.nodes.get('preset').value, 'readonly');
+  session.nodes.get('harness-profile').value = 'research-team';
+  await session.click('attach');
+  const operation = session.calls.find(([, args]) => args.operation?.kind === 'attach')[1].operation;
+  assert.equal(operation.client, 'dsh');
+  assert.equal(operation.profile, 'research-team');
+});
+
+test('generic contact configuration is removed after the first successful copy', async () => {
+  const session = await loadWorkbench({ connection: {
+    name: 'reports', url: 'http://127.0.0.1:8376/mcp', credential: 'one-time-fixture-token', scopes: ['research.read'],
+  } });
+  session.nodes.get('generic-name').value = 'reports';
+  session.nodes.get('generic-name').handlers.input();
+  session.nodes.get('generic-form').handlers.submit({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(session.nodes.get('generic-connection').hidden, false);
+  assert.doesNotMatch(session.nodes.get('command-text').value, /one-time-fixture-token/);
+  await session.click('generic-copy');
+  assert.match(session.copies[0], /Bearer one-time-fixture-token/);
+  assert.equal(session.nodes.get('generic-config').value, '');
+  assert.equal(session.nodes.get('generic-connection').hidden, true);
 });

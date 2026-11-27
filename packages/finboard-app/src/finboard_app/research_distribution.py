@@ -50,7 +50,7 @@ async def _client_operation(
                 not re.fullmatch(r"[0-9a-f]{64}", req["token_hash"])
                 or not re.fullmatch(r"[A-Za-z0-9_-]{16}", req["token_prefix"])
                 or preset not in _PRESETS
-                or not re.fullmatch(r"(codex|dsh|opencode|smoke)", client)
+                or not re.fullmatch(r"(codex|dsh|opencode|smoke|generic-[a-z0-9][a-z0-9_-]{0,31})", client)
             ):
                 raise ValueError("invalid_client_credential_material")
             await repo.append(

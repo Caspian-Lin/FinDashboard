@@ -100,3 +100,7 @@ Agent(本 MCP 的任何外部 Harness)**不允许**:
 FinBoard 自身**零内置 LLM**(#160)。MCP 入参统一经 `sanitize_prompt` 脱敏
 并记录审计事件(`mcp_audit_events`),工具层拒绝越权请求;提示词注入由
 Skill 边界(实盘动词 / 代码生成禁令)与服务端权限矩阵共同防住。
+
+## Windows 研究版接入
+
+Windows 研究版桌面控制台按客户端管理 Codex CLI、DSH、OpenCode 和通用 Streamable HTTP 接入。新客户端默认只读。准备就绪后从其各自配置连接当前实例的 loopback MCP 端点。客户端权限与审计由服务端按已签发作用域执行。

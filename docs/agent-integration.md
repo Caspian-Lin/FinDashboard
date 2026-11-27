@@ -108,6 +108,8 @@ provider 模型同步)已于 #520 删除;Web 入口改为 `/research/agent-conne
 
 ## 2. 客户端矩阵(实测 / 待验)
 
+Windows 研究版桌面控制台可为 Codex CLI、DeepSeek Harness、OpenCode 分别接入、切换预设和撤销凭据。DSH 从已有 profile 中选择，OpenCode 在本实例的项目工作区启动。通用客户端在控制台按名签发 Streamable HTTP 配置，默认只读，签发结果仅在当次操作显示。切换或撤销一个客户端时，其他客户端凭据继续独立。 [桌面接入操作](research-desktop.md#agent-接入)
+
 | 客户端 | 状态 | 实测日期 | 证据 |
 |---|---|---|---|
 | Codex CLI `0.163.0` | **已验**:读 context + 追加轮次 + readonly 越权被拒 | 2026-11-10 | [`docs/research/rounds/2026-11-10-skill-519/`](research/rounds/2026-11-10-skill-519/README.md) |

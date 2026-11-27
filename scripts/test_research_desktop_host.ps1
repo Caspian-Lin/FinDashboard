@@ -1,8 +1,12 @@
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "../docker/research/desktop-host.ps1")
+. (Join-Path $PSScriptRoot "../docker/research/installer-clients.ps1")
 
 $fixtureProject = "finboard-research-desktop-test-" + [Guid]::NewGuid().ToString("N").Substring(0, 12)
 $fixtureRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.tmp/$fixtureProject"))
+$previousDshHome = $env:DSH_HOME
+$env:DSH_HOME = Join-Path $fixtureRoot "dsh"
+$DesktopAction = $true
 $DesktopResourceRoot = Join-Path $fixtureRoot "package files"
 $instanceRoot = Join-Path $fixtureRoot $fixtureProject
 $env:FINBOARD_DESKTOP_TEST_ROOT = $instanceRoot
@@ -17,6 +21,7 @@ $fixture = @{
     docker = $true; port = 0; running = $false; portBusy = $false; failVolume = $false
     loads = 0; downs = 0; composeArgs = @(); operator = @()
     sourceToken = $null; sourceCode = "credentials_missing"; failRestart = $false; sourceRestarts = 0
+    clientRecords = @{}
     container = @{}; network = @{}; volume = @{}; images = @{}; sharedTag = $null
     marketplace = $true; installedPlugin = $true
 }
@@ -34,7 +39,10 @@ function Require-Failure([scriptblock]$Operation, [string]$Code) {
     throw "Expected $Code."
 }
 
-function Write-File([string]$Path, [string]$Value) { [IO.File]::WriteAllText($Path, $Value, $Utf8) }
+function Write-File([string]$Path, [string]$Value) {
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Path))
+    [IO.File]::WriteAllText($Path, $Value, $Utf8)
+}
 
 function Find-DesktopDocker { return "fixture-docker.exe" }
 
@@ -45,13 +53,41 @@ function Initialize-State {
 }
 
 function Configure-Client {
-    Write-File $DesktopCredentialPath (@{sealed = "fixture"; preset = $Options["--preset"]} | ConvertTo-Json)
+    Write-File $DesktopCredentialPath (@{
+        sealed = "fixture"; preset = $Options["--preset"]; profile = $Options["--profile"]
+    } | ConvertTo-Json)
 }
 
 function Get-Plaintext([string]$Sealed) { return $Sealed }
-function Test-Credential([string]$Token) { return ($Token -ceq "fixture") }
+function New-RandomBytes([int]$Length) {
+    $bytes = [byte[]]::new($Length)
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $random.GetBytes($bytes) } finally { $random.Dispose() }
+    return ,$bytes
+}
+function To-Hex([byte[]]$Bytes) { return [BitConverter]::ToString($Bytes).Replace("-", "").ToLowerInvariant() }
+function Test-Credential([string]$Token) {
+    if ($Token -ceq "fixture") { return $true }
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { $digest = To-Hex ($hash.ComputeHash($Utf8.GetBytes($Token))) } finally { $hash.Dispose() }
+    return [bool]($fixture.clientRecords.Values | Where-Object token_hash -ceq $digest)
+}
+function Invoke-Operator([string]$Command, [string]$InputText) {
+    $request = $InputText | ConvertFrom-Json
+    if ($Command -ceq "client-register") {
+        $fixture.clientRecords[$request.client_id] = $request
+        return @{registered = $true}
+    }
+    if ($Command -ceq "client-revoke") {
+        $present = $fixture.clientRecords.ContainsKey($request.client_id)
+        $fixture.clientRecords.Remove($request.client_id)
+        return @{revoked = $present}
+    }
+    throw "Unexpected test operator."
+}
+function Install-Skill([string]$Skills) { [void][IO.Directory]::CreateDirectory($Skills) }
 function Revoke-Client {
-    Require $DesktopDetachedOperator "Revocation must work independently of the stopped gateway."
+    Require ($DesktopDetachedOperator -or $Action -ceq "desktop-detach") "Uninstall must revoke independently of the stopped gateway."
     [IO.File]::Delete($DesktopCredentialPath)
 }
 
@@ -280,6 +316,55 @@ try {
     Require ($report.saved -and $report.restart -ceq "failed") "A restart failure must distinguish an already saved credential."
     $fixture.failRestart = $false
     Require-Failure { Invoke-DesktopSource $false 18199 } "desktop_gateway_unavailable"
+    $issued = Run-Desktop "client-issue" @{"--name" = "report-reader"} | ConvertFrom-Json
+    Require ($issued.connection.url -ceq "http://127.0.0.1:18198/mcp") "Generic connection must use the current verified port."
+    Require (($issued.connection.scopes -join ",") -ceq "research.read") "Generic issuance must default to read-only."
+    $readerToken = $issued.connection.credential
+    Require (Test-Credential $readerToken) "Issued credential was not validated."
+    $writer = Run-Desktop "client-issue" @{"--name" = "report-reader"; "--preset" = "topic-writer"} | ConvertFrom-Json
+    Require (!(Test-Credential $readerToken)) "Rotation must revoke the former client credential."
+    Require ("research.run" -cin $writer.connection.scopes) "Writer must include the selected research scopes."
+    $statusText = Run-Desktop "status"
+    $status = $statusText | ConvertFrom-Json
+    Require ($status.generic_clients.Count -eq 1 -and $status.generic_clients[0].name -ceq "report-reader") "List the named client independently."
+    Require (!$statusText.Contains($writer.connection.credential)) "Generic credential leaked into regular status."
+    Require-Failure { Run-Desktop "client-revoke" @{"--name" = "../other"} } "desktop_invalid_arguments"
+    Run-Desktop "client-revoke" @{"--name" = "report-reader"}
+    Require (!(Test-Credential $writer.connection.credential)) "Explicit revoke must disable the selected client."
+
+    $profilePath = Join-Path $env:DSH_HOME "profiles/desk-test/cordis.patch.yml"
+    $otherDsh = "- id: skill-filesystem" + [Environment]::NewLine + "  disabled: true"
+    Write-File $profilePath $otherDsh
+    $Root = $instanceRoot
+    $DesktopProject = $fixtureProject
+    $Endpoint = "http://127.0.0.1:18198"
+    $BridgeArgs = @("-NoProfile", "-File", (Join-Path $Root "mcp-bridge.ps1"), "-InstallRoot", $Root, "-Client", "dsh")
+    $Options = @{"--profile" = "desk-test"}
+    Install-Dsh
+    $profileText = [IO.File]::ReadAllText($profilePath)
+    Require ($profileText.Contains($otherDsh) -and $profileText.Contains("# BEGIN FINDASHBOARD $fixtureProject")) "DSH setup overwrote an unrelated setting."
+    Install-Dsh
+    Require ([IO.File]::ReadAllText($profilePath) -ceq $profileText) "DSH setup must be repeatable."
+    $workspace = Run-Desktop "client-workspace" @{"--client" = "dsh"; "--mode" = "location"} | ConvertFrom-Json
+    Require ($workspace.workspace -ceq (Join-Path $instanceRoot "workspace")) "DSH workspace must be owned by the current instance."
+    Run-Desktop "attach" @{"--client" = "dsh"; "--preset" = "readonly"; "--profile" = "desk-test"}
+    Run-Desktop "detach" @{"--client" = "dsh"}
+    Require ([IO.File]::ReadAllText($profilePath).TrimEnd() -ceq $otherDsh) "Revocation must only remove the active instance's DSH configuration."
+    $versionShim = Join-Path $fixtureRoot "bin/opencode.cmd"
+    $openCodePath = Join-Path $instanceRoot "opencode-workspace/opencode.jsonc"
+    $previousPath = $env:PATH
+    try {
+        $env:PATH = (Split-Path -Parent $versionShim) + ";" + $previousPath
+        Write-File $versionShim "@echo off`r`necho 1.9.0`r`n"
+        Install-OpenCode
+        Require (Test-DesktopManagedOpenCode $openCodePath) "OpenCode 1 should get a scoped project configuration."
+        Write-File $versionShim "@echo off`r`necho 2.0.0`r`n"
+        Install-OpenCode
+        $openCodeConfig = (Get-Content -LiteralPath $openCodePath | Select-Object -Skip 1) -join "`n" | ConvertFrom-Json
+        Require ($openCodeConfig.mcp.servers.$fixtureProject.type -ceq "local") "OpenCode 2 needs an instance-specific stdio server."
+        Write-File $openCodePath "// FinDashboard Desktop $fixtureProject`r`n{""model"":""custom""}"
+        Require-Failure { Install-OpenCode } "desktop_opencode_config"
+    } finally { $env:PATH = $previousPath }
     $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
     Require ($state.port -eq 18198 -and $fixture.loads -eq 1) "The first install did not commit the expected port and image load."
     $savedOwner = $state.instance_id
@@ -348,6 +433,7 @@ try {
     Require ($fixture.images.ContainsKey($legacy.tag)) "An old tag with unverified identity was removed."
     Write-Host "Desktop host faults, offline installation and ownership checks passed."
 } finally {
+    $env:DSH_HOME = $previousDshHome
     $cwd = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.tmp"))
     $resolved = [IO.Path]::GetFullPath($fixtureRoot)
     if ($resolved.StartsWith($cwd.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -and
