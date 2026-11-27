@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import AwareDatetime, BaseModel
@@ -120,7 +120,7 @@ async def list_jobs(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     archived: str = Query(default="exclude"),
-    topic_id: str | None = Query(default=None, max_length=32),
+    topic_id: Annotated[str | None, Query(max_length=32)] = None,
     request_source: Literal["web", "mcp", "worker", "other"] | None = None,
     created_from: AwareDatetime | None = None,
     created_before: AwareDatetime | None = None,
