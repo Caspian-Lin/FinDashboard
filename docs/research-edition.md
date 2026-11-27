@@ -2,6 +2,8 @@
 
 支持 Windows x64、Docker Desktop 的 Linux 容器模式，以及 Codex、DeepSeek Harness（DSH）或 OpenCode。镜像架构为 `linux/amd64`。Web、研究 REST 和 MCP 共用一个仅发布到 `127.0.0.1` 的端口。PostgreSQL 留在 Compose 网络内。
 
+希望通过桌面接入 Codex，或安装时无法访问 Docker Hub 和 GHCR，可使用含固定镜像和合成样例的离线 MSI。前置条件和数据卷归属见[桌面研究版指南](research-desktop.md)。
+
 ## 安装与接入
 
 从 [GitHub Releases](https://github.com/Caspian-Lin/FinDashboard/releases) 下载 `FinDashboard-research-windows-amd64.zip`，解压后在该目录打开终端。核对 Release 附带的 `SHA256SUMS`，然后运行安装命令。

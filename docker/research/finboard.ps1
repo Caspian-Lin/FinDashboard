@@ -1,8 +1,10 @@
 $ErrorActionPreference = "Stop"
 $Action = $args | Select-Object -First 1
+$DesktopHostScript = Join-Path $PSScriptRoot "desktop-host.ps1"
 $Options = @{}
 for ($i = 1; $i -lt $args.Count; $i += 2) {
-    if ($args[$i] -notin @("--client", "--preset", "--port", "--profile", "--bundle") -or $i + 1 -ge $args.Count) {
+    if ($args[$i] -notin @("--client", "--preset", "--port", "--profile", "--bundle", "--mode", "--confirm") -or
+        $i + 1 -ge $args.Count -or $Options.ContainsKey($args[$i])) {
         throw "Invalid arguments. See finboard help."
     }
     $Options[$args[$i]] = $args[$i + 1]
@@ -15,19 +17,19 @@ finboard import --bundle synthetic-starter-v1.zip
 finboard source-configure | source-status
 finboard revoke --client codex|dsh|opencode
 "@
+    if (Test-Path -LiteralPath $DesktopHostScript -PathType Leaf) {
+        Write-Host @"
+finboard desktop-status | desktop-install [--port 8276] | desktop-stop | desktop-import
+finboard desktop-attach --preset readonly|topic-writer
+finboard desktop-uninstall --mode preserve|purge [--confirm DELETE-THIS-INSTANCE]
+"@
+    }
     exit 0
 }
 
-$Root = Join-Path $env:LOCALAPPDATA "FinDashboard"
-if ($env:FINBOARD_INSTALL_ROOT) { $Root = [IO.Path]::GetFullPath($env:FINBOARD_INSTALL_ROOT) }
+$DesktopAction = $Action -like "desktop-*"
 $Utf8 = New-Object Text.UTF8Encoding($false)
 $Compose = Join-Path $PSScriptRoot "compose.yaml"
-$Client = $Options["--client"]
-$StatePath = Join-Path $Root "state.json"
-$State = if (Test-Path -LiteralPath $StatePath) {
-    Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
-} else { [PSCustomObject]@{port = 8176} }
-$Bridge = Join-Path $Root "mcp-bridge.ps1"
 
 function Write-File([string]$Path, [string]$Value) {
     $directory = Split-Path -Parent $Path
@@ -63,6 +65,11 @@ function Invoke-Stack {
 }
 
 function Invoke-Operator([string]$Command, [string]$InputText) {
+    if ($DesktopAction) {
+        $stream = New-Object IO.MemoryStream(,($Utf8.GetBytes($InputText + [Environment]::NewLine)))
+        try { return Invoke-DesktopOperator $Command $stream }
+        finally { $stream.Dispose() }
+    }
     $process = Start-Operator $Command $true
     $data = $Utf8.GetBytes($InputText + [Environment]::NewLine)
     try { $process.StandardInput.BaseStream.Write($data, 0, $data.Length) }
@@ -105,6 +112,35 @@ function Import-Bundle([string]$Bundle) {
     if ($process.ExitCode -ne 0) { throw "Starter package failed validation or conflicts with an installed version." }
 }
 
+. (Join-Path $PSScriptRoot "installer-clients.ps1")
+if ($DesktopAction) {
+    try {
+        if (!(Test-Path -LiteralPath $DesktopHostScript -PathType Leaf)) {
+            throw "desktop_offline_package_required: Run this command from the offline Desktop package."
+        }
+        . $DesktopHostScript
+        Invoke-DesktopAction
+    }
+    catch {
+        $failure = $_.Exception.Message
+        if ($failure -notmatch '^desktop_[a-z_]+: ') {
+            $failure = "desktop_operation_failed: Check Desktop status, Docker Desktop and Codex, then retry."
+        }
+        [Console]::Error.WriteLine($failure)
+        exit 1
+    }
+    return
+}
+
+$Root = Join-Path $env:LOCALAPPDATA "FinDashboard"
+if ($env:FINBOARD_INSTALL_ROOT) { $Root = [IO.Path]::GetFullPath($env:FINBOARD_INSTALL_ROOT) }
+$Client = $Options["--client"]
+$StatePath = Join-Path $Root "state.json"
+$State = if (Test-Path -LiteralPath $StatePath) {
+    Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+} else { [PSCustomObject]@{port = 8176} }
+$Bridge = Join-Path $Root "mcp-bridge.ps1"
+
 if (!(Get-Command docker.exe -ErrorAction SilentlyContinue)) { throw "Install Docker Desktop and reopen the terminal." }
 $dockerType = & docker info --format "{{.OSType}}" 2>$null
 if ($LASTEXITCODE -ne 0 -or $dockerType -ne "linux") { throw "Start Docker Desktop in Linux containers mode and retry." }
@@ -121,8 +157,6 @@ $Endpoint = "http://127.0.0.1:$env:FINBOARD_PORT"
 $BridgeArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Bridge, "-InstallRoot", $Root, "-Client", $Client)
 if ($Action -in @("setup", "revoke") -and $Client -notin @("codex", "opencode", "dsh")) { throw "Specify --client codex, dsh, or opencode." }
 if ($Action -ne "setup" -and !(Test-Path -LiteralPath $StatePath)) { throw "Run finboard setup first." }
-. (Join-Path $PSScriptRoot "installer-clients.ps1")
-
 switch ($Action) {
     "setup" {
         if ($Client -ne "dsh" -and !(Get-Command $Client -ErrorAction SilentlyContinue)) {

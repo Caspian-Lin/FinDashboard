@@ -1,0 +1,26 @@
+x-ownership: &ownership
+  io.findashboard.desktop.instance: ${FINBOARD_DESKTOP_INSTANCE:?Desktop instance ID required}
+
+services:
+  postgres:
+    image: ${FINBOARD_DESKTOP_POSTGRES_IMAGE:?Offline PostgreSQL image required}
+    pull_policy: never
+    labels: *ownership
+  migrate:
+    pull_policy: never
+    labels: *ownership
+  gateway:
+    pull_policy: never
+    labels: *ownership
+  worker:
+    pull_policy: never
+    labels: *ownership
+
+networks:
+  default:
+    labels: *ownership
+volumes:
+  postgres:
+    labels: *ownership
+  research:
+    labels: *ownership
