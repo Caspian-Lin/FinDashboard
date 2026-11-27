@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FinDashboard Research",
+  "mainBinaryName": "finboard-research-desktop",
+  "version": "0.1.0",
+  "identifier": "com.findashboard.research",
+  "build": { "frontendDist": "../ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "management",
+        "title": "FinDashboard 研究版",
+        "create": false,
+        "useHttpsScheme": true,
+        "width": 1020,
+        "height": 740,
+        "minWidth": 640,
+        "minHeight": 530,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "capabilities": ["management"],
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src ipc: https://ipc.localhost; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "icon": ["icons/icon.ico"],
+    "useLocalToolsDir": true,
+    "windows": { "webviewInstallMode": { "type": "skip" } }
+  }
+}

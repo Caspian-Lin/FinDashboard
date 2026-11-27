@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>FinDashboard 研究版</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">F</span> FinDashboard <span class="edition">研究版</span></div>
+    <button id="refresh" type="button">刷新状态</button>
+  </header>
+  <main>
+    <section class="overview" aria-labelledby="page-title">
+      <div>
+        <h1 id="page-title">本机研究服务</h1>
+        <p id="service-detail">正在检查 Docker Desktop 和研究服务。</p>
+      </div>
+      <span id="service-state" class="state" data-tone="neutral" aria-live="polite">检查中</span>
+    </section>
+
+    <section class="settings" aria-label="研究服务设置">
+      <div class="setting">
+        <div>
+          <h2>服务与端口</h2>
+          <p>首次启动载入离线镜像并迁移数据库。</p>
+        </div>
+        <form id="service-form" class="actions">
+          <label class="field"><span>本机端口</span><input id="port" type="number" min="1024" max="65535" step="1" value="8276" required></label>
+          <button id="start" class="primary" type="submit">安装并启动</button>
+          <button id="stop" type="button">停止</button>
+        </form>
+      </div>
+      <div class="setting">
+        <div>
+          <h2>合成样例</h2>
+          <p>导入随包数据后，在工作台的「数据基座」查看冻结发布。</p>
+        </div>
+        <div class="actions"><button id="import" type="button">导入样例</button></div>
+      </div>
+      <div class="setting">
+        <div>
+          <h2>Codex 接入</h2>
+          <p id="codex-state">服务就绪后可启用本机 Codex。</p>
+          <p id="scopes" class="scope" hidden></p>
+        </div>
+        <div class="actions">
+          <label class="field"><span>授权预设</span><select id="preset"><option value="readonly">只读</option><option value="topic-writer">课题与研究运行</option></select></label>
+          <button id="attach" type="button">接入或切换</button>
+        </div>
+      </div>
+      <div class="setting">
+        <div>
+          <h2>研究工作台</h2>
+          <p>管理课题、策略与冻结运行。</p>
+        </div>
+        <div class="actions"><button id="open-workbench" type="button">打开工作台</button></div>
+      </div>
+    </section>
+
+    <section class="diagnostics" aria-labelledby="diagnostic-title">
+      <div class="section-heading"><h2 id="diagnostic-title">操作记录</h2><span id="result-meta" class="scope"></span></div>
+      <progress id="running-progress" aria-label="操作进行中" hidden></progress>
+      <p id="result-status" role="status">执行操作后可在这里查看诊断。</p>
+      <pre id="log" aria-label="脱敏操作日志" tabindex="0" hidden></pre>
+      <div id="command" class="command" hidden>
+        <input aria-label="等价 PowerShell 命令" id="command-text" readonly>
+        <button id="copy" type="button">复制命令</button>
+      </div>
+    </section>
+
+    <details class="maintenance" id="maintenance">
+      <summary>安装维护与卸载</summary>
+      <p>保留数据模式会移除本实例服务和 Codex 接入，保存数据库、研究文件及恢复配置。</p>
+      <div class="actions">
+        <button id="preserve" type="button">卸载并保留研究数据</button>
+        <button id="show-purge" type="button" class="danger">彻底卸载…</button>
+      </div>
+      <form id="purge-form" hidden>
+        <p>此操作会删除本实例的数据库卷、研究卷、配置、凭据和日志。请先完成所需备份。</p>
+        <p id="purge-scope" class="scope"></p>
+        <label class="field"><span>输入 <code>DELETE-THIS-INSTANCE</code> 确认</span><input id="confirmation" type="text" autocomplete="off" spellcheck="false" required></label>
+        <div class="actions"><button id="purge" type="submit" class="danger">删除本实例和研究数据</button><button id="cancel-purge" type="button">取消</button></div>
+      </form>
+    </details>
+  </main>
+</body>
+</html>

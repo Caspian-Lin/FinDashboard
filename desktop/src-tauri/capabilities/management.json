@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "management",
+  "description": "本机管理界面的固定主机操作",
+  "local": true,
+  "webviews": ["management"],
+  "permissions": ["allow-desktop-operation", "allow-desktop-open-workbench"]
+}

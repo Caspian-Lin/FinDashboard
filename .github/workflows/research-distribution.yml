@@ -2,9 +2,10 @@ name: Docker research edition
 
 on:
   pull_request:
-    branches: [dev, main, "m/**"]
+    branches: [dev, main, "m/**", "feat/docker-research-547"]
     paths:
       - docker/research/**
+      - desktop/**
       - scripts/*research*.py
       - scripts/*research*.ps1
       - packages/**
@@ -70,13 +71,47 @@ jobs:
         shell: powershell
         run: ./scripts/test_research_installer.ps1
 
+  desktop-check:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Verify the bounded host operations and WebView origins
+        working-directory: desktop/src-tauri
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+      - name: Check the management UI script
+        run: node --check desktop/ui/app.js
+      - name: Exercise the Windows desktop installer and recovery paths
+        shell: powershell
+        run: ./scripts/test_research_desktop_host.ps1
+      - name: Validate WiX packaging with a small resource fixture
+        working-directory: desktop
+        run: |
+          New-Item -ItemType Directory src-tauri/resources/edition -Force | Out-Null
+          Copy-Item ../docker/research/finboard.ps1 src-tauri/resources/edition/finboard.ps1
+          '{"bundle":{"resources":{"resources/edition":"edition/"}}}' |
+            Set-Content -Encoding ascii src-tauri/tauri.offline.conf.json
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build -- --debug --ci -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $msi = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/debug/bundle/msi/*.msi)
+          if ($msi.Count -ne 1) { throw 'Expected one x64 fixture MSI.' }
+
   release:
     if: startsWith(github.ref, 'refs/tags/research-v')
-    needs: [verify, windows-installer]
+    needs: [verify, windows-installer, desktop-check]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
+    outputs:
+      image: ${{ steps.desktop-image.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -104,6 +139,11 @@ jobs:
           push: true
           provenance: false
           cache-from: type=gha,scope=research-distribution
+      - name: Record the research image identity
+        id: desktop-image
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+        run: echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
       - name: Publish the optional sandbox image
         uses: docker/build-push-action@v6
         with:
@@ -130,3 +170,93 @@ jobs:
             --title "FinDashboard Research $GITHUB_REF_NAME" \
             --notes-file ../docs/research-edition.md \
             FinDashboard-research-windows-amd64.zip synthetic-starter-v1.zip SHA256SUMS research-smoke.json research-image-sizes.json sandbox-image-size.json
+
+  desktop-offline-assets:
+    if: startsWith(github.ref, 'refs/tags/research-v')
+    needs: [verify, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: research-edition-evidence
+          path: dist
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bundle and check both offline image identities
+        env:
+          IMAGE: ${{ needs.release.outputs.image }}
+        run: |
+          set -euo pipefail
+          PG_IMAGE=$(python -c 'from scripts.package_research_desktop import POSTGRES_IMAGE; print(POSTGRES_IMAGE)')
+          VERSION=${GITHUB_REF_NAME#research-v}
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker pull --platform linux/amd64 "$PG_IMAGE"
+          python scripts/package_research_desktop.py desktop/src-tauri/resources/edition \
+            --config desktop/src-tauri/tauri.offline.conf.json --starter dist/synthetic-starter-v1.zip \
+            --app-image "$IMAGE" --postgres-image "$PG_IMAGE" --version "$VERSION"
+          docker image load --input desktop/src-tauri/resources/edition/images.tar
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          manifest = json.loads(Path("desktop/src-tauri/resources/edition/offline-manifest.json").read_bytes())
+          for image in manifest["images"]:
+              identity = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", image["tag"]], text=True)
+              assert identity.strip() == image["id"]
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-desktop-assets
+          path: |
+            desktop/src-tauri/resources/edition
+            desktop/src-tauri/tauri.offline.conf.json
+          compression-level: 0
+          retention-days: 3
+
+  desktop-msi:
+    if: startsWith(github.ref, 'refs/tags/research-v')
+    needs: desktop-offline-assets
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: offline-desktop-assets
+          path: desktop/src-tauri
+      - name: Build the Windows x64 MSI
+        working-directory: desktop
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build -- --ci -- --locked
+      - name: Attach offline MSI and checksum to the draft Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $bundle = Get-ChildItem desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if (@($bundle).Count -ne 1) { throw 'Expected one x64 MSI.' }
+          $name = 'FinDashboard-research-offline-windows-amd64.msi'
+          Copy-Item -LiteralPath $bundle.FullName -Destination $name
+          $sha = (Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha  $name" | Set-Content -Encoding ascii SHA256SUMS-desktop
+          @{
+            windows_msi_bytes = (Get-Item -LiteralPath $name).Length
+            archive_bytes = (Get-Item -LiteralPath 'desktop/src-tauri/resources/edition/images.tar').Length
+            sha256 = $sha
+          } | ConvertTo-Json | Set-Content -Encoding ascii desktop-size.json
+          gh release upload "$env:GITHUB_REF_NAME" $name SHA256SUMS-desktop desktop-size.json

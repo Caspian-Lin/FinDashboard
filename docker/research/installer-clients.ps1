@@ -4,9 +4,26 @@ function Test-Credential([string]$Token) {
             jsonrpc = "2.0"; id = 1; method = "initialize"
             params = @{protocolVersion = "2025-06-18"; capabilities = @{}; clientInfo = @{name = "finboard-setup"; version = "1"}}
         } | ConvertTo-Json -Depth 6 -Compress
-        $headers = @{Authorization = "Bearer $Token"; Accept = "application/json, text/event-stream"}
-        $reply = Invoke-RestMethod -Uri "$Endpoint/mcp" -Method Post -TimeoutSec 10 -Headers $headers -ContentType "application/json" -Body $init
-        return ($reply.result.serverInfo.name -eq "finboard")
+        Add-Type -AssemblyName System.Net.Http
+        $handler = New-Object System.Net.Http.HttpClientHandler
+        $handler.AllowAutoRedirect = $false
+        $handler.UseProxy = $false
+        $http = New-Object System.Net.Http.HttpClient($handler)
+        $http.Timeout = [TimeSpan]::FromSeconds(10)
+        $http.DefaultRequestHeaders.Add("Authorization", "Bearer $Token")
+        $http.DefaultRequestHeaders.Add("Accept", "application/json, text/event-stream")
+        $content = New-Object System.Net.Http.StringContent($init, [Text.Encoding]::UTF8, "application/json")
+        try {
+            $response = $http.PostAsync("$Endpoint/mcp", $content).GetAwaiter().GetResult()
+            try {
+                if (!$response.IsSuccessStatusCode) { return $false }
+                $reply = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+                return ($reply.result.serverInfo.name -eq "finboard")
+            } finally { $response.Dispose() }
+        } finally {
+            $content.Dispose()
+            $http.Dispose()
+        }
     } catch { return $false }
 }
 
@@ -25,6 +42,15 @@ function Install-Skill([string]$Skills) {
 function Install-Codex {
     $market = Join-Path $Root "codex-marketplace"
     $plugin = Join-Path $market "plugins/finboard-research"
+    $marketplaceName = if ($DesktopAction) { $DesktopProject } else { "finboard-local" }
+    $serverName = if ($DesktopAction) { $DesktopProject } else { "finboard" }
+    if ($DesktopAction) {
+        Assert-DesktopPath (Join-Path $plugin ".codex-plugin/plugin.json")
+        Assert-DesktopPath (Join-Path $plugin ".mcp.json")
+        Assert-DesktopPath (Join-Path $plugin "skills/finboard-research")
+        Assert-DesktopPath (Join-Path $market ".agents/plugins/marketplace.json")
+        [void](Get-DesktopCodexMarketplace)
+    }
     $entry = @{
         name = "finboard-research"
         source = @{source = "local"; path = "./plugins/finboard-research"}
@@ -32,16 +58,21 @@ function Install-Codex {
         category = "Productivity"
     }
     Write-File (Join-Path $market ".agents/plugins/marketplace.json") (@{
-        name = "finboard-local"; interface = @{displayName = "FinDashboard"}; plugins = @($entry)
+        name = $marketplaceName; interface = @{displayName = "FinDashboard"}; plugins = @($entry)
     } | ConvertTo-Json -Depth 8)
     Write-File (Join-Path $plugin ".codex-plugin/plugin.json") (@{
         name = "finboard-research"; version = "1.0.0"; description = "FinDashboard Research"
         skills = "./skills/"; mcpServers = "./.mcp.json"
     } | ConvertTo-Json)
-    Write-File (Join-Path $plugin ".mcp.json") (@{mcpServers = @{finboard = @{
+    Write-File (Join-Path $plugin ".mcp.json") (@{mcpServers = @{$serverName = @{
         command = "powershell.exe"; args = $BridgeArgs; startup_timeout_sec = 25; tool_timeout_sec = 360
     }}} | ConvertTo-Json -Depth 6)
     Install-Skill (Join-Path $plugin "skills")
+    if ($DesktopAction) {
+        [void](Invoke-DesktopCodex "plugin" "marketplace" "add" $market)
+        [void](Invoke-DesktopCodex "plugin" "add" "finboard-research@$marketplaceName")
+        return
+    }
     & codex plugin marketplace add $market
     if ($LASTEXITCODE -ne 0) { throw "Update Codex CLI and retry finboard setup." }
     & codex plugin add "finboard-research@finboard-local"
