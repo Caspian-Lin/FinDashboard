@@ -709,6 +709,10 @@ export function RunReportView({ runId }: { runId: string }) {
   const detail = detailQuery.data;
   if (!detail) return null;
   const result = detail.result;
+  const releases = detail.manifest?.dataset_releases;
+  const usesSyntheticData = Array.isArray(releases) && releases.some(
+    (release) => release?.artifact_id === "synthetic-starter-v1",
+  );
 
   const metrics: ReportMetrics = {
     total_return: getMetric(result, ["total_return", "strategy_return"]),
@@ -740,6 +744,11 @@ export function RunReportView({ runId }: { runId: string }) {
       meta={
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <StatusBadge status={detail.status} />
+          {usesSyntheticData && (
+            <span className="rounded border border-warning px-2 py-1 font-semibold text-warning">
+              {tl({ zh: "合成数据", en: "Synthetic data" })}
+            </span>
+          )}
           <span className="font-mono">{detail.strategy_kind}</span>
           <span>·</span>
           <span className="font-mono">

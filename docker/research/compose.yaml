@@ -1,0 +1,75 @@
+name: finboard-research
+
+x-app: &app
+  image: ${FINBOARD_IMAGE:?Set the versioned FinDashboard image}
+  platform: linux/amd64
+  environment:
+    FINBOARD_ENV: prod
+    FINBOARD_MCP_TRANSPORT: streamable-http
+  secrets:
+    - postgres_password
+  volumes:
+    - research:/state
+  init: true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: findashboard
+      POSTGRES_DB: findashboard
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -h, "127.0.0.1", -U, findashboard, -d, findashboard]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  migrate:
+    <<: *app
+    command: [migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  gateway:
+    <<: *app
+    command: [gateway]
+    ports:
+      - "127.0.0.1:${FINBOARD_PORT:-8176}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/api/research-edition/health', timeout=3)"
+      interval: 2s
+      timeout: 4s
+      retries: 45
+    restart: unless-stopped
+  worker:
+    <<: *app
+    environment:
+      FINBOARD_ENV: prod
+      FINBOARD_WORKER_POLL_INTERVAL_SECONDS: "0.5"
+      FINBOARD_RESEARCH_PRICE_FEATURE_PROCESS_MIN_SYMBOLS: ${FINBOARD_RESEARCH_MIN_POOL_SYMBOLS:-32}
+    command: [worker]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+secrets:
+  postgres_password:
+    file: ${FINBOARD_DB_SECRET_FILE:?Run finboard setup first}
+volumes:
+  postgres:
+  research:

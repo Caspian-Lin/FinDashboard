@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, literal_column, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_app.research_audit import ResearchAuditEvent, research_audit_recorder
+from finboard_app.research_operation import ResearchOperationContext
 from finboard_persistence.models import ResearchMemoryModel
-from finboard_persistence.research_topic_repo import ResearchTopicRepository
+from finboard_persistence.research_topic_link_repo import ResearchTopicLinkRepository
+from finboard_persistence.research_topic_repo import (
+    TOPIC_STATUSES,
+    ResearchTopicRepository,
+)
 
 
 class WorkspaceInput(BaseModel):
@@ -30,6 +39,14 @@ class EvidenceRef(WorkspaceInput):
         "factor_series",
         "simulation",
         "backtest",
+        # #516: precise references to the factor/code/validation artifacts. The
+        # eight historical kinds above keep their exact semantics; ``experiment``
+        # remains the alias for validation experiments so old refs stay valid.
+        "factor_experiment",
+        "code_artifact",
+        "code_run",
+        "validation_experiment",
+        "factor_snapshot",
     ]
     ref_id: str = Field(min_length=1, max_length=256)
     version: str | None = Field(default=None, max_length=64)
@@ -70,7 +87,17 @@ class TopicInput(WorkspaceInput):
 
 
 class RoundInput(WorkspaceInput):
-    entry_type: Literal["round", "evidence"] = "round"
+    """One topic entry: an execution round, organised evidence, a plan or a review.
+
+    ``plan`` records the design only (factor formula, window, direction,
+    pre-registered hypothesis, trial budget) and never triggers execution.
+    ``review`` records a formal reviewed conclusion and therefore requires an
+    exact ``.md`` ``document_ref`` **relative to ``docs/research``** plus its
+    checksum (the same root ``source_fact`` resolves documents against), which
+    keeps it distinct from a human record or an agent interpretation.
+    """
+
+    entry_type: Literal["round", "evidence", "plan", "review"] = "round"
     goal_version: str = Field(min_length=1, max_length=64)
     objective: str = Field(min_length=1, max_length=2000)
     action: str = Field(min_length=1, max_length=4000)
@@ -82,6 +109,59 @@ class RoundInput(WorkspaceInput):
     source_refs: list[EvidenceRef] = Field(default_factory=list, max_length=30)
     supersedes_id: str | None = Field(default=None, max_length=32)
     branch: str = Field(default="main", max_length=100)
+    #: Only ``review`` entries carry this: repo-relative ``.md`` path + checksum.
+    document_ref: EvidenceRef | None = None
+
+    @model_validator(mode="after")
+    def validate_entry_kind(self) -> RoundInput:
+        if self.entry_type == "review":
+            if self.document_ref is None:
+                raise ValueError(
+                    "review 条目必须提供 document_ref(相对 docs/research 的 .md 路径 + checksum)"
+                )
+            if self.document_ref.kind != "document":
+                raise ValueError("document_ref.kind 必须为 document")
+            path = Path(self.document_ref.ref_id)
+            if (
+                path.suffix != ".md"
+                or path.is_absolute()
+                or self.document_ref.ref_id.startswith(("/", "\\"))
+                or ".." in path.parts
+                or not self.document_ref.checksum
+            ):
+                raise ValueError(
+                    "review 的 document_ref 必须是相对 docs/research 的 .md 路径且带 checksum"
+                )
+        elif self.document_ref is not None:
+            raise ValueError("只有 review 条目可以携带 document_ref")
+        if self.entry_type == "plan" and self.outcome != "completed":
+            # A plan is design intent, not an execution result: recording a
+            # failed/interrupted outcome would misrepresent what was run.
+            raise ValueError("plan 只记录设计,outcome 必须为 completed(执行结果用 round)")
+        return self
+
+
+#: ``entry_type`` -> evidence level shown to readers. Plans are explicit design
+#: intent and reviews are formal reviewed conclusions; both are deliberately not
+#: machine facts. Rounds/evidence keep the historical human/agent split.
+ENTRY_EVIDENCE_LEVELS: dict[str, str] = {
+    "plan": "research_plan",
+    "review": "reviewed_conclusion",
+}
+
+
+def _entry_evidence_level(row: Any) -> str:
+    """Evidence level of one entry; plan/review are distinct from round records."""
+
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    entry_type = payload.get("entry_type")
+    if isinstance(entry_type, str) and entry_type in ENTRY_EVIDENCE_LEVELS:
+        return ENTRY_EVIDENCE_LEVELS[entry_type]
+    return (
+        "agent_interpretation"
+        if str(row.created_by).startswith("agent:")
+        else "human_record"
+    )
 
 
 def record_out(row: Any) -> dict[str, Any]:
@@ -90,12 +170,387 @@ def record_out(row: Any) -> dict[str, Any]:
         result["topic_id"] = row.topic_id
     if hasattr(row, "entry_id"):
         result.update(entry_id=row.entry_id, checksum=row.checksum)
-        result["evidence_level"] = (
-            "agent_interpretation" if row.created_by.startswith("agent:") else "human_record"
-        )
+        result["evidence_level"] = _entry_evidence_level(row)
     else:
         result.update(revision=row.revision, evidence_level="working_summary")
+        # Internal creation-mode marker stays in storage for idempotency checks; it
+        # is not part of the public contract (payloads are extra="forbid").
+        result.pop("created_as", None)
+        # The column is authoritative; payload.status is kept in sync for old JSON
+        # consumers only.
+        status = getattr(row, "status", None)
+        if status:
+            result["status"] = status
+        updated_at = getattr(row, "updated_at", None)
+        if updated_at is not None:
+            result["updated_at"] = updated_at.isoformat()
     return result
+
+
+async def topic_entry(session: AsyncSession, topic_id: str, entry_id: str) -> dict[str, Any]:
+    """Exact entry lookup scoped to one topic; a cross-topic id is a 404."""
+    repo = ResearchTopicRepository(session)
+    await repo.get(topic_id)
+    row = await repo.entry(topic_id, entry_id)
+    if row is None:
+        raise LookupError(f"轮次不存在或不属于该课题: {entry_id}")
+    result = record_out(row)
+    result["refs"] = row.payload.get("source_refs", [])
+    document_ref = row.payload.get("document_ref")
+    if isinstance(document_ref, dict):
+        result["document_ref"] = document_ref
+    result["topic_revision"] = row.payload.get("topic_revision")
+    return result
+
+
+async def topic_branches(
+    session: AsyncSession, topic_id: str, *, limit: int = 20, offset: int = 0
+) -> dict[str, Any]:
+    if not 1 <= limit <= 50 or not 0 <= offset <= 100000:
+        raise ValueError("分页范围: limit 1-50,offset 0-100000")
+    repo = ResearchTopicRepository(session)
+    await repo.get(topic_id)
+    rows = await repo.branches(topic_id, limit, offset)
+    items = [
+        {
+            **row,
+            "count": int(row["count"]),
+            "last_at": row["last_at"].isoformat() if row["last_at"] is not None else None,
+        }
+        for row in rows[:limit]
+    ]
+    return {
+        "items": items,
+        "has_more": len(rows) > limit,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+async def topic_refs_check(
+    session: AsyncSession,
+    topic_id: str,
+    *,
+    rounds: int = 10,
+    limit: int = 20,
+    offset: int = 0,
+    docs_root: Path | None = None,
+) -> dict[str, Any]:
+    """Probe the refs of the most recent rounds; at most 20 refs per call."""
+    if not 1 <= rounds <= 20:
+        raise ValueError("rounds 范围: 1-20")
+    if not 1 <= limit <= 20 or not 0 <= offset <= 100000:
+        raise ValueError("引用检查分页范围: limit 1-20,offset 0-100000")
+    repo = ResearchTopicRepository(session)
+    await repo.get(topic_id)
+    rows = await repo.recent_rounds(topic_id, rounds)
+    ordered: list[dict[str, Any]] = []
+    seen: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        payload = row["payload"] if isinstance(row["payload"], dict) else {}
+        # #516: review document refs are evidence too -- verify their checksum on
+        # the same probe so a reviewed conclusion cannot drift from its document.
+        collected: list[dict[str, Any]] = []
+        for ref in payload.get("source_refs") or []:
+            if isinstance(ref, dict):
+                collected.append(ref)
+        document_ref = payload.get("document_ref")
+        if isinstance(document_ref, dict):
+            collected.append(document_ref)
+        for ref in collected:
+            key = (ref.get("kind"), ref.get("ref_id"), ref.get("version"), ref.get("checksum"))
+            item = seen.get(key)
+            if item is None:
+                item = {"ref": ref, "entry_ids": []}
+                seen[key] = item
+                ordered.append(item)
+            item["entry_ids"].append(row["entry_id"])
+    page = ordered[offset : offset + limit]
+    items: list[dict[str, Any]] = []
+    root = docs_root or Path("docs/research")
+    for item in page:
+        try:
+            fact = await source_fact(session, item["ref"], root)
+            items.append({**item, "status": fact["status"], "facts": fact.get("facts")})
+        except ValueError as exc:
+            items.append({**item, "status": "invalid", "error": str(exc)})
+    total = len(ordered)
+    return {
+        "items": items,
+        "total": total,
+        "has_more": offset + limit < total,
+        "offset": offset,
+        "limit": limit,
+        "rounds": rounds,
+    }
+
+
+CONTEXT_MAX_BYTES = 64 * 1024
+CONTEXT_MAX_ROUNDS = 20
+CONTEXT_MAX_REFS = 10
+CONTEXT_EXCERPT_CHARS = 300
+
+
+def _context_size(payload: Mapping[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, default=str).encode())
+
+
+def _excerpt(value: Any, limit: int) -> tuple[str, bool]:
+    text_value = value if isinstance(value, str) else ""
+    if len(text_value) <= limit:
+        return text_value, False
+    return text_value[:limit], True
+
+
+def _next_actions(
+    *,
+    status: str,
+    recent_rounds: list[dict[str, Any]],
+    dangling_refs: list[dict[str, Any]],
+    open_questions: list[str],
+) -> list[dict[str, str]]:
+    actions: list[dict[str, str]] = []
+    if status == "draft":
+        actions.append(
+            {"action": "activate", "why": "草稿缺少目标版本与来源,补齐后才能发起研究"}
+        )
+    if dangling_refs:
+        actions.append(
+            {
+                "action": "check_refs",
+                "why": f"{len(dangling_refs)}个引用断链、版本或checksum不符,需重新核验",
+            }
+        )
+    if status == "paused":
+        actions.append({"action": "resume", "why": "课题已暂停;续接前先确认是否恢复"})
+    if status == "closed":
+        actions.append({"action": "reopen", "why": "课题已收束;需要新证据时先重开"})
+    if status == "active" and not recent_rounds:
+        actions.append({"action": "write_round", "why": "尚无轮次记录,下一步动作未留痕"})
+    if status == "active" and recent_rounds:
+        last = recent_rounds[0]
+        if last.get("outcome") in {"failed", "interrupted", "paused"}:
+            actions.append(
+                {"action": "write_round", "why": "最近一轮失败或中断,需记录新尝试或原因"}
+            )
+    if status == "active" and open_questions:
+        actions.append(
+            {"action": "review_open_questions", "why": "仍有未解决的开放问题,先核对证据"}
+        )
+    if not actions:
+        actions.append(
+            {"action": "review", "why": "暂无自动发现的缺口;读轮次与正式文档后决定下一步"}
+        )
+    return actions[:6]
+
+
+async def topic_context(
+    session: AsyncSession,
+    topic_id: str,
+    *,
+    rounds: int = 10,
+    refs: int = 10,
+    docs_root: Path | None = None,
+) -> dict[str, Any]:
+    """Bounded cross-client continuation payload (plan #514 §5.4)."""
+    if not 1 <= rounds <= CONTEXT_MAX_ROUNDS:
+        raise ValueError(f"rounds 范围: 1-{CONTEXT_MAX_ROUNDS}")
+    if not 0 <= refs <= CONTEXT_MAX_REFS:
+        raise ValueError(f"refs 范围: 0-{CONTEXT_MAX_REFS}")
+    repo = ResearchTopicRepository(session)
+    topic = await repo.get(topic_id)
+    payload: Mapping[str, Any] = topic.payload if isinstance(topic.payload, dict) else {}
+    total_rounds = await repo.count_rounds(topic_id)
+    lifecycle = await repo.latest_lifecycle(topic_id)
+    round_rows = await repo.recent_rounds(topic_id, rounds)
+
+    excerpted = total_rounds > len(round_rows)
+    recent_rounds: list[dict[str, Any]] = []
+    entry_types: dict[str, int] = {}
+    for row in round_rows:
+        data = row["payload"] if isinstance(row["payload"], dict) else {}
+        conclusion, cut_conclusion = _excerpt(data.get("conclusion"), CONTEXT_EXCERPT_CHARS)
+        objective, cut_objective = _excerpt(data.get("objective"), CONTEXT_EXCERPT_CHARS)
+        next_step, cut_next_step = _excerpt(data.get("next_step"), CONTEXT_EXCERPT_CHARS)
+        # Never truncate silently: every shortened field flips the payload flag.
+        excerpted = excerpted or cut_conclusion or cut_objective or cut_next_step
+        entry_type = data.get("entry_type") or "round"
+        entry_types[str(entry_type)] = entry_types.get(str(entry_type), 0) + 1
+        created_by = str(row["created_by"])
+        recent_rounds.append(
+            {
+                "entry_id": row["entry_id"],
+                "entry_type": entry_type,
+                "branch": data.get("branch") or "main",
+                "outcome": data.get("outcome"),
+                "objective": objective,
+                "conclusion_excerpt": conclusion,
+                "next_step": next_step,
+                "created_at": row["created_at"].isoformat(),
+                "created_by": created_by,
+                "evidence_level": ENTRY_EVIDENCE_LEVELS.get(
+                    str(entry_type),
+                    "agent_interpretation"
+                    if created_by.startswith("agent:")
+                    else "human_record",
+                ),
+            }
+        )
+
+    questions: list[str] = []
+    for question in payload.get("open_questions") or []:
+        if not isinstance(question, str) or not question.strip():
+            continue
+        text_question, cut = _excerpt(question, 1000)
+        excerpted = excerpted or cut
+        questions.append(text_question)
+        if len(questions) >= 30:
+            excerpted = True
+            break
+
+    dangling_refs: list[dict[str, Any]] = []
+    dangling_has_more = False
+    refs_checked = 0
+    if refs:
+        probe = await topic_refs_check(
+            session, topic_id, rounds=rounds, limit=refs, docs_root=docs_root
+        )
+        refs_checked = len(probe["items"])
+        dangling_has_more = bool(probe["has_more"])
+        dangling_refs = [
+            {"ref": item["ref"], "status": item["status"], "entry_ids": item["entry_ids"]}
+            for item in probe["items"]
+            if item["status"] != "matched"
+        ]
+
+    last_lifecycle = None
+    since = topic.created_at.isoformat()
+    if lifecycle is not None:
+        last_payload = lifecycle["payload"] if isinstance(lifecycle["payload"], dict) else {}
+        since = lifecycle["created_at"].isoformat()
+        last_lifecycle = {
+            "from": last_payload.get("from"),
+            "to": last_payload.get("to"),
+            "reason": last_payload.get("reason"),
+            "actor": last_payload.get("actor"),
+            "action": last_payload.get("action"),
+            "at": last_payload.get("at") or since,
+            "entry_id": lifecycle["entry_id"],
+        }
+
+    goal = payload.get("goal") if isinstance(payload.get("goal"), dict) else None
+    # #515: derive in-progress links by joining run/job facts; the link row is
+    # never rewritten, so worker retries and duplicate events cannot duplicate
+    # this list. Terminal links stay available from the dedicated runs endpoint.
+    from finboard_app.research_topic_actions import derive_link_state
+
+    link_rows = await ResearchTopicLinkRepository(session).list_runs_for_topic(
+        topic_id, limit=10
+    )
+    active_links: list[dict[str, Any]] = []
+    for link_row in link_rows[:10]:
+        state = derive_link_state(
+            link_row.run.status if link_row.run is not None else None,
+            link_row.job.status if link_row.job is not None else None,
+        )
+        if state not in {"queued", "running", "interrupted"}:
+            continue
+        active_links.append(
+            {
+                "entity_type": link_row.link.entity_type,
+                "entity_id": link_row.link.entity_id,
+                "job_id": link_row.link.job_id,
+                "state": state,
+                "goal_version": link_row.link.goal_version,
+            }
+        )
+    # #516: factor experiments / sandbox runs / OOS experiments linked from this
+    # topic, with oos_outcome first. In-flight links survive reconnects because
+    # the link row is immutable and state is derived from the artifact/job.
+    from finboard_app.research_topic_artifacts import list_topic_artifact_links
+
+    artifact_page = await list_topic_artifact_links(session, topic_id, limit=10)
+    experiment_links = artifact_page["items"]
+    context: dict[str, Any] = {
+        "topic": {
+            "topic_id": topic.topic_id,
+            "revision": topic.revision,
+            "title": payload.get("title"),
+            "question": payload.get("question"),
+            "status": topic.status,
+            "conclusion": payload.get("conclusion") or "unknown",
+            "summary": payload.get("summary") or "",
+            "updated_at": topic.updated_at.isoformat() if topic.updated_at else None,
+        },
+        "goal": goal,
+        "lifecycle": {"since": since, "last": last_lifecycle},
+        "open_questions": questions,
+        "next_step": payload.get("next_step") or "",
+        "recent_rounds": recent_rounds,
+        "active_links": active_links,
+        "experiment_links": experiment_links,
+        "entry_types": entry_types,
+        "dangling_refs": dangling_refs,
+        "dangling_refs_has_more": dangling_has_more,
+        "refs_checked": refs_checked,
+        "evidence_levels": {
+            "topic": "working_summary",
+            "rounds": "agent_interpretation",
+            "documents": "canonical_document",
+            "links": "automatic_fact",
+        },
+        "next_actions": _next_actions(
+            status=topic.status,
+            recent_rounds=recent_rounds,
+            dangling_refs=dangling_refs,
+            open_questions=questions,
+        ),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "revision": topic.revision,
+        "excerpted": excerpted,
+        "bounds": {
+            "rounds": rounds,
+            "refs": refs,
+            "total_rounds": total_rounds,
+            "max_rounds": CONTEXT_MAX_ROUNDS,
+            "max_refs": CONTEXT_MAX_REFS,
+            "excerpt_chars": CONTEXT_EXCERPT_CHARS,
+            "max_bytes": CONTEXT_MAX_BYTES,
+        },
+    }
+
+    truncated_sections: list[str] = []
+    if _context_size(context) > CONTEXT_MAX_BYTES:
+        for item in recent_rounds:
+            item["conclusion_excerpt"] = item["conclusion_excerpt"][:120]
+            item["objective"] = item["objective"][:120]
+            item["next_step"] = item["next_step"][:120]
+        questions = [q[:200] for q in questions]
+        context["open_questions"] = questions
+        context["dangling_refs"] = [
+            {k: v for k, v in item.items() if k != "facts"} for item in dangling_refs
+        ]
+        truncated_sections.append("excerpts")
+        excerpted = True
+    if _context_size(context) > CONTEXT_MAX_BYTES:
+        context["recent_rounds"] = recent_rounds[:5]
+        context["open_questions"] = questions[:10]
+        context["dangling_refs"] = context["dangling_refs"][:5]
+        context["experiment_links"] = experiment_links[:5]
+        context["topic"]["summary"] = str(context["topic"]["summary"])[:500]
+        truncated_sections.append("rounds_and_questions")
+        excerpted = True
+    if _context_size(context) > CONTEXT_MAX_BYTES:
+        context["recent_rounds"] = []
+        context["open_questions"] = []
+        context["dangling_refs"] = []
+        context["experiment_links"] = []
+        truncated_sections.append("sections_dropped")
+        excerpted = True
+    context["excerpted"] = excerpted
+    if truncated_sections:
+        context["truncated_sections"] = truncated_sections
+    return context
 
 
 async def workspace_read(
@@ -105,30 +560,115 @@ async def workspace_read(
     entries: bool = False,
     limit: int = 20,
     offset: int = 0,
+    view: str | None = None,
+    entry_id: str | None = None,
+    status: str | None = None,
+    sort: str = "updated",
+    rounds: int = 10,
+    refs: int = 10,
+    docs_root: Path | None = None,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 50 or not 0 <= offset <= 100000:
         raise ValueError("分页范围: limit 1-50,offset 0-100000")
+    if entry_id:
+        if not topic_id:
+            raise ValueError("精确条目查询须提供 topic_id")
+        return await topic_entry(session, topic_id, entry_id)
+    if view == "context":
+        if not topic_id:
+            raise ValueError("续接上下文须提供 topic_id")
+        return await topic_context(session, topic_id, rounds=rounds, refs=refs, docs_root=docs_root)
+    if view == "branches":
+        if not topic_id:
+            raise ValueError("分支聚合须提供 topic_id")
+        return await topic_branches(session, topic_id, limit=limit, offset=offset)
+    if view == "refs":
+        if not topic_id:
+            raise ValueError("断链检查须提供 topic_id")
+        return await topic_refs_check(
+            session,
+            topic_id,
+            rounds=rounds,
+            limit=min(limit, 20),
+            offset=offset,
+            docs_root=docs_root,
+        )
+    if view == "artifacts":
+        if not topic_id:
+            raise ValueError("产物链接须提供 topic_id")
+        from finboard_app.research_topic_artifacts import list_topic_artifact_links
+
+        return await list_topic_artifact_links(session, topic_id, limit=min(limit, 50))
+    if view not in (None, "list", "detail"):
+        raise ValueError("view 必须为 context/branches/refs/artifacts")
+    if status is not None and status not in TOPIC_STATUSES:
+        raise ValueError(f"status 必须为 {'/'.join(TOPIC_STATUSES)}")
+    if sort not in {"updated", "created"}:
+        raise ValueError("sort 必须为 updated/created")
     repo = ResearchTopicRepository(session)
     if topic_id and not entries:
         return record_out(await repo.get(topic_id))
     rows = (
         await repo.entries(topic_id, limit + 1, offset)
         if topic_id
-        else await repo.list_topics(limit + 1, offset)
+        else await repo.list_topics(limit + 1, offset, status=status, sort=sort)
     )
     items = [record_out(r) for r in rows[:limit]]
     if not topic_id:
         for item in items:
-            item["excerpted"] = True
+            # List mode is an excerpt view, but the flag must mean "something was
+            # actually shortened", not "this endpoint always shortens".
+            truncated = False
             for field in ("question", "summary", "next_step"):
-                item[field] = item[field][:1200]
-            item["open_questions"] = [q[:300] for q in item["open_questions"][:5]]
+                value = item.get(field) or ""
+                if len(value) > 1200:
+                    truncated = True
+                item[field] = value[:1200]
+            questions = item.get("open_questions") or []
+            if len(questions) > 5 or any(len(question) > 300 for question in questions):
+                truncated = True
+            item["open_questions"] = [question[:300] for question in questions[:5]]
+            item["excerpted"] = truncated
     return {
         "items": items,
         "has_more": len(rows) > limit,
         "offset": offset,
         "limit": limit,
+        "sort": sort,
+        "status": status,
     }
+
+
+_TOPIC_AUDIT_OPERATIONS: dict[str, str] = {
+    "create": "topic.create",
+    "draft_create": "topic.create",
+    "update": "topic.update",
+    "activate": "topic.activate",
+    "transition": "topic.transition",
+    "append": "topic.append",
+}
+
+
+def _topic_audit_params(
+    operation: str,
+    payload: Mapping[str, Any],
+    expected_revision: int | None,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    """课题写操作的审计参数摘要(只放定位字段,不放正文)。"""
+
+    summary: dict[str, Any] = {"operation": operation}
+    if expected_revision is not None:
+        summary["expected_revision"] = expected_revision
+    if idempotency_key is not None:
+        summary["idempotency_key"] = idempotency_key
+    for key in ("title", "question", "action", "entry_type", "outcome", "branch"):
+        value = payload.get(key)
+        if value is not None:
+            summary[key] = value
+    if "goal" in payload:
+        summary["goal_version"] = (payload.get("goal") or {}).get("version")
+    return summary
 
 
 async def workspace_write(
@@ -140,38 +680,153 @@ async def workspace_write(
     topic_id: str | None = None,
     expected_revision: int | None = None,
     idempotency_key: str | None = None,
+    status_declared: bool | None = None,
+    context: ResearchOperationContext | None = None,
 ) -> dict[str, Any]:
-    repo = ResearchTopicRepository(session)
-    row: Any
-    if operation == "create":
-        row = await repo.create(TopicInput.model_validate(payload).model_dump(mode="json"), actor)
-    elif operation == "update" and topic_id and expected_revision is not None:
-        row = await repo.update(
-            topic_id,
-            TopicInput.model_validate(payload).model_dump(mode="json"),
-            expected_revision,
-            actor,
-        )
-    elif operation == "append" and topic_id and idempotency_key and len(idempotency_key) <= 128:
-        data = RoundInput.model_validate(payload).model_dump(mode="json")
-        if data["supersedes_id"]:
-            from finboard_persistence.models import ResearchTopicEntryModel
+    """执行一次课题写操作,并在同一事务内写研究审计(issue #518)。
 
-            old = await session.scalar(
-                select(ResearchTopicEntryModel).where(
-                    ResearchTopicEntryModel.entry_id == data["supersedes_id"],
-                    ResearchTopicEntryModel.topic_id == topic_id,
-                )
+    成功路径的审计与业务写入共用 ``session``(唯一一次 commit 前插入);
+    任何拒绝/失败改用独立会话补记,不掩盖原始错误。
+    """
+
+    from finboard_app.research_topic_lifecycle import (
+        TopicInvalidInputError,
+        TopicWriteConflictError,
+        activate_topic,
+        create_topic,
+        transition_topic,
+        update_topic,
+    )
+
+    ctx = context or ResearchOperationContext.for_web(actor=actor)
+    audit_operation = _TOPIC_AUDIT_OPERATIONS.get(operation, "topic.write")
+    audit_params = _topic_audit_params(
+        operation, payload, expected_revision, idempotency_key
+    )
+    repo = ResearchTopicRepository(session)
+    record: dict[str, Any]
+    resolved_topic_id = topic_id
+    resolved_entry_id: str | None = None
+    result_code: str | None = None
+    try:
+        if operation in {"create", "draft_create"}:
+            created_record, created = await create_topic(
+                session,
+                actor=actor,
+                payload=payload,
+                draft=operation == "draft_create",
+                idempotency_key=idempotency_key,
             )
-            if old is None:
-                raise ValueError("纠正链只能引用同课题已有轮次")
-        row = await repo.append(topic_id, idempotency_key, data, actor)
-    else:
-        raise ValueError(
-            "operation 必须 create/update/append,更新需 expected_revision,追加需幂等键"
+            record = {**created_record, "created": created}
+            resolved_topic_id = record.get("topic_id") or topic_id
+            if created:
+                result_code = "draft_created" if operation == "draft_create" else "created"
+            else:
+                result_code = "idempotent_hit"
+        elif operation == "update" and topic_id and expected_revision is not None:
+            declared = status_declared if status_declared is not None else ("status" in payload)
+            record = await update_topic(
+                session,
+                actor=actor,
+                topic_id=topic_id,
+                payload=payload,
+                expected_revision=expected_revision,
+                status_declared=declared,
+            )
+            result_code = "updated"
+        elif operation == "activate" and topic_id:
+            record = await activate_topic(
+                session,
+                actor=actor,
+                topic_id=topic_id,
+                payload=payload,
+                expected_revision=expected_revision,
+            )
+            result_code = "activated"
+        elif operation == "transition" and topic_id:
+            record = await transition_topic(
+                session,
+                actor=actor,
+                topic_id=topic_id,
+                payload=payload,
+                expected_revision=expected_revision,
+            )
+            result_code = str(payload.get("action") or "transitioned")
+        elif operation == "append" and topic_id and idempotency_key and len(idempotency_key) <= 128:
+            data = RoundInput.model_validate(payload).model_dump(mode="json")
+            if data["supersedes_id"]:
+                from finboard_persistence.models import ResearchTopicEntryModel
+
+                old = await session.scalar(
+                    select(ResearchTopicEntryModel).where(
+                        ResearchTopicEntryModel.entry_id == data["supersedes_id"],
+                        ResearchTopicEntryModel.topic_id == topic_id,
+                    )
+                )
+                if old is None:
+                    raise ValueError("纠正链只能引用同课题已有轮次")
+            record = record_out(await repo.append(topic_id, idempotency_key, data, actor))
+            resolved_entry_id = record.get("entry_id")
+            result_code = "appended"
+        else:
+            raise ValueError(
+                "operation 必须 create/draft_create/update/activate/transition/append;"
+                "更新/激活/转移需 expected_revision,追加需幂等键"
+            )
+        resolved_topic_id = resolved_topic_id or record.get("topic_id")
+        correlation: dict[str, str] = {}
+        if resolved_topic_id:
+            correlation["topic_id"] = str(resolved_topic_id)
+        if resolved_entry_id:
+            correlation["entry_id"] = str(resolved_entry_id)
+        revision = record.get("revision")
+        if isinstance(revision, int):
+            correlation["revision"] = str(revision)
+        await research_audit_recorder().record(
+            session,
+            ResearchAuditEvent(
+                operation=audit_operation,
+                outcome="succeeded",
+                context=ctx,
+                topic_id=resolved_topic_id,
+                entry_id=resolved_entry_id,
+                entity_type="research_topic" if resolved_topic_id else None,
+                entity_id=resolved_topic_id,
+                correlation=correlation,
+                result_code=result_code,
+                params_summary=audit_params,
+                idempotency_key=idempotency_key,
+            ),
         )
-    await session.commit()
-    return record_out(row)
+        await session.commit()
+        return record
+    except Exception as exc:
+        rejected = isinstance(
+            exc, (TopicWriteConflictError, TopicInvalidInputError, ValueError, LookupError)
+        )
+        code = (
+            getattr(exc, "detail", {}).get("code")
+            if isinstance(exc, TopicWriteConflictError)
+            else None
+        ) or type(exc).__name__
+        await research_audit_recorder().record_detached(
+            ResearchAuditEvent(
+                operation=audit_operation,
+                outcome="rejected" if rejected else "failed",
+                context=ctx,
+                topic_id=resolved_topic_id,
+                entity_type="research_topic" if resolved_topic_id else None,
+                entity_id=resolved_topic_id,
+                correlation=(
+                    {"topic_id": str(resolved_topic_id)} if resolved_topic_id else {}
+                ),
+                result_code=code,
+                params_summary=audit_params,
+                error_summary=str(exc),
+                idempotency_key=idempotency_key,
+            ),
+        )
+        raise
 
 
 async def memory_page(session: AsyncSession, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -220,6 +875,71 @@ async def memory_page(session: AsyncSession, limit: int = 20, offset: int = 0) -
     }
 
 
+TRIAL_SUMMARY_MAX_COUNT = 500
+TRIAL_SUMMARY_MAX_BYTES = 1024 * 1024
+
+
+async def bounded_experiment_oos(
+    session: AsyncSession, experiment_id: str
+) -> dict[str, Any]:
+    """Derive ``oos_outcome`` without ever loading an oversized trial set (#310/#516).
+
+    The guard mirrors the historical ``source_fact`` contract: more than 500
+    trials or more than 1 MiB of trial JSON returns ``unknown`` with a **named**
+    evidence gap instead of guessing from ``status``.
+    """
+
+    size = (
+        (
+            await session.execute(
+                text(
+                    "SELECT count(*) AS count, coalesce(sum(octet_length(row_to_json(t)::text)),0) AS bytes "
+                    "FROM research_trials t WHERE experiment_id=:ref_id"
+                ),
+                {"ref_id": experiment_id},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if size["count"] > TRIAL_SUMMARY_MAX_COUNT or size["bytes"] > TRIAL_SUMMARY_MAX_BYTES:
+        return {
+            "oos_outcome": "unknown",
+            "trial_count": int(size["count"]),
+            "oversized": True,
+            "evidence_gaps": ["trial_summary_oversized"],
+        }
+    from finboard_backtest.validation import derive_oos_outcome
+    from finboard_persistence.validation_repo import (
+        ResearchExperimentRepository,
+        ResearchTrialRepository,
+    )
+
+    exp = await ResearchExperimentRepository(session).get(experiment_id)
+    if exp is None:  # pragma: no cover - 行存在才走到这里
+        return {
+            "oos_outcome": "unknown",
+            "trial_count": int(size["count"]),
+            "oversized": False,
+            "evidence_gaps": ["experiment_missing"],
+        }
+    trials = await ResearchTrialRepository(session).list_by_experiment(experiment_id)
+    outcome = derive_oos_outcome(exp, trials).value
+    gaps: list[str] = []
+    if not trials:
+        gaps.append("no_trials")
+    if not exp.final_test_unsealed:
+        gaps.append("final_test_not_unsealed")
+    if outcome == "inconclusive" and trials and exp.final_test_unsealed:
+        gaps.append("oos_inconclusive")
+    return {
+        "oos_outcome": outcome,
+        "trial_count": len(trials),
+        "oversized": False,
+        "evidence_gaps": gaps,
+    }
+
+
 async def source_fact(
     session: AsyncSession, reference: dict[str, Any], docs_root: Path
 ) -> dict[str, Any]:
@@ -260,6 +980,36 @@ async def source_fact(
         "factor_series": "SELECT content_checksum AS checksum, code_commit AS version, code_artifact FROM research_factor_series WHERE series_id=:ref_id",
         "simulation": "SELECT status, strategy_version AS version FROM simulation_sessions WHERE simulation_session_id=:ref_id",
         "backtest": 'SELECT strategy, start, "end" FROM backtest_runs WHERE id::text=:ref_id',
+        # #516: bounded projections for the factor / code / OOS artifact kinds.
+        # No row here loads unbounded JSON: factor_experiment digests the result
+        # only under a size cap, code_run exposes checksums instead of artifacts.
+        "factor_experiment": (
+            "SELECT status, dataset_release_checksum AS checksum, dataset_release_id, "
+            "feature_snapshot_id, validation_experiment_id, failure_reason, "
+            "octet_length(result::text) AS result_bytes, "
+            "CASE WHEN octet_length(result::text) <= 65536 THEN md5(result::text) END AS result_digest "
+            "FROM factor_experiments WHERE experiment_id=:ref_id"
+        ),
+        "code_artifact": (
+            "SELECT checksum, commit AS version, status, promotion_status, kind, name "
+            "FROM research_code_artifacts WHERE artifact_id=:ref_id"
+        ),
+        "code_run": (
+            "SELECT status, kind, mode, name, commit, code_checksum, "
+            "scores_checksum AS checksum, output_snapshot_id, error_code, "
+            "timed_out, oom_killed FROM research_code_runs WHERE run_id=:ref_id"
+        ),
+        "validation_experiment": (
+            "SELECT status, version_checksum AS checksum, final_test_unsealed, trials_used, "
+            "CASE WHEN (plan::jsonb->>'trial_budget') ~ '^[0-9]+$' "
+            "THEN (plan::jsonb->>'trial_budget')::int END AS trial_budget_limit, "
+            "frozen_at, finalized_at FROM research_experiments WHERE experiment_id=:ref_id"
+        ),
+        "factor_snapshot": (
+            "SELECT checksum, framework_version AS version, code_version, "
+            "symbol_count, observation_count, decision_at, dataset_release_id, "
+            "source_run_id FROM factor_feature_snapshots WHERE snapshot_id=:ref_id"
+        ),
     }
     row = (
         (
@@ -276,40 +1026,26 @@ async def source_fact(
     mismatched = bool(ref.checksum and ref.checksum != facts.get("checksum"))
     if ref.version and ref.version != str(facts.get("version")):
         return {"status": "version_mismatch", "facts": facts}
-    if ref.kind == "experiment":
+    if ref.kind in {"experiment", "validation_experiment"}:
         # Delegate the domain's derived outcome instead of guessing from status.
-        from finboard_backtest.validation import derive_oos_outcome
-        from finboard_persistence.validation_repo import (
-            ResearchExperimentRepository,
-            ResearchTrialRepository,
-        )
-
-        size = (
-            (
-                await session.execute(
-                    text(
-                        "SELECT count(*) AS count, coalesce(sum(octet_length(row_to_json(t)::text)),0) AS bytes FROM research_trials t WHERE experiment_id=:ref_id"
-                    ),
-                    {"ref_id": ref.ref_id},
-                )
-            )
-            .mappings()
-            .one()
-        )
-        if size["count"] > 500 or size["bytes"] > 1048576:
+        oos = await bounded_experiment_oos(session, ref.ref_id)
+        facts["oos_outcome"] = oos["oos_outcome"]
+        if ref.kind == "validation_experiment":
+            facts["evidence_gaps"] = oos["evidence_gaps"]
+            facts["trial_budget"] = {
+                "used": int(facts.get("trials_used") or 0),
+                "limit": facts.get("trial_budget_limit"),
+            }
+            facts["trial_count"] = oos["trial_count"]
+        if oos["oversized"]:
             return {
                 "status": "checksum_mismatch" if mismatched else "matched",
                 "facts": {
                     **facts,
-                    "oos_outcome": "unknown",
                     "evidence_level": "automatic_fact",
                     "notice": "实验trial摘要超限,未加载全部试验,不推断OOS结论",
                 },
             }
-        exp = await ResearchExperimentRepository(session).get(ref.ref_id)
-        if exp:
-            trials = await ResearchTrialRepository(session).list_by_experiment(ref.ref_id)
-            facts["oos_outcome"] = derive_oos_outcome(exp, trials).value
     return {
         "status": "checksum_mismatch" if mismatched else "matched",
         "facts": {
@@ -318,3 +1054,4 @@ async def source_fact(
             "notice": "发布/完成不是OOS支持,历史工作解释须另行复核",
         },
     }
+

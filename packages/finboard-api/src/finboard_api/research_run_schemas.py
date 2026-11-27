@@ -1,104 +1,35 @@
-"""ResearchRun API 契约(issue #80)。API 只排队,不执行策略。"""
+"""ResearchRun API 契约(issue #80)。API 只排队,不执行策略。
+
+issue #513:入队 / 重放输入 DTO 下沉到 ``finboard_app.research_run_submission``
+(REST 与 MCP 共用同一份字段、默认值与校验器,消除 MCP 对 ``finboard_api`` 的
+懒加载依赖);本模块保留同名 wire schema,既有 import 路径、构造方式与 **OpenAPI
+组件名**都不破。
+
+wire schema 用同名子类而非别名:FastAPI/pydantic 的 components key 取类名,
+若直接 re-export 基类,组件名会变成 ``ResearchRunSubmitInput`` /
+``ResearchRunReplayInput``,按 dev 生成 stub 的客户端会断。子类零新增字段 /
+校验器,只承载对外组件名。
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict
 
-from finboard_backtest.data_scope.contracts import DataScopeSpec
-from finboard_backtest.research_run.contracts import (
-    DECISION_SCHEDULE_KINDS,
-    REBALANCE_FREQUENCIES,
-    parse_decision_schedule,
+from finboard_app.research_run_submission import (
+    ResearchRunReplayInput,
+    ResearchRunSubmitInput,
 )
 
 
-class ResearchRunQueueIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    idempotency_key: str = Field(min_length=8, max_length=128)
-    strategy_id: str = Field(min_length=1, max_length=64)
-    strategy_version: int = Field(ge=1)
-    dataset_release_ids: list[str] = Field(min_length=1)
-    factor_snapshot_ids: list[str] = Field(default_factory=list)
-    # issue #360:内容寻址因子序列工件引用(FS- 前缀);声明时 u_ 因子观测
-    # 按决策日从 series.values 取(加载器双轨优先),空 = 既有快照路径。
-    factor_series_ids: list[str] = Field(default_factory=list)
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    validation_config: dict[str, Any] = Field(default_factory=dict)
-    portfolio_config: dict[str, Any] = Field(default_factory=dict)
-    risk_config: dict[str, Any] = Field(default_factory=dict)
-    execution_config: dict[str, Any] = Field(default_factory=dict)
-    fee_config: dict[str, Any] = Field(default_factory=dict)
-    benchmark_config: dict[str, Any] = Field(default_factory=dict)
-    code_version: str = Field(min_length=7, max_length=64)
-    initial_capital: Decimal = Field(ge=Decimal("100000"), le=Decimal("500000"))
-    requested_by: str = Field(min_length=1, max_length=128)
-    # issue #312:REST 默认 human 不变;放开 agent(网关/自动化通道显式声明),
-    # llm 仍被拒绝(契约层 fail-closed,红线不变)。
-    actor_type: Literal["human", "agent"] = "human"
-    # issue #510:统一数据范围预览结论的回填。声明时必须同时给
-    # ``data_scope_resolution_id``(预览返回,SC- 前缀):提交期重算复验,
-    # 解析集合必须与 dataset_release_ids 一致,窗口合并进
-    # ``parameters.research_window``。None = 旧入口,行为不变。
-    data_scope: DataScopeSpec | None = None
-    data_scope_resolution_id: str | None = Field(default=None, max_length=64)
-
-    @model_validator(mode="after")
-    def _validate_data_scope(self) -> ResearchRunQueueIn:
-        if self.data_scope is None and self.data_scope_resolution_id is not None:
-            raise ValueError("data_scope_resolution_id 必须与 data_scope 一起声明")
-        return self
-
-    @field_validator("parameters")
-    @classmethod
-    def _validate_decision_schedule(cls, value: dict[str, Any]) -> dict[str, Any]:
-        """决策日历声明参数门(issue #361,#183 legacy 扩展)。
-
-        * ``decision_schedule``:kind ∈ {daily, weekly, monthly, quarterly,
-          custom};custom 必须声明非空 ``dates``(YYYY-MM-DD 字符串,严格
-          升序去重);形状规则与执行期 ``parse_decision_schedule`` 同源
-          (单一事实来源,不双份漂移);
-        * legacy ``rebalance_frequency`` 兼容扩展接受 daily/weekly(旧值
-          monthly/quarterly 零变化);与 ``decision_schedule`` 不可同时声明;
-        * ``dates ⊆ 发布交易日`` 不是形状规则(需要发布日历),由入队路由
-          的日历门控校验(REST+MCP 共用)。
-
-        非法值提前在入队时拒绝(研究运行执行时也会 fail-closed,这里给 agent
-        更早、更清晰的错误)。
-        """
-        if "decision_schedule" in value:
-            if value.get("rebalance_frequency") is not None:
-                raise ValueError(
-                    "parameters.decision_schedule 与 legacy rebalance_frequency"
-                    " 不可同时声明(声明 decision_schedule 即 multi_period)"
-                )
-            try:
-                parse_decision_schedule(value["decision_schedule"])
-            except ValueError as exc:
-                raise ValueError(f"decision_schedule 非法: {exc}") from exc
-        frequency = value.get("rebalance_frequency")
-        if frequency is not None and (
-            not isinstance(frequency, str) or frequency not in REBALANCE_FREQUENCIES
-        ):
-            raise ValueError(
-                f"rebalance_frequency 仅支持 {sorted(REBALANCE_FREQUENCIES)}"
-                f"(decision_schedule.kind 支持 {sorted(DECISION_SCHEDULE_KINDS)}),"
-                f"收到 {frequency!r}"
-            )
-        return value
+class ResearchRunQueueIn(ResearchRunSubmitInput):
+    """``POST /api/research/runs`` 请求体(OpenAPI 组件名保持 #513 之前的值)。"""
 
 
-class ResearchRunReplayIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    idempotency_key: str = Field(min_length=8, max_length=128)
-    requested_by: str = Field(min_length=1, max_length=128)
-    # issue #312:同 queue —— 默认 human 不变,放开 agent,llm 仍拒绝。
-    actor_type: Literal["human", "agent"] = "human"
+class ResearchRunReplayIn(ResearchRunReplayInput):
+    """``POST /api/research/runs/{run_id}/replay`` 请求体(组件名同上)。"""
 
 
 class ResearchRunOut(BaseModel):

@@ -802,11 +802,14 @@ class TestQueueRun:
     async def test_mcp_queue_uses_same_gate(
         self, seeded: AsyncEngine, client: httpx.AsyncClient
     ) -> None:
-        """MCP ``_build_queued_manifest`` 与 REST 共用同一 scope 门控函数。"""
+        """MCP 入队(#513 起共用同一提交服务)与 REST 同 scope 门控语义。"""
 
         from finboard_api.research_run_schemas import ResearchRunQueueIn
-        from finboard_mcp.execution import McpToolError
-        from finboard_mcp.tools import runs as run_tools
+        from finboard_app.research_operation import (
+            ResearchOperationContext,
+            ResearchOperationError,
+        )
+        from finboard_app.research_run_submission import ResearchRunSubmissionService
 
         await _publish_spec(seeded, release_ids=(BARS_V1, DAILY_V1))
         preview = await client.post(
@@ -817,22 +820,27 @@ class TestQueueRun:
             self._queue_payload(resolution_id, "scope-510-mcp-1")
         )
         async with session_factory(seeded)() as session:
-            manifest, _ = await run_tools._build_queued_manifest(body, session)
+            report = await ResearchRunSubmissionService(session).preflight(
+                body, ResearchOperationContext.for_mcp()
+            )
+        manifest = report.manifest
         assert manifest.data_scope is not None
         assert manifest.data_scope["resolution_id"] == resolution_id
-        assert manifest.parameters["research_window"]["decision_start"] == (
-            WINDOW_START.isoformat()
-        )
+        research_window = manifest.parameters["research_window"]
+        assert isinstance(research_window, dict)
+        assert research_window["decision_start"] == WINDOW_START.isoformat()
         # 漂移:旧 resolution_id + 新发布 → 同一门控的 conflict 语义。
         async with session_factory(seeded)() as session:
             await _publish_bars(
                 session, BARS_V2, published_at=datetime(2024, 2, 1, tzinfo=UTC)
             )
         async with session_factory(seeded)() as session:
-            with pytest.raises(McpToolError) as excinfo:
-                await run_tools._build_queued_manifest(body, session)
-        assert excinfo.value.kind == "conflict"
-        assert "scope_release_drift" in str(excinfo.value)
+            with pytest.raises(ResearchOperationError) as excinfo:
+                await ResearchRunSubmissionService(session).preflight(
+                    body, ResearchOperationContext.for_mcp()
+                )
+        assert excinfo.value.mcp_kind == "conflict"
+        assert excinfo.value.code == "scope_release_drift"
 
     async def test_stale_resolution_id_is_409(
         self, seeded: AsyncEngine, client: httpx.AsyncClient

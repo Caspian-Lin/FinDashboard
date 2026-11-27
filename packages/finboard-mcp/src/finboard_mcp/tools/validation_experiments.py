@@ -39,6 +39,7 @@ from finboard_backtest.validation.contracts import describe_final_test_state
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
+from finboard_mcp.tools._audit import record_failure, record_success
 from finboard_mcp.tools._serde import to_jsonable
 
 if TYPE_CHECKING:
@@ -525,11 +526,27 @@ async def validation_experiment_run(
                     "finboard_research_code_promote)",
                 )
             if experiment.final_test_unsealed:
-                raise McpToolError(
+                error = McpToolError(
                     "conflict",
                     "实验已揭盲(final_test_unsealed=true),不可再次执行"
                     "(揭盲不可重做)",
                 )
+                # issue #518:揭盲拒绝独立留痕(与服务端事实并列)。
+                await record_failure(
+                    app,
+                    operation="experiment.unseal",
+                    params_summary={
+                        "experiment_id": experiment_id,
+                        "status": experiment.status.value,
+                        "requested_by": requested_by,
+                    },
+                    error=error,
+                    result_code="already_unsealed",
+                    entity_type="validation_experiment",
+                    entity_id=experiment_id,
+                    correlation={"experiment_id": experiment_id},
+                )
+                raise error
             if not experiment.can_run_trial():
                 raise McpToolError(
                     "invalid_argument",
@@ -558,6 +575,25 @@ async def validation_experiment_run(
                     # 已落库 trial 不重复执行,trials_used 不重复递增)。
                     max_attempts=1,
                     requested_by=requested_by,
+                )
+                # issue #518:入队成功与 job 行同事务留痕。
+                await record_success(
+                    session,
+                    app=app,
+                    operation="experiment.unseal",
+                    entity_type="validation_experiment",
+                    entity_id=experiment_id,
+                    correlation={
+                        "experiment_id": experiment_id,
+                        "job_id": row.job_id,
+                    },
+                    result_code="created" if created else "idempotent_hit",
+                    params_summary={
+                        "experiment_id": experiment_id,
+                        "status": experiment.status.value,
+                        "requested_by": requested_by,
+                    },
+                    idempotency_key=key,
                 )
                 await session.commit()
             except IntegrityError as exc:

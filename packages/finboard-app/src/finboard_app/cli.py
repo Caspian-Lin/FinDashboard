@@ -76,7 +76,7 @@ from finboard_shared.types import KillSwitchLevel
 _CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", 1)
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
     from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
@@ -231,18 +231,24 @@ def _stop_dev_process(
       立即 ``taskkill /T /F``。
     * POSIX —— ``killpg SIGTERM`` 等待 ``graceful_seconds`` 后 ``killpg
       SIGKILL`` 兜底(与既有行为同形,宽限可配)。
+
+    等待期间被二次 Ctrl-C 打断时**不能**只把异常抛给调用方:那样进程只收到了优雅
+    信号、可能仍然存活。这里吞掉 ``KeyboardInterrupt`` 继续走强杀兜底(issue #544)。
     """
 
     if process.poll() is not None:
         return
     if sys.platform == "win32":
         if graceful_seconds > 0:
-            with contextlib.suppress(OSError):
-                os.kill(process.pid, _CTRL_BREAK_EVENT)
             try:
+                with contextlib.suppress(OSError):
+                    os.kill(process.pid, _CTRL_BREAK_EVENT)
                 process.wait(timeout=graceful_seconds)
                 return
             except subprocess.TimeoutExpired:
+                pass
+            except KeyboardInterrupt:
+                # 二次 Ctrl-C:放弃等待,直接强杀整树。
                 pass
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
@@ -254,11 +260,14 @@ def _stop_dev_process(
     try:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=max(0.1, graceful_seconds))
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
-            process.kill()
+            # 进程组已消失时 killpg 抛 ESRCH;再按 pid 兜一枪,失败也不再抛
+            # (调用方只兜 KeyboardInterrupt,冒出 OSError 会跳过后续回收)。
+            with contextlib.suppress(OSError):
+                process.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=5.0)
 
@@ -451,6 +460,159 @@ def _spawn_dev_worker() -> subprocess.Popen[bytes]:
     return subprocess.Popen(_dev_worker_command(), start_new_session=True)
 
 
+def _dev_mcp_command() -> list[str]:
+    """dev 托管 MCP 研究服务的命令(独立进程,与 API/worker 同生命周期)。"""
+    return [sys.executable, "-m", "finboard_mcp"]
+
+
+#: dev 等 MCP 子进程开始监听的上限秒数(issue #544):超时只告警,不阻断 API。
+#: 本机实测冷启动约 3-5s(156 个工具注册 + DB 引擎),留足余量但保持有界。
+_DEV_MCP_READY_TIMEOUT_SECONDS = 10.0
+
+
+def _should_spawn_dev_mcp(settings: Settings) -> bool:
+    """dev 是否托管 MCP 服务(issue #544)。
+
+    * ``stdio`` 传输是「宿主/客户端拉起子进程」形态(Codex / DSH 自己 spawn),
+      dev 再起一个没有消费者,必须跳过;``streamable-http`` / ``sse`` 都是常驻
+      HTTP 服务,可以托管;
+    * ``mcp_enabled=false`` 的 worktree 必须跳过,否则多个 worktree 会抢同一个
+      8765 端口(AGENTS.md 的 worktree 脚本默认关掉 MCP)。
+    """
+
+    return bool(settings.mcp_enabled) and settings.mcp_transport != "stdio"
+
+
+def _is_loopback_bind(host: str) -> bool:
+    """dev 只托管 loopback 绑定:非 loopback 必须显式走 ``make mcp-serve-http-remote``。"""
+
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+
+def _dev_mcp_port_in_use(host: str, port: int, *, timeout: float = 0.5) -> bool:
+    """端口是否已有进程在监听(上一次 dev 残留实例 / 手动 ``make mcp-serve-http``)。"""
+
+    probe_host = host if _is_loopback_bind(host) and host != "localhost" else "127.0.0.1"
+    if host == "::1":
+        probe_host = "::1"
+    try:
+        with socket.create_connection((probe_host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _spawn_dev_mcp() -> subprocess.Popen[bytes]:
+    """启动 MCP 子进程(与 worker 同样的进程组托管,退出时整树回收)。"""
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            _dev_mcp_command(),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(_dev_mcp_command(), start_new_session=True)
+
+
+def _start_dev_mcp(settings: Settings) -> subprocess.Popen[bytes] | None:
+    """前置检查 + spawn(**不做长等待**);失败只告警返回 ``None``。
+
+    返回值必须在调用方**立即**赋值:就绪等待放到 :func:`_watch_dev_mcp`(线程),
+    这样等待期间被 Ctrl-C 打断时进程句柄已经在 ``mcp_process`` 里,``finally`` 仍能
+    回收 —— 否则刚 spawn 的子进程(独立 session)会漏成孤儿并继续占端口。
+    """
+
+    host = str(settings.mcp_host)
+    port = int(settings.mcp_port)
+    if not _is_loopback_bind(host):
+        typer.echo(
+            f"警告: FINBOARD_MCP_HOST={host} 是非 loopback 绑定,dev 不托管(远程暴露"
+            "须显式 make mcp-serve-http-remote + TLS 反向代理);本次未启动 MCP。",
+            err=True,
+        )
+        return None
+    if _dev_mcp_port_in_use(host, port):
+        typer.echo(
+            f"警告: MCP 端口 {host}:{port} 已被占用(上一次 dev 残留的实例,或手动 "
+            "make mcp-serve-http);本次未托管 MCP,客户端可能连到旧实例。"
+            "先停掉占用进程,或用 --no-mcp 静默。",
+            err=True,
+        )
+        return None
+    try:
+        return _spawn_dev_mcp()
+    except OSError as exc:
+        typer.echo(f"警告: MCP 研究服务启动失败,客户端将连不上: {exc}", err=True)
+        return None
+
+
+def _watch_dev_mcp(
+    process: subprocess.Popen[bytes],
+    settings: Settings,
+    stop_event: threading.Event,
+) -> None:
+    """有界等待 MCP 就绪并打印一次结果(在 daemon 线程里跑,不阻塞 API 启动)。
+
+    父进程不能「print 成功就算成功」:端口被占、缺凭据门禁(退出码 2)、命令缺失
+    都发生在子进程里。这里 poll + 端口探测,失败/超时都只告警。
+
+    ``stop_event`` 是 dev 的主动停机信号:一旦置位就**不再报告任何结果** —— 否则
+    正常 Ctrl-C 会把 uvicorn 优雅停机的退出码 3 打印成「启动即退出」的假故障。
+    """
+
+    host = str(settings.mcp_host)
+    port = int(settings.mcp_port)
+    deadline = time.monotonic() + _DEV_MCP_READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if stop_event.is_set():
+            return
+        if process.poll() is not None:
+            if stop_event.is_set():
+                return
+            typer.echo(
+                "警告: MCP 研究服务启动即退出(退出码 "
+                f"{process.returncode}),客户端将连不上;常见原因:端口被占、缺少可用"
+                "凭据、非 loopback 未放行(见上方 stderr)。",
+                err=True,
+            )
+            return
+        if _dev_mcp_port_in_use(host, port, timeout=0.2):
+            if stop_event.is_set():
+                return
+            typer.echo(
+                f"已同步启动 MCP 研究服务({settings.mcp_transport} {host}:{port});"
+                "如需关闭请用 --no-mcp"
+            )
+            return
+        # 用 stop_event.wait 代替 sleep:停机信号可以立刻打断等待。
+        stop_event.wait(0.1)
+    if stop_event.is_set():
+        return
+    typer.echo(
+        f"警告: MCP 研究服务已启动但 {_DEV_MCP_READY_TIMEOUT_SECONDS:.0f}s 内未监听 "
+        f"{host}:{port},请查看上方日志确认是否起在别的端口。",
+        err=True,
+    )
+
+
+def _cleanup_dev_sandbox_mounts(settings: Settings) -> None:
+    if not settings.research_sandbox_cleanup_on_dev:
+        return
+
+    try:
+        from finboard_backtest.research_sandbox.mount_retention import collect_idle_mounts
+
+        report = collect_idle_mounts(Path(settings.research_sandbox_workspace_root))
+    except Exception as exc:
+        typer.echo(f"研究沙箱挂载回收跳过 [cleanup_failed]: {exc}", err=True)
+        return
+    reasons = ", ".join(f"{key}={count}" for key, count in sorted(report.skipped.items()))
+    typer.echo(
+        f"研究沙箱挂载回收扫描 {report.scanned_mounts} 个挂载, "
+        f"回收 {report.reclaimed_mounts} 个挂载的 {report.reclaimed_files} 个文件, "
+        f"释放 {report.released_bytes} 字节。"
+        + (f" 跳过原因 {reasons}。" if reasons else "")
+    )
+
+
 @app.command()
 def dev(
     ctx: typer.Context,
@@ -464,8 +626,22 @@ def dev(
             help="不随 dev 启动后台任务 worker(默认启动,研究/数据 job 才能被消费)",
         ),
     ] = False,
+    no_mcp: Annotated[
+        bool,
+        typer.Option(
+            "--no-mcp",
+            help=(
+                "不随 dev 启动 MCP 研究服务(默认启动;stdio 传输或 "
+                "mcp_enabled=false 时自动跳过)"
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """前台运行 API 并托管 Vite 与后台 worker,确保 Ctrl-C 触发 FastAPI shutdown。"""
+    """前台运行 API 并托管 Vite、worker 与 MCP,确保 Ctrl-C 触发 FastAPI shutdown。
+
+    子进程(worker / MCP)按当前工作目录的 ``.env`` 自行读配置;``--env-file`` 只影响
+    父进程的设置对象。
+    """
     resolved_web_dir = web_dir.resolve()
     if not resolved_web_dir.is_dir():
         raise typer.BadParameter(f"前端目录不存在: {resolved_web_dir}", param_hint="--web-dir")
@@ -500,6 +676,7 @@ def dev(
             + ", ".join(f"PID {item.pid}" for item in swept_workers)
             + "(其 in-flight 任务由 lease 过期回收后自动重排)。"
         )
+    _cleanup_dev_sandbox_mounts(settings)
 
     stop_event = threading.Event()
     frontend_holder: list[subprocess.Popen[bytes]] = []
@@ -519,36 +696,74 @@ def dev(
     frontend_thread.start()
 
     worker_process: subprocess.Popen[bytes] | None = None
-    if not no_worker:
-        # 研究/数据 job 默认由随 dev 托管的 worker 子进程消费;
-        # 生产部署用独立 `finboard worker run`(见 README),--no-worker 关闭。
-        try:
-            worker_process = _spawn_dev_worker()
-        except OSError as exc:
-            typer.echo(f"警告: 后台 worker 启动失败,任务将停留在 queued: {exc}", err=True)
-        else:
-            typer.echo(
-                "已同步启动后台 worker(消费研究/数据任务队列);"
-                "如需关闭请用 --no-worker"
-            )
-
+    mcp_process: subprocess.Popen[bytes] | None = None
+    mcp_watch: threading.Thread | None = None
     try:
+        if not no_worker:
+            # 研究/数据 job 默认由随 dev 托管的 worker 子进程消费;
+            # 生产部署用独立 `finboard worker run`(见 README),--no-worker 关闭。
+            try:
+                worker_process = _spawn_dev_worker()
+            except OSError as exc:
+                typer.echo(
+                    f"警告: 后台 worker 启动失败,任务将停留在 queued: {exc}", err=True
+                )
+            else:
+                typer.echo(
+                    "已同步启动后台 worker(消费研究/数据任务队列);"
+                    "如需关闭请用 --no-worker"
+                )
+
+        if not no_mcp and _should_spawn_dev_mcp(settings):
+            # 先 spawn 并立刻赋值(不留「等待期间被 Ctrl-C → 孤儿」的窗口),
+            # 就绪等待交给 daemon 线程,不阻塞 API/Vite 启动。
+            mcp_process = _start_dev_mcp(settings)
+            if mcp_process is not None:
+                mcp_watch = threading.Thread(
+                    target=_watch_dev_mcp,
+                    args=(mcp_process, settings, stop_event),
+                    name="finboard-mcp-readiness",
+                    daemon=True,
+                )
+                mcp_watch.start()
+
         # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
         serve(ctx, host=host, port=port, reload=False)
     finally:
         stop_event.set()
-        frontend_thread.join(timeout=1.0)
-        for frontend in frontend_holder:
-            _stop_dev_process(frontend)
+        # 就绪线程必须先停:否则主动停机(uvicorn 优雅退出码 3)会被它当成
+        # 「启动即退出」打印一条假故障(issue #544)。
+        if mcp_watch is not None:
+            # RuntimeError:线程可能因 start() 失败而未真正启动(极罕见),
+            # join 未启动的线程会抛异常并中断后续回收。
+            with contextlib.suppress(KeyboardInterrupt, RuntimeError):
+                mcp_watch.join(timeout=0.5)
+        # 回收顺序:MCP / worker 是关键进程,先发信号缩短无信号窗口,再收 Vite。
+        # 二次 Ctrl-C 会在 _stop_dev_process 内部抛 KeyboardInterrupt —— 逐个兜住,
+        # 否则一次中断就跳过剩余进程,独立 session 的 MCP/worker 会变成孤儿
+        # (worker 孤儿还会回到 #339 的「旧代码抢队列」场景)。
+        if mcp_process is not None:
+            # MCP 与 worker 同一套回收:先优雅信号(Windows CTRL_BREAK / POSIX
+            # SIGTERM),宽限内不退出再强杀整树。
+            # 二次 Ctrl-C 会在 _stop_dev_process 内部抛 KeyboardInterrupt,必须兜住,
+            # 否则一次中断就跳过剩余进程(独立 session 的 MCP/worker 会变孤儿)。
+            with contextlib.suppress(KeyboardInterrupt):
+                _stop_dev_process(mcp_process)
         if worker_process is not None:
             # issue #307:不再 taskkill /F 首杀 —— 先向 worker 进程组发优雅
             # 信号(Windows CTRL_BREAK / POSIX SIGTERM),给 worker 侧宽限
             # (settings.worker_shutdown_grace_seconds,默认 0 时给兜底窗口
             # 让 worker 完成「立即取消 → 退出」),超时才强杀。
-            _stop_dev_process(
-                worker_process,
-                graceful_seconds=_dev_worker_stop_grace_seconds(settings),
-            )
+            with contextlib.suppress(KeyboardInterrupt):
+                _stop_dev_process(
+                    worker_process,
+                    graceful_seconds=_dev_worker_stop_grace_seconds(settings),
+                )
+        with contextlib.suppress(KeyboardInterrupt):
+            frontend_thread.join(timeout=1.0)
+        for frontend in frontend_holder:
+            with contextlib.suppress(KeyboardInterrupt):
+                _stop_dev_process(frontend)
 
 
 @app.command(name="kill-switch")
@@ -1201,13 +1416,19 @@ def worker_recover(ctx: typer.Context) -> None:
 
 
 def build_executor_registry(
-    settings: Settings, session_maker: async_sessionmaker[AsyncSession]
+    settings: Settings,
+    session_maker: async_sessionmaker[AsyncSession],
+    *,
+    worker_id: str | None = None,
 ) -> JobExecutorRegistry:
     """装配全部 job kind 的执行器注册表(issue #383 抽取为共享工厂)。
 
     单一事实源:``worker run`` 主循环(:func:`_run_worker`)与 ``job-flamegraph``
     的诊断重放子进程(``job-replay-exec``)都经此构造,保证两边执行器 wiring
     一致 —— 此前装配内联在 ``_run_worker`` 里,诊断进程无法复用。
+
+    issue #518:研究执行器注入 worker 审计收口(``worker_id`` 缺省为
+    ``job-replay`` 诊断进程;真实 worker 传 ``default_worker_id()``)。
     """
 
     from finboard_backtest.background_jobs import JobExecutorRegistry
@@ -1237,6 +1458,16 @@ def build_executor_registry(
     )
 
     settings_factory = default_settings_factory
+    # issue #518:worker 终态审计(独立会话写入,失败不影响任务结果)。
+    from finboard_app.research_audit import (
+        ResearchAuditRecorder,
+        ResearchAuditWorkerSink,
+    )
+
+    worker_audit = ResearchAuditWorkerSink(
+        ResearchAuditRecorder(session_maker=session_maker),
+        worker_id=worker_id or "job-replay",
+    )
     registry = JobExecutorRegistry()
     registry.register("echo", EchoExecutor())
     # issue #511:课题缺口 → 全局补数 → 复用发布(kind=data_backfill)。
@@ -1260,6 +1491,7 @@ def build_executor_registry(
                 session_maker,
                 settings_factory=settings_factory,
             ),
+            audit=worker_audit,
         ),
     )
     # issue #144:7 类数据域任务迁移到统一队列。
@@ -1339,12 +1571,17 @@ def build_executor_registry(
         ValidationExperimentExecutor(
             session_maker=session_maker,
             runner_factory=default_trial_runner_factory,
+            audit=worker_audit,
         ),
     )
     return registry
 
 
-async def _run_worker(settings: Settings) -> None:
+async def _run_worker(
+    settings: Settings,
+    *,
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]] | None = None,
+) -> None:
     # #471 终验教训:worker 两次原生死亡(exit 139,无 Python 异常)而 WER
     # 无记录 —— faulthandler 常开,原生崩溃(段错误/栈溢出)瞬间把全部线程
     # 的 Python 栈打到 stderr(启动器已重定向到 worker 日志文件),崩溃
@@ -1353,7 +1590,10 @@ async def _run_worker(settings: Settings) -> None:
 
     faulthandler.enable(all_threads=True)
     setup_logging(settings)
-    components = build_kernel_components(settings)
+    if database is None:
+        components = build_kernel_components(settings)
+        database = components.engine, components.session_maker
+    engine, sessions = database
     from finboard_backtest.background_jobs.worker import (
         WorkerConfig,
         default_worker_id,
@@ -1367,11 +1607,22 @@ async def _run_worker(settings: Settings) -> None:
     # issue #306:属主检查 —— 兄弟 worker 活跃持有的 run 跳过误标;lease 活跃
     # 判定阈值与 worker lease 超时同源。
     await _recover_research_runs(
-        components.session_maker,
+        sessions,
         lease_active_seconds=settings.worker_lease_timeout_seconds,
     )
 
-    registry = build_executor_registry(settings, components.session_maker)
+    registry = build_executor_registry(
+        settings, sessions, worker_id=default_worker_id()
+    )
+    # issue #518:worker 进程内的拒绝/失败审计走独立会话(成功写在各服务同事务)。
+    from finboard_app.research_audit import (
+        ResearchAuditRecorder as _AuditRecorder,
+    )
+    from finboard_app.research_audit import (
+        configure_research_audit_recorder as _configure_audit,
+    )
+
+    _configure_audit(_AuditRecorder(session_maker=sessions))
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -1398,8 +1649,8 @@ async def _run_worker(settings: Settings) -> None:
         kind_concurrency=dict(_KIND_CONCURRENCY),
     )
     await run_bg_worker(
-        engine=components.engine,
-        session_maker=components.session_maker,
+        engine=engine,
+        session_maker=sessions,
         registry=registry,
         config=config,
     )
@@ -2395,6 +2646,285 @@ def job_replay_exec(
     exit_code = asyncio.run(_job_replay_async(settings, job_id, out_dir))
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+
+# ---------------------------------------------------------------------------
+# mcp 子命令(issue #517:MCP 按客户端凭据管理)
+# ---------------------------------------------------------------------------
+research_app = typer.Typer(
+    name="research",
+    help="研究域运维命令(审计保留等,#518)。",
+    no_args_is_help=True,
+)
+research_audit_app = typer.Typer(
+    name="audit",
+    help="研究操作审计运维:v1 不自动清理,只提供显式保留清理。",
+    no_args_is_help=True,
+)
+
+
+@research_audit_app.command(name="purge")
+def research_audit_purge(
+    ctx: typer.Context,
+    before: Annotated[
+        str,
+        typer.Option("--before", help="删除 occurred_at 早于该日(YYYY-MM-DD,UTC)的行"),
+    ],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="默认只统计(--dry-run);显式 --no-dry-run 才真正删除",
+        ),
+    ] = True,
+) -> None:
+    """手动清理研究审计(issue #518):``FINBOARD_RESEARCH_AUDIT_RETENTION_DAYS`` 只声明保留策略。"""
+
+    import asyncio
+    import sys
+    from datetime import UTC, datetime
+
+    from finboard_app.config import load_settings
+
+    try:
+        cutoff = datetime.strptime(before, "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise typer.BadParameter("--before 必须是 YYYY-MM-DD", param_hint="--before") from exc
+    settings = ctx.obj if isinstance(ctx.obj, Settings) else load_settings()
+
+    async def _run() -> int:
+        from finboard_persistence import create_async_engine, session_factory
+        from finboard_persistence.research_audit_repo import ResearchAuditRepository
+
+        engine = create_async_engine(settings.db_url)
+        try:
+            async with session_factory(engine)() as session:
+                count = await ResearchAuditRepository(session).purge_before(
+                    cutoff, dry_run=dry_run
+                )
+                if dry_run:
+                    await session.rollback()
+                else:
+                    await session.commit()
+                return count
+        finally:
+            await engine.dispose()
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    affected = asyncio.run(_run())
+    mode = "DRY-RUN(未删除)" if dry_run else "已删除"
+    typer.echo(f"research audit purge {mode}: before={cutoff.date().isoformat()} rows={affected}")
+
+
+mcp_app = typer.Typer(
+    name="mcp",
+    help="FinBoard MCP server 凭据管理(按客户端授权,#517)。",
+    no_args_is_help=True,
+)
+mcp_client_app = typer.Typer(
+    name="client",
+    help="签发 / 列出 / 吊销 MCP 客户端凭据(明文 token 只在 create 时打印一次)。",
+    no_args_is_help=True,
+)
+
+
+@mcp_client_app.command(name="create")
+def mcp_client_create(
+    ctx: typer.Context,
+    name: Annotated[
+        str,
+        typer.Option("--name", help="客户端名(唯一,如 codex / harness)"),
+    ],
+    preset: Annotated[
+        str | None,
+        typer.Option(
+            "--preset",
+            help="作用域预设:readonly | topic-writer | data-operator",
+        ),
+    ] = None,
+    scopes: Annotated[
+        str | None,
+        typer.Option(
+            "--scopes",
+            help="逗号分隔作用域(research.read,research.write,research.run,data.write,audit.read)",
+        ),
+    ] = None,
+    expires_in_days: Annotated[
+        int | None,
+        typer.Option("--expires-in-days", help="凭据有效天数(省略=长期有效)"),
+    ] = None,
+    created_by: Annotated[
+        str,
+        typer.Option("--created-by", help="创建者标识(写入 mcp_clients.created_by)"),
+    ] = "cli",
+) -> None:
+    """签发一个 MCP 客户端凭据,并**只打印一次**明文 token。"""
+    settings: Settings = ctx.obj
+    from finboard_mcp.identity import generate_client_id, generate_client_token
+    from finboard_mcp.scopes import parse_scopes, preset_scopes
+
+    if preset is not None and scopes is not None:
+        typer.echo("--preset 与 --scopes 只能二选一", err=True)
+        raise typer.Exit(code=1)
+    if preset is None and scopes is None:
+        typer.echo("必须指定 --preset 或 --scopes", err=True)
+        raise typer.Exit(code=1)
+    try:
+        granted = preset_scopes(preset) if preset is not None else parse_scopes(scopes or "")
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    from datetime import UTC, datetime, timedelta
+
+    expires_at = (
+        datetime.now(UTC) + timedelta(days=expires_in_days)
+        if expires_in_days is not None
+        else None
+    )
+    client_id = generate_client_id()
+    material = generate_client_token(client_id)
+    try:
+        asyncio.run(
+            _mcp_client_create_async(
+                settings,
+                client_id=client_id,
+                name=name,
+                token_hash=material.token_hash,
+                token_prefix=material.token_prefix,
+                scopes=sorted(granted),
+                created_by=created_by,
+                expires_at=expires_at,
+            )
+        )
+    except Exception as exc:  # 具名冲突 / DB 不可达都给出可读错误
+        typer.echo(f"创建 MCP 客户端失败: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"已创建 MCP 客户端: {client_id}  name={name}")
+    typer.echo(f"作用域: {', '.join(sorted(granted))}")
+    if expires_at is not None:
+        typer.echo(f"过期时间: {expires_at.isoformat()}")
+    typer.echo("")
+    typer.echo("明文 token(仅显示一次,请立即保存到客户端密钥配置):")
+    typer.echo(material.token)
+
+
+async def _mcp_client_create_async(
+    settings: Settings,
+    *,
+    client_id: str,
+    name: str,
+    token_hash: str,
+    token_prefix: str,
+    scopes: list[str],
+    created_by: str,
+    expires_at: Any,
+) -> None:
+    from finboard_persistence import create_async_engine, session_factory
+    from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    engine = create_async_engine(settings.db_url, pool_size=1, max_overflow=0)
+    try:
+        async with session_factory(engine)() as session:
+            await McpClientRepository(session).append(
+                client_id=client_id,
+                name=name,
+                token_hash=token_hash,
+                token_prefix=token_prefix,
+                scopes=scopes,
+                created_by=created_by,
+                expires_at=expires_at,
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@mcp_client_app.command(name="list")
+def mcp_client_list(ctx: typer.Context) -> None:
+    """列出 MCP 客户端(不显示任何 secret / 摘要)。"""
+    settings: Settings = ctx.obj
+    rows = asyncio.run(_mcp_client_list_async(settings))
+    if not rows:
+        typer.echo("尚无 MCP 客户端。用 `finboard mcp client create` 签发。")
+        return
+    typer.echo(
+        f"{'CLIENT_ID':<20} {'NAME':<20} {'PREFIX':<17} {'SCOPES':<45} "
+        f"{'CREATED_BY':<12} {'STATE'}"
+    )
+    for row in rows:
+        state = "revoked" if row.revoked_at is not None else (
+            "expired" if row.expires_at is not None and row.expires_at <= _utcnow() else "active"
+        )
+        typer.echo(
+            f"{row.client_id:<20} {row.name:<20} {row.token_prefix:<17} "
+            f"{','.join(row.scopes):<45} {row.created_by:<12} {state}"
+        )
+        typer.echo(
+            f"  created_at={_iso(row.created_at)} last_used_at={_iso(row.last_used_at)} "
+            f"expires_at={_iso(row.expires_at)} revoked_at={_iso(row.revoked_at)}"
+        )
+
+
+async def _mcp_client_list_async(settings: Settings) -> list[Any]:
+    from finboard_persistence import create_async_engine, session_factory
+    from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    engine = create_async_engine(settings.db_url, pool_size=1, max_overflow=0)
+    try:
+        async with session_factory(engine)() as session:
+            return await McpClientRepository(session).list_all()
+    finally:
+        await engine.dispose()
+
+
+@mcp_client_app.command(name="revoke")
+def mcp_client_revoke(
+    ctx: typer.Context,
+    client_id: Annotated[str, typer.Argument(help="客户端 ID(MC-<12hex>)")],
+) -> None:
+    """吊销一个 MCP 客户端(幂等;已吊销保留首次吊销时间)。"""
+    settings: Settings = ctx.obj
+    row = asyncio.run(_mcp_client_revoke_async(settings, client_id))
+    if row is None:
+        typer.echo(f"未找到 MCP 客户端: {client_id}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"已吊销 {row.client_id}(name={row.name}) revoked_at={_iso(row.revoked_at)}"
+    )
+
+
+async def _mcp_client_revoke_async(settings: Settings, client_id: str) -> Any:
+    from finboard_persistence import create_async_engine, session_factory
+    from finboard_persistence.mcp_client_repo import McpClientRepository
+
+    engine = create_async_engine(settings.db_url, pool_size=1, max_overflow=0)
+    try:
+        async with session_factory(engine)() as session:
+            repo = McpClientRepository(session)
+            row = await repo.revoke(client_id)
+            await session.commit()
+            return row
+    finally:
+        await engine.dispose()
+
+
+def _utcnow() -> Any:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC)
+
+
+def _iso(value: Any) -> str:
+    return value.isoformat() if value is not None else "-"
+
+
+mcp_app.add_typer(mcp_client_app, name="client")
+app.add_typer(mcp_app, name="mcp")
+research_app.add_typer(research_audit_app, name="audit")
+app.add_typer(research_app, name="research")
 
 
 def main() -> None:

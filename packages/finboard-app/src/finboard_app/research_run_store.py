@@ -219,8 +219,8 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
             for stage, decision_id, checksum in rows
         ]
 
-    async def checkpoint(self) -> None:
-        await self._repository.checkpoint()
+    async def checkpoint(self, *, commit: bool = True) -> None:
+        await self._repository.checkpoint(commit=commit)
 
 
 def _record_from_model(row: object) -> ResearchRunRecord:

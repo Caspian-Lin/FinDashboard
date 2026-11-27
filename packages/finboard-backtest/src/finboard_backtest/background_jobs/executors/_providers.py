@@ -55,6 +55,7 @@ def build_bar_provider(
     use_cache: bool = True,
     max_concurrency: int | None = None,
     request_interval: float | None = None,
+    allow_foreign_cache: bool = True,
 ) -> BarProvider:
     """按 ``name`` + settings 构造行情 provider。"""
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
@@ -88,6 +89,7 @@ def build_bar_provider(
             ),
             max_concurrency=max_concurrency or 16,
             read_cache_max_bytes=read_cache_max_bytes,
+            allow_foreign_cache=allow_foreign_cache,
         )
     return YFinanceProvider(
         use_cache=use_cache,

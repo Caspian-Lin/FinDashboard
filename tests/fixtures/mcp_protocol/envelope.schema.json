@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "FinBoard MCP 统一响应信封(ToolEnvelope,#519 协议夹具)。序列化时省略值为 null 的可选字段(#206),因此只有 operation_id / status 恒在。",
+  "title": "FinBoard ToolEnvelope",
+  "type": "object",
+  "required": ["operation_id", "status"],
+  "properties": {
+    "operation_id": {
+      "type": "string",
+      "pattern": "^OP-[0-9a-f]{12}$",
+      "description": "每次调用的唯一操作 ID(审计与排查用)"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "denied", "error", "pending_approval"]
+    },
+    "data": {
+      "description": "成功时的结构化产物;形状由具体工具决定"
+    },
+    "error": {
+      "type": "object",
+      "required": ["kind", "message", "retryable"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "permission_denied",
+            "not_found",
+            "timeout",
+            "conflict",
+            "degraded",
+            "invalid_argument",
+            "cancelled",
+            "unavailable",
+            "payload_too_large"
+          ]
+        },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "provenance": { "type": "object" },
+    "idempotency_key": { "type": ["string", "null"] },
+    "message": { "type": "string" }
+  },
+  "additionalProperties": false
+}

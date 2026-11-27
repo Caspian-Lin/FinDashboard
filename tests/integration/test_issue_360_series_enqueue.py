@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from finboard_api.deps import get_db_session
 from finboard_api.routes.research_runs import router as research_runs_router
 from finboard_api.routes.strategy_specs import router as strategy_specs_router
+from finboard_app.research_run_submission import ResearchRunSubmitInput
 from finboard_backtest.research_run.contracts import (
     manifest_from_json,
     to_json_value,
@@ -311,7 +312,7 @@ class TestMcpEnqueueSameGate:
         payload = _queue_payload(
             spec, record, "issue360-mcp-1"
         )
-        body = run_tools.parse_queue_payload(payload)
+        body = ResearchRunSubmitInput.from_json_payload(payload)
         with pytest.raises(McpToolError) as exc_info:
             await run_tools.enqueue_research_run(app, body)
         assert exc_info.value.kind == "invalid_argument"

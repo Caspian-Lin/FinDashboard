@@ -49,6 +49,7 @@ from finboard_backtest.research_sandbox.errors import (
     TIMEOUT,
     SandboxError,
 )
+from finboard_backtest.research_sandbox.mount_retention import use_mount
 from finboard_backtest.research_sandbox.runner import (
     ResearchSandboxRunner,
     SandboxRunResult,
@@ -219,68 +220,69 @@ class StrategySandboxCaller:
     ) -> StrategyDecisionOutcome:
         """单决策日:物化挂载(PIT + 权重回显 + 约束视图)→ 容器 decide。"""
         decision_dir = self.run_dir / f"D{decision_index:04d}"
-        try:
-            mount = await build_data_mount(
-                providers=self.providers,
-                decision_at=decision_at,
-                out_root=decision_dir / "data",
-                symbols=symbols,
-                current_weights=current_weights,
-                strategy_constraints=strategy_constraints,
+        async with use_mount(decision_dir / "data"):
+            try:
+                mount = await build_data_mount(
+                    providers=self.providers,
+                    decision_at=decision_at,
+                    out_root=decision_dir / "data",
+                    symbols=symbols,
+                    current_weights=current_weights,
+                    strategy_constraints=strategy_constraints,
+                )
+            except SandboxMountError as exc:
+                raise UserCodeExecutionError("sandbox_mount_failed", str(exc)) from exc
+            result = await self.runner.run(
+                SandboxRunSpec(
+                    image=self.image,
+                    code_dir=self.run_dir / "code",
+                    data_dir=decision_dir / "data",
+                    out_dir=decision_dir / "out",
+                    timeout_seconds=self.timeout_seconds,
+                    memory_mb=self.memory_mb,
+                    cpus=self.cpus,
+                    pids_limit=self.pids_limit,
+                    user=self.user,
+                    mode="strategy",
+                )
             )
-        except SandboxMountError as exc:
-            raise UserCodeExecutionError("sandbox_mount_failed", str(exc)) from exc
-        result = await self.runner.run(
-            SandboxRunSpec(
-                image=self.image,
-                code_dir=self.run_dir / "code",
-                data_dir=decision_dir / "data",
-                out_dir=decision_dir / "out",
-                timeout_seconds=self.timeout_seconds,
-                memory_mb=self.memory_mb,
-                cpus=self.cpus,
-                pids_limit=self.pids_limit,
-                user=self.user,
-                mode="strategy",
-            )
-        )
-        _archive_logs(decision_dir, result, self.image)
-        weights, metrics = _read_targets(decision_dir / "out")
-        error = _classify_strategy(result, decision_dir / "out")
-        record = {
-            "index": decision_index,
-            "decision_at": decision_at.isoformat(),
-            "mount_manifest_checksum": mount.manifest_checksum,
-            "targets_checksum": (
-                _sha256(decision_dir / "out" / "targets.parquet")
-                if (decision_dir / "out" / "targets.parquet").exists()
-                else None
-            ),
-            "container": {
-                "exit_code": result.exit_code,
-                "duration_seconds": result.duration_seconds,
-                "max_mem_mb": result.usage.get("max_mem_mb"),
-            },
-            "archive": {
-                "directory": str(decision_dir),
-                "stdout": str(decision_dir / "stdout.txt"),
-                "stderr": str(decision_dir / "stderr.txt"),
-                "container": str(decision_dir / "container.json"),
-            },
-            "metrics": metrics,
-        }
-        if error is not None:
-            code, summary = error
-            record["error_code"] = code
-            raise UserCodeExecutionError(
-                code,
-                f"user_code 决策 {decision_index}"
-                f"({decision_at.date().isoformat()})沙箱执行失败: {summary}",
-                retryable=code == SANDBOX_UNAVAILABLE,
-            )
-        record["n_targets"] = len(weights)
-        record["gross_exposure"] = round(sum(abs(weight) for weight in weights.values()), 6)
-        return StrategyDecisionOutcome(weights=weights, record=record)
+            _archive_logs(decision_dir, result, self.image)
+            weights, metrics = _read_targets(decision_dir / "out")
+            error = _classify_strategy(result, decision_dir / "out")
+            record = {
+                "index": decision_index,
+                "decision_at": decision_at.isoformat(),
+                "mount_manifest_checksum": mount.manifest_checksum,
+                "targets_checksum": (
+                    _sha256(decision_dir / "out" / "targets.parquet")
+                    if (decision_dir / "out" / "targets.parquet").exists()
+                    else None
+                ),
+                "container": {
+                    "exit_code": result.exit_code,
+                    "duration_seconds": result.duration_seconds,
+                    "max_mem_mb": result.usage.get("max_mem_mb"),
+                },
+                "archive": {
+                    "directory": str(decision_dir),
+                    "stdout": str(decision_dir / "stdout.txt"),
+                    "stderr": str(decision_dir / "stderr.txt"),
+                    "container": str(decision_dir / "container.json"),
+                },
+                "metrics": metrics,
+            }
+            if error is not None:
+                code, summary = error
+                record["error_code"] = code
+                raise UserCodeExecutionError(
+                    code,
+                    f"user_code 决策 {decision_index}"
+                    f"({decision_at.date().isoformat()})沙箱执行失败: {summary}",
+                    retryable=code == SANDBOX_UNAVAILABLE,
+                )
+            record["n_targets"] = len(weights)
+            record["gross_exposure"] = round(sum(abs(weight) for weight in weights.values()), 6)
+            return StrategyDecisionOutcome(weights=weights, record=record)
 
 
 def _stage_code(run_dir: Path, code: dict[str, str], params: dict[str, Any]) -> None:

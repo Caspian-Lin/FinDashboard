@@ -45,12 +45,12 @@ FinDashboard is a **modular monolith**. Research, simulation, and live trading s
 ```mermaid
 flowchart TB
     HUMAN["Human operator"] --> WEB["React console"]
-    AGENT["OpenCode research agent<br/>external isolated runtime"] -->|"sanitized and audited MCP calls"| MCP
+    AGENT["External agent harness<br/>Codex · OpenCode · ZCode · DeepSeek Harness"] -->|"sanitized and audited MCP calls"| MCP
 
     subgraph APP["FinDashboard modular monolith"]
         WEB --> API["FastAPI + WebSocket control plane"]
         HUMAN --> CLI["finboard CLI / composition root"]
-        MCP["Embedded MCP server<br/>research tools only"] --> RESEARCH
+        MCP["Standalone MCP server<br/>research tools only"] --> RESEARCH
         API --> RESEARCH["Research and data domain<br/>sync · frozen releases · factors · backtest · OOS · ResearchRun"]
         CLI --> RESEARCH
         RESEARCH --> PORTFOLIO["Portfolio pipeline<br/>hard constraints · capital feasibility · research orders"]
@@ -117,8 +117,17 @@ The MCP registry has no order placement, cancellation, position mutation, broker
 - Versioned Python submission with import and filesystem restrictions
 - One-shot Docker execution with no network, read-only root, dropped capabilities, and resource limits
 - Promotion lifecycle from draft and screen through OOS validation to active artifacts
+- External agent harnesses drive it over loopback MCP with a revocable per-client Bearer
+  credential and a scope preset; **tested end to end with Codex CLI and external OpenCode**,
+  while DeepSeek Harness and ZCode remain pending (no verified config path yet). The
+  client-agnostic Skill lives in `.agents/skills/finboard-research/`; per-client setup and
+  the tested/pending table are in [docs/agent-integration.md](docs/agent-integration.md).
+  The Web entry is `/research/agent-connect`; built-in OpenCode hosting, the iframe
+  workbench and the `/api/opencode` gateway were retired in #520.
 
 ## Quick start
+
+On Windows, the offline Research Edition MSI provides a desktop manager, Codex setup, the research workbench, and a synthetic starter bundle. The online ZIP supports command-line setup for Codex, DSH, or OpenCode. See the [Windows desktop guide](docs/research-desktop.md), [Docker Research Edition guide](docs/research-edition.md), and [GitHub Releases](https://github.com/Caspian-Lin/FinDashboard/releases).
 
 Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 18+, and PostgreSQL 16.
 
@@ -135,6 +144,8 @@ make dev
 ```
 
 Open `http://localhost:5173`. The trading console uses a **Mock broker** by default. Configure database credentials in `.env`; do not enable QMT until the machine-verification gates in the project roadmap are complete.
+
+`make dev` reclaims eligible research sandbox inputs after more than 30 days of inactivity. See the [development guide](docs/dev-guide.md#4-一键启动开发环境) for retention and the opt-out setting.
 
 Useful checks:
 
@@ -155,7 +166,6 @@ packages/
   finboard-backtest/      factor research, replay, validation, ResearchRun execution
   finboard-simulation/    independent paper-trading ledger
   finboard-mcp/           least-privilege, audited research tool surface
-  finboard-opencode/      isolated OpenCode runtime control plane
   finboard-research-kit/  SDK available inside submitted-code sandboxes
   finboard-core/          trading kernel, event bus, orders, positions, accounts
   finboard-risk/          pre-trade checks and Kill Switch
@@ -181,6 +191,8 @@ The current phase prioritizes research data releases, factor experiments, Resear
 ## Documentation
 
 - [Development guide](./docs/dev-guide.md)
+- [External agent integration](./docs/agent-integration.md) — per-client MCP setup, tested / pending matrix, and migration from the retired built-in workbench (#520).
+- [MCP client credentials and scopes](./docs/mcp-client-auth.md)
 - [Research data operations](./docs/research/data-ops.md) — the shared data base Web entry point is `/data` (overview / datasets / sync & publish / tech detail).
 - [Research roadmap and findings](./docs/research/)
 - [Demo plan and verification](./docs/demo/README.md)

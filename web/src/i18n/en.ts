@@ -80,7 +80,7 @@ export const en: Dict = {
     researchRuns: "Research Runs",
     researchPortfolio: "Portfolio & Risk",
     researchSimulation: "Simulation",
-    researchWorkbench: "Research Workbench",
+    researchWorkbench: "Agent Connect",
     researchReports: "Research Reports",
     groupLive: "Live Trading",
     dashboard: "Dashboard",

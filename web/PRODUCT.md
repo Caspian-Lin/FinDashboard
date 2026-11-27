@@ -16,7 +16,7 @@ product。面向用户复核外置agent的量化研究；沿用现有双主题�
 ├── 研究运行      /research/runs       — 冻结输入、血缘追踪、运行重放
 ├── 组合与风险    /research/portfolio  — 目标权重分配、离散交易、资金可行性
 ├── 模拟盘        /research/simulation — 纸面撮合、目标仓位决策、绩效报告
-├── 研究工作台    /research/workbench  — OpenCode Web 研究交互（iframe 直连，AI 能力由 OpenCode 承担）
+├── Agent 接入    /research/agent-connect — 外部 Harness 经 MCP 接入（端点 / 凭据 / RT-BJ-RR 交接 / 迁移）
 ├── 研究记录      /research/docs       — 仓库 docs/research/ 的只读展示（canonical 在仓库，经 PR 维护）
 └── 研究报告      /research/reports     — 聚合展示运行结果与绩效归因、CSV/Markdown 导出
 
@@ -55,20 +55,21 @@ product。面向用户复核外置agent的量化研究；沿用现有双主题�
 顶栏「研究流程」帮助弹层在 8 步主流程之外单列探索工具，避免把探索动作误读为晋级步骤：
 
 - **回测** `/backtest`：快速探索，单次运行看结果，不产生可晋级的验证结论
-- **研究工作台** `/research/workbench`：OpenCode 研究交互入口
+- **Agent 接入** `/research/agent-connect`：外部 Harness 经 MCP 接入研究域（旧 `/research/workbench` 永久跳转至此并保留 `?topic=`）
 - **研究记录** `/research/docs`：仓库 `docs/research/`（ROADMAP / FINDINGS / rounds）的只读展示，canonical 在仓库、经 PR 维护
 
 ### AI 辅助流程
 
 ```
-OpenCode Agent 研究交互（工作台 iframe 直连）
+外部 Harness（Codex / 外部 OpenCode / ZCode / DeepSeek Harness）经 MCP 接入
 研究写操作（ResearchRun/回测/模拟盘）由 agent 经 MCP 自主执行（#122）
-Agent（OpenCode）分析 → 创建验证实验 / 因子实验 → 机器验证
+Agent 分析 → 创建验证实验 / 因子实验 → 机器验证
 ```
 
-「研究工作台」页面顶部 banner 展示 OpenCode Web 与 FinBoard MCP 运行状态;
-`opencode_web_enabled=false` 时工作台显示降级提示。
-Agent 行为审计可查 `GET /api/mcp/audit`（`mcp_audit_persist` 开启时持久化）。
+「Agent 接入」页展示 MCP 端点、按客户端凭据预设、`RT-` 深链交接、续等 `BJ-`、
+引用 `RR-` 与收尾协议；内置 OpenCode 工作台（iframe）与 `/api/opencode` 网关已于
+#520 退役，旧深链自动跳转且不丢 `?topic=`。Agent 行为审计可查
+`GET /api/mcp/audit`（`mcp_audit_persist` 开启时持久化）。
 
 ## 三区边界
 
@@ -81,47 +82,11 @@ Agent 行为审计可查 `GET /api/mcp/audit`（`mcp_audit_persist` 开启时持
 | 标识 | 蓝色/默认 | 蓝色/默认 | 黄色「受控区域」标记 |
 | Python | 禁止 | 禁止 | 不适用 |
 
-## 设计 Token
+## 视觉与交互
 
-### 颜色（CSS 变量，HSL 格式;issue #162 深色基础表面已中性灰阶化）
+Web 工作台和桌面研究控制台共用高对比蓝色双主题。页面按用户的主任务决定首屏信息和主要操作，可复核的详情通过展开、页签或下一级页面查看。研究、模拟与实盘的环境标识和风险提示遵循各自功能契约。
 
-| Token | 暗色 | 亮色 | 语义 |
-|-------|------|------|------|
-| `--background` | 0 0% 8% | 0 0% 100% | 页面背景 |
-| `--foreground` | 0 0% 93% | 0 0% 11% | 主要文字 |
-| `--card` | 0 0% 11% | 0 0% 100% | 卡片背景 |
-| `--popover` | 0 0% 13% | 0 0% 100% | 浮层背景 |
-| `--primary` | 199 89% 48% | 199 89% 42% | 主色调/链接/激活 |
-| `--secondary` | 0 0% 15% | 0 0% 96% | 次要背景 |
-| `--muted` | 0 0% 15% | 0 0% 96% | 弱化背景 |
-| `--accent` | 0 0% 19% | 0 0% 94% | hover/选中反馈 |
-| `--destructive` | 0 72% 55% | 0 84% 55% | 危险/错误 |
-| `--success` | 142 71% 45% | 142 71% 40% | 成功/正面 |
-| `--warning` | 38 92% 50% | 38 92% 45% | 警告/阻塞 |
-| `--info` | 199 89% 48% | 199 89% 42% | 信息 |
-| `--up` | 0 84% 62% | 0 72% 48% | A 股涨(红) |
-| `--down` | 142 71% 45% | 142 72% 35% | A 股跌(绿) |
-| `--border` | 0 0% 24% | 0 0% 88% | 边框 |
-| `--chart-1..8` | 见 index.css | 见 index.css | 图表系列色 |
-
-### A 股颜色惯例
-
-- 红色（`text-up`，涨）= 涨/盈利
-- 绿色（`text-down`，跌）= 跌/亏损
-
-设计细节（无阴影 / 圆角 / 触控目标 / 键盘 / 刷新策略）见 `DESIGN.md`。
-
-### 字体
-
-- Sans: Inter / system-ui / PingFang SC / Microsoft YaHei
-- Mono: JetBrains Mono / SF Mono / Consolas
-- 数字: `tabular-nums` / `font-feature-settings: "tnum"`
-
-### 主题
-
-- 默认暗色（`dark` class on `<html>`）
-- 切换持久化到 `localStorage`
-- 通过 `ThemeProvider` + `useTheme()` 管理
+双主题色值、字号与字体回退、微圆角、A 股涨跌色、选中反馈和可访问性以[设计规范](DESIGN.md)为准。规范内的离线 HTML 演示视觉与交互，页面内容以对应功能需求和实际数据为准。
 
 ## 控制台操作说明（Kill Switch）
 

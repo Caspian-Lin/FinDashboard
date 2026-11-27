@@ -1,0 +1,102 @@
+# FinBoard 系统架构概览
+
+本文件给研究 Agent 一份 FinBoard 全景认知,重点说明**研究域 vs 实盘域的隔离**,
+以及 MCP 工具只覆盖研究域。
+
+## 系统定位
+
+FinDashboard(FinBoard)是**可实盘交易的模块化单体量化交易系统**:
+
+- **架构**:模块化单体(非微服务),不引入 Kafka / Kubernetes / 分布式事务
+- **技术栈**:Python 交易进程 + PostgreSQL
+- **范围**:单账户、单券商接口、单市场(A 股或期货二选一)
+- **研究 / 回测 / 模拟 / 实盘严格隔离**
+
+## Monorepo 包结构(研究域 vs 实盘域)
+
+```
+packages/
+  finboard-shared/        — 领域模型 / 类型 / 异常 / ID 生成         [共享]
+  finboard-persistence/   — SQLAlchemy ORM / Repository / Alembic    [共享]
+  finboard-data/          — 历史行情数据(akshare/tushare)            [研究]
+  finboard-backtest/      — 回测引擎 / 因子实验室 / 策略规格 / ResearchRun / AI 助手  [研究]
+  finboard-simulation/    — 模拟盘(独立 simulation_* 表)            [研究]
+  finboard-mcp/           — MCP Server(向外部 Harness 暴露研究工具)  [研究-AI 接口]
+  finboard-broker/        — BrokerAdapter / MarketDataAdapter 抽象   [实盘]
+  finboard-broker-qmt/    — QMT 适配器(Windows-only)                [实盘]
+  finboard-broker-ctp/    — CTP 适配器(期货)                         [实盘]
+  finboard-core/          — TradingKernel / OrderManager / 状态机    [实盘]
+  finboard-risk/          — PreTradeChecker / KillSwitch             [实盘]
+  finboard-reconcile/     — Reconciliation / Recovery Engine         [实盘]
+  finboard-scheduler/     — 定时任务调度                              [实盘]
+  finboard-app/           — 组装根 / CLI / 配置                       [实盘-入口]
+  finboard-api/           — FastAPI REST + WebSocket API              [共享-入口]
+```
+
+**MCP 工具只接入【研究】域包**(`finboard-data` / `finboard-backtest` /
+`finboard-simulation`),**永不接入实盘域包**。
+
+## 数据库表隔离
+
+### 研究域表(MCP / Agent 可访问)
+- `research_runs` / `research_run_artifacts` —— ResearchRun 生命周期与逐阶段产物
+- `factor_hypotheses` / `factor_hypothesis_experiments` —— 因子假设与实验
+- `ai_drafts` / `ai_audit_events` —— AI 草案与审计
+- `research_memories` —— 研究长期记忆(#110)
+- `simulation_*` —— 模拟盘独立表(订单 / 成交 / 持仓 / 资金 / 审计)
+
+### 实盘域表(MCP / Agent **永不**访问)
+- `orders` / `fills` / `positions` —— 实盘订单 / 成交 / 持仓
+- `audit_logs` —— 实盘审计
+
+> **红线**:研究运行使用 `RR-` ID 与独立表,模拟运行使用 `SIM-*` ID 与
+> `simulation_*` 表,**均不得写入实盘 `orders` / `fills` / `positions`**。
+
+## 研究 vs 实盘 的晋级路径
+
+研究产物不能直接上实盘,必须走完整流程:
+
+```
+研究 → 回测 → 样本外 → 行情回放 → 模拟交易 → 影子交易 → 小资金实盘 → 扩大资金
+```
+
+- 每一步都有独立验证与人工确认
+- **LLM / Agent 的产出必须经过完整流程才可上实盘**
+- 模拟盘**禁止自动晋级**影子盘 / 实盘
+
+## AI 接口层(研究 Agent 的唯一入口 = MCP)
+
+### 1. MCP Server(`finboard-mcp`,#108/#517)
+- 把研究能力以受控 MCP 工具暴露给**外部 Agent Harness**(Codex、DeepSeek
+  Harness、ZCode、外部 OpenCode 等),FinDashboard 不内置 LLM(#160)
+- 工具清单以运行时注册表为准(与 `finboard_mcp.scopes.TOOL_SCOPES` 集合相等);
+  当前注册工具见 `TOOL_SCOPES`,不在文档里写死总数
+- 权限矩阵:研究写操作 agent 自主执行;实盘能力永久不注册
+- **按客户端凭据**签发与吊销(#517):Bearer token 只存 sha256 摘要,作用域
+  `research.read` / `research.write` / `research.run` / `data.write` /
+  `audit.read` 在唯一漏斗 `run_tool` 强制,未登记工具 fail-closed
+- 统一信封 `ToolEnvelope` + 审计事件(structlog + `mcp_audit_events`)
+- 接入方式(安装 / 配置 / 排障 / 已验与待验)见 `docs/agent-integration.md`
+
+### 2. 内置 OpenCode 托管(#520 已退役)
+- FinDashboard 不再托管 `opencode web` 容器 / iframe / `/api/opencode` 网关;
+  `packages/finboard-opencode` 已删除,也没有 `opencode_*` 配置项
+- 研究 Agent 一律是**外部 Harness**(Codex / DeepSeek Harness / ZCode / 外部
+  OpenCode 等),进程与文件隔离由客户端自己负责;FinDashboard 只提供 MCP 端点
+  与按凭据作用域的服务端强制
+- **研究文档只读**:`docs/research/`(ROADMAP / FINDINGS / rounds,跨会话结论
+  共享的事实源)经 PR 维护;外部客户端按自身配置只读引用,服务端不挂载任何容器
+
+## 安全红线(对 Agent 的硬约束)
+
+Agent(本 MCP 的任何外部 Harness)**不允许**:
+- 直接连接实盘账户
+- 直接发送订单 / 撤单
+- 修改账户持仓
+- 绕过风控
+- 在实盘运行时动态生成代码并立即执行
+- 操作 Kill Switch
+
+FinBoard 自身**零内置 LLM**(#160)。MCP 入参统一经 `sanitize_prompt` 脱敏
+并记录审计事件(`mcp_audit_events`),工具层拒绝越权请求;提示词注入由
+Skill 边界(实盘动词 / 代码生成禁令)与服务端权限矩阵共同防住。

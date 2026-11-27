@@ -704,3 +704,61 @@ agent,补上「数据在哪、覆盖如何、谁在引用」的入口:
 回滚:移除 `register_data_catalog_tools(mcp)` 调用 + `data_catalog.py` 即可。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` 已同步(工具总数 138 → 143)。
+
+### ✅ #519 通用研究 Skill 与外部 Harness 接入
+
+研究 Agent 从「OpenCode 专用」改为「任意外部 Harness + 按客户端凭据」。**无新增 /
+变更工具**,`TOOL_SCOPES` 与注册表不变;变的是接入契约与文档。
+
+- **通用 Skill**:`.agents/skills/finboard-research/`(SKILL.md + references ×5 +
+  presets ×3)。去 OpenCode 化:无产品名绑定、无 `/workspace` 容器绝对路径、无
+  `permission:` frontmatter 假设;工具名统一真实注册名 `finboard_*`(审计事件名
+  `finboard.*` 单独说明)。旧目录 `.agents/skills/finboard-opencode-research/`
+  只留弃用 shim + 迁移映射表(references 副本已删除,避免双份漂移),#520 删除。
+- **预设**:`presets/{read-only,research-write,data-operator}.md` 对应
+  `readonly` / `topic-writer` / `data-operator`,含 Codex / 外部 OpenCode 的可粘贴
+  配置与「只读预设不得发起运行」告示;DeepSeek Harness 与 ZCode 标**待验**
+  (原因写在文档里,不编造配置片段)。
+- **接入文档**:`docs/agent-integration.md`(逐客户端安装 / 配置 / 作用域 /
+  `RT-` 深链交接 / 续等 `BJ-` / 引用 `RR-` / 排障 / 网络边界 / 日志可用性 +
+  已验与待验表)。
+- **真实客户端验收**:Codex CLI 0.163.0 与外部 OpenCode 2.0.32 各自完成
+  「读 `view=context` → 追加轮次」,readonly 客户端写回执为
+  `status=denied` / `permission_denied`;证据在
+  `docs/research/rounds/2026-11-10-skill-519/`(命令、事件流、服务端审计日志,
+  token 已脱敏)。
+- **CI**:`tests/fixtures/mcp_protocol/`(信封 JSON Schema + 6 个入口工具的入参
+  schema 快照)+ `tests/unit/test_mcp_protocol_fixtures.py`;
+  `tests/unit/test_mcp_server_contract.py::TestPermissionMatrixRegression` 按
+  `TOOL_SCOPES` 全量回归「只读客户端不得调用写工具 / 未登记工具 fail-closed」。
+- **同步**:`_INSTRUCTIONS`(去总数、加「会话交接」段)、`README.md`、
+  `docs/dev-guide.md`、`AGENTS.md`(能力同步规范 + 外部 Harness 接入 + agent 定义
+  权威边界)、`docs/mcp-client-auth.md`、`docs/research/README.md`。
+- 回滚:整体 revert 本 issue 的提交即可(纯文档 + 测试 + Skill,无迁移、无工具
+  变更);若要单独回退 Skill 名,把 `.agents/skills/finboard-research/` 改名回旧名
+  并恢复旧 references。
+
+### ✅ #520 退役内置 OpenCode 托管与 iframe
+
+研究 Agent 接入收敛为**外部 Harness**;内置 `opencode web` 容器托管、iframe
+工作台、`/api/opencode` 网关与 provider 模型同步删除。**无新增 / 变更 MCP 工具**,
+`TOOL_SCOPES` 与注册表不变。
+
+- **删除**:`packages/finboard-opencode`、`docker/opencode-agent/`、CI
+  `opencode-agent-image` job、`opencode_*` settings、Makefile `opencode-*` 目标与
+  镜像变量、`web/src/lib/opencode*.ts` + `ResearchWorkbench` 页面/测试、旧 Skill
+  名 shim `.agents/skills/finboard-opencode-research/`。
+- **Web**:`/research/workbench` → `/research/agent-connect`(永久跳转,保留
+  `?topic=`);新页覆盖 MCP 端点、凭据预设、`RT-` / `BJ-` / `RR-` 交接与命名卷
+  只读备份。
+- **保留**:`docker/research-sandbox/`(研究代码执行安全边界)+ CI `sandbox-image`
+  job;`mcp-serve*` / `mcp-client-*`(#517 独立入口)不变。
+- **迁移**:旧 `FINBOARD_OPENCODE_*` 启动打印一行 `api.opencode_settings_retired`
+  警告(列出键名,不阻断);命名卷 `opencode-data` / `opencode-config` 代码**永不
+  删除**,升级/回退都不删。
+- **测试**:`tests/unit/test_issue_520_opencode_retirement.py`(残留 / 卷删除守卫)、
+  `tests/integration/test_issue_520_opencode_retirement.py`(无 opencode 配置且无
+  Docker 启动 + 研究端点、旧键告警、网关 404)、Web `AgentConnect.test.tsx`
+  (渲染 + 旧路由跳转保参)。
+- **回滚**:回退本 issue 提交;命名卷仍在,旧版本可重新托管容器,本版本不会自动
+  启动或删除任何容器/卷。

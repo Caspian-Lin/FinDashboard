@@ -100,10 +100,13 @@ from finboard_mcp.tools import (
     register_run_tools,
     register_simulation_tools,
     register_strategy_tools,
+    register_topic_run_tools,
     register_validation_experiment_tools,
     register_watchlist_tools,
 )
+from finboard_mcp.tools.audit import register as register_audit_tools
 from finboard_mcp.tools.diagnostics import register as register_diagnostics_tools
+from finboard_mcp.tools.topic_actions import register as register_topic_action_tools
 from finboard_mcp.tools.workspace import register as register_workspace_tools
 
 _INSTRUCTIONS = """\
@@ -113,14 +116,38 @@ FinBoard 研究 MCP —— 量化研究工具集
 模块化单体架构(非微服务)的可实盘交易量化系统,技术栈 Python + PostgreSQL,
 研究 / 回测 / 模拟 / 实盘严格隔离。你只接入【研究】域,不接入实盘。
 
+== 身份与作用域 ==
+调用身份由服务端 Bearer 凭据解析(HTTP 按客户端签发、可吊销;旧共享 token 处于
+兼容弃用期)。作用域:research.read(研究只读)/ research.write(课题、记忆、策略
+规格等结构化写入)/ research.run(启动、取消、重放运行 / 回测 / 模拟盘 / 沙箱)/
+data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读取,运维专用)。
+越权调用返回 status=denied、error.kind=permission_denied,不产生任何业务写入;
+工具清单与作用域一一登记,未登记工具默认拒绝。readonly 客户端只能读;stdio 本机
+子进程默认 research.read,写操作需显式配置 FINBOARD_MCP_STDIO_SCOPES。
+完整创建 / 吊销 / 预设 / TLS 边界见 docs/mcp-client-auth.md。
+
 == 研究流程全景 ==
+Docker 研究版离线入门发布 synthetic-starter-v1 仅含合成数据。引用这份发布的结果
+必须标明合成数据来源,不得作为真实市场证据。部署与数据导入见 docs/research-edition.md。
+
 数据获取(akshare/tushare)→ 因子分析(因子实验室)→ 策略规格(无代码版本化)→
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(148 个,能力与参数以当前注册schema为准)==
+== 会话交接 ==
+用户给课题 ID(RT-…)或深链(/research/topics?topic=RT-…)时,先
+finboard_topic_read(view="context") 一次取回目标版本/生命周期/开放问题/最近轮次/
+断链引用与 next_actions(截断时 excerpted=true,按 view=refs 或 entry_id 续页)。
+续等原后台任务用 finboard_job_wait(job_id="BJ-…")(超时 completed=false 续同一个
+job,不重新入队);引用原运行用 finboard_run_get(run_id="RR-…")。收尾用
+finboard_topic_write(operation="append") 追加轮次 + finboard_memory_remember
+(tags=["research-round"]);轮次与记忆是工作记录,docs/research/ 才是 canonical。
+通用 Skill、预设与各客户端接入(含已验/待验)见 .agents/skills/finboard-research/
+与 docs/agent-integration.md。
+
+== 当前可用工具(唯一事实源 = finboard_mcp.scopes.TOOL_SCOPES;能力与参数以当前注册 schema 为准)==
 - #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
   另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
   finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。
@@ -139,6 +166,21 @@ FinBoard 研究 MCP —— 量化研究工具集
   docs/research/verification-playbook.md。job_wait的completed=false续同job,缓存复用;残缺refs具名留缺口。
   只报告本会话工具回执;等待超时续等不是进程中断恢复,独立模型会话/中断/token/费用由外层评测器记录。
   轮次追加是工作记录,不等于canonical结论发布。
+- finboard_audit_query(1) —— 研究操作审计只读(scope audit.read,常规研究客户端
+  无此权限):按 actor/client_id/source/topic_id/entity_id/operation/outcome/
+  from/to 过滤,limit≤200,只返回脱敏摘要与 sha256 digest;给 audit_id 读单条。
+  服务端观察到的事实(server_observed)与 Harness 上报(client_declared)并列,
+  后者永不覆盖前者。迁移/接入前的写操作没有审计行,空结果表示「此前无审计记录」,
+  不代表没有发生操作;实盘审计仍走独立账本,不在此工具范围。
+- finboard.topic_run.*(6,#515) —— 从课题发起运行:start(写,run+job+链接+
+  审计同一事务)/ list / get / retry(仅 completed/interrupted;新 RR-,
+  replay_of_run_id;必须换新 operation_id)/ cancel(queued/running/interrupted;
+  终态 conflict);finboard_run_topics 反查引用某个 run 的课题(limit/cursor
+  分页,has_more 续页)。链接不可变,state 由 join
+  research_runs/background_jobs 派生;同 operation_id 重放返回原 RR-/BJ-,
+  跨课题复用 conflict。旧 finboard_run_queue
+  独立入口不变,已存在 run 可后来关联。契约见 docs/research/
+  workspace-contract.md。
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -150,6 +192,17 @@ FinBoard 研究 MCP —— 量化研究工具集
   strategy_spec 形态)actor_type=agent,与 requested_by=agent:mcp 语义对齐
   (#122 agent 自主执行);REST 默认 human 不变,schema 放开 human|agent,
   llm 仍 fail-closed 拒绝(红线不变)。
+  REST 与 MCP 同语义(#513):两条通道共用同一提交服务(run_queue /
+  run_replay / backtest_run 的 strategy_spec 形态),同一输入的冻结输入
+  checksum、幂等与事务语义完全一致;失败一律按统一错误码映射,不要靠
+  文本区分 —— invalid_input→invalid_argument(422,门控/候选池/快照/死分区)、
+  not_found(404,策略版本/源 run 不存在)、conflict(409,未发布规格/幂等键
+  内容冲突/不可重放状态)、precondition_failed→conflict(409,data_scope
+  预览漂移,须重新预览)、permission_denied(403,只读客户端)、
+  payload_too_large(413)、unavailable(503,可重试)。细业务码以
+  「(code)」后缀附在 message 尾部,如 (scope_release_drift) /
+  (strategy_not_published) / (universe_empty);契约见
+  docs/research/run-submission-contract.md。
   replay 放开 interrupted(#305):interrupted run 一条命令按冻结输入恢复,
   新 run 自动继承原 manifest 全部冻结输入(含 factor_snapshots 全部 ID,
   零手工),血缘标注 replay_of_run_id + replay_source_status;cancelled
@@ -442,7 +495,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   equity_curve(默认降采样) + fills(默认有界 200 条,limit/offset 分页,
   fills_limit=null 全量) + summary)、report_export(导出 CSV/Markdown 文件,
   写入 FINBOARD_EXPORT_DIR 或系统临时目录,返回绝对路径;导出走全量;
-  纯标准库,零新依赖;只读不写 DB)。
+  纯标准库,零新依赖;只读数据库但会在服务端落盘导出,需要 research.write
+  写权限)。
 - 研究代码仓库(5,✅ #215/#219):research_code submit/rollback/promote(写)+
   list/get(只读)。submit 只登记 draft;必须把同一 artifact 的 screen 运行与
   #57 validated_oos + final_test_unsealed=true 绑定并通过 IC/换手/相关性门,
@@ -537,9 +591,20 @@ FinBoard 研究 MCP —— 量化研究工具集
   上线,LLM 产出仍须走
   研究→回测→OOS→模拟→影子→小资金完整晋级链。
 
-== 研究课题与冻结解释 (#499/#500) ==
+== 研究课题与冻结解释 (#499/#500/#514) ==
 - finboard_topic_read/write 管理版本化目标与追加式轮次,写入不运行回测。工作摘要/agent解释不是正式结论;docs/research经PR维护,文档冲突时以文档为准。
-- 课题是持续更新的锚点与逻辑目录;已有运行/记忆/实验用topic_write append entry_type=evidence的精确source_refs关联,原产物不改写,可被多课题引用。先source_check核查,按entries分页续接;误关联追加supersedes_id纠正。没有单独聚合/反向归属API。完整例子见docs/research/topic-organization.md与Skill tools.md。
+- 生命周期(#514):draft --activate(需goal)--> active;active --pause--> paused --resume--> active;
+  active|paused --close(reason)--> closed --reopen(reason)--> active;draft --discard(reason)--> closed。
+  状态列是权威,每次转移要求expected_revision并追加entry_type=lifecycle轮次;非法转移返回conflict
+  (allowed/current),版本冲突返回current_revision/changed_fields,须重新读取后续接,不能覆盖。
+  create/draft_create/append支持idempotency_key,同键同内容返回原记录(created=false),不重复建题。
+- 续接优先用finboard_topic_read(view=context):一次取回目标、最近生命周期、开放问题、最近轮次摘录、
+  断链引用与next_actions(服务端派生建议,不是执行);截断时excerpted=true。view=branches看分支聚合,
+  view=refs逐条核验最近轮次引用(≤20条/次,offset续页),entry_id读单条全文与checksum(跨课题404)。
+- 课题是持续更新的锚点与逻辑目录;已有运行/记忆/实验用topic_write append entry_type=evidence的精确source_refs关联,原产物不改写,可被多课题引用。先source_check核查,按entries分页续接;误关联追加supersedes_id纠正。完整例子见docs/research/topic-organization.md与Skill tools.md。
+- 课题条目分四层(#516):entry_type=plan只记录设计(因子/窗口/方向/预注册假设/试验预算),不触发执行;round记录执行后尝试;evidence组织已有产物;review记录复核结论且必须带document_ref(相对docs/research的.md路径+checksum)。证据等级依次为research_plan/reviewed_conclusion/agent_interpretation/human_record,机器事实另列。
+- 课题内执行走finboard_topic_action(白名单,#516):factor_experiment.create、code_run.execute(只能引用已登记artifact)、validation_experiment.create/add_trial/unseal、run.submit/replay(委托#515,replay的goal_version也须匹配)。服务端要求课题active且goal_version匹配,同事务写产物/任务+链接+回执(research_topic_action_receipts)+研究审计;operation_id同键重放返回原结果、不重复执行(不新增trial/任务,unseal不误报已揭盲),响应区分artifact_created/link_created/replayed;同键用于不同动作或已被run链接占用统一conflict(operation_id_bound)。run.*的预检拒绝记topic.action.run.*,委托后的成功/失败只留topic.run.*。code_run.execute/unseal等启动执行的动作需research.run,元数据写需research.write。重复揭盲返回conflict(already_unsealed)。Web通道不接受代码(所有action的code/module/expression等键一律code_channel_forbidden),代码只经finboard_research_code_submit登记后按artifact引用。
+- 课题产物链接用finboard_topic_read(view=artifacts)或context.experiment_links读取:OOS实验先看oos_outcome再看status,并列trial_budget已用/上限、final_test_unsealed、join出的unseal_job_id/status/error/pending与evidence_gaps;失败/拒绝/中断与成功同列展示,排队中的揭盲任务不要重复入队。
 - finboard_memory_page 分页摘录,保留状态、来源与纠正链;历史故障已修复不能作为当前故障。
 - finboard_strategy_explain 必须指定运行或精确策略版本;只有commit匹配的因子定义可解释为历史机制。
 - finboard_decision_explain 用日期或decision_id+symbol有界下钻,禁止拉全量artifact替代;目标不等于成交,缺阶段不猜原因。
@@ -561,8 +626,11 @@ def build_mcp_server() -> MCPServer:
         lifespan=app_lifespan,
     )
     register_workspace_tools(mcp)
+    register_audit_tools(mcp)
     register_diagnostics_tools(mcp)
     register_run_tools(mcp)
+    register_topic_run_tools(mcp)
+    register_topic_action_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)
     register_data_catalog_tools(mcp)
