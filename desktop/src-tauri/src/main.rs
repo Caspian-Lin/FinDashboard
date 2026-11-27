@@ -128,12 +128,23 @@ async fn desktop_open_workbench(
         .filter(|state| state.running && state.port >= 1024)
         .map(|state| state.port)
         .ok_or_else(|| "研究服务尚未就绪，请启动后重试。".to_owned())?;
+    let url = Url::parse(&format!("http://127.0.0.1:{port}/research")).map_err(|_| "端口无效。")?;
 
     if let Some(workbench) = app.get_webview_window("research") {
-        if workbench
-            .url()
-            .is_ok_and(|url| is_workbench_origin(&url, port))
+        let current = workbench.url().ok();
+        let recovering = current.as_ref().is_some_and(|url| {
+            url.as_str() == window_frame::WORKBENCH_UNAVAILABLE && workbench_port.get() == port
+        });
+        if recovering
+            || current
+                .as_ref()
+                .is_some_and(|url| is_workbench_origin(url, port))
         {
+            if recovering {
+                workbench
+                    .navigate(url)
+                    .map_err(|_| "无法重新打开研究工作台。")?;
+            }
             if workbench.is_minimized().unwrap_or(false) {
                 workbench.unminimize().map_err(|_| "无法还原研究工作台。")?;
             }
@@ -143,16 +154,18 @@ async fn desktop_open_workbench(
         }
         workbench.destroy().map_err(|_| "无法关闭旧研究工作台。")?;
     }
-    let url = Url::parse(&format!("http://127.0.0.1:{port}/research")).map_err(|_| "端口无效。")?;
     let frame = window_frame::initialization("research", &url.origin().ascii_serialization());
     workbench_port.set(port);
     if WebviewWindowBuilder::new(&app, "research", WebviewUrl::External(url))
         .title("FinDashboard 研究工作台")
         .inner_size(1240.0, 800.0)
         .decorations(false)
+        .use_https_scheme(true)
         .incognito(true)
         .initialization_script(frame)
-        .on_navigation(move |url| is_workbench_origin(url, port))
+        .on_navigation(move |url| {
+            is_workbench_origin(url, port) || url.as_str() == window_frame::WORKBENCH_UNAVAILABLE
+        })
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()
         .is_err()

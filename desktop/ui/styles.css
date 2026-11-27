@@ -69,6 +69,17 @@ body {
   margin: 0;
 }
 
+body.workbench-unavailable {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+}
+
+.workbench-unavailable main {
+  max-width: 38rem;
+}
+
+.workbench-unavailable p { margin-block-start: .75rem; }
+
 h1, h2, p { margin: 0; }
 
 h1 {

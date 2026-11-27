@@ -1,5 +1,10 @@
-function mountWindowFrame({ window: kind, origin, stylesheet }) {
-  if (window.top !== window || location.origin !== origin) return;
+function mountWindowFrame({ window: kind, origin, recovery, stylesheet }) {
+  if (window.top !== window) return;
+  if (recovery && location.href === "chrome-error://chromewebdata/") {
+    location.replace(recovery);
+    return;
+  }
+  if (location.origin !== origin && location.href !== recovery) return;
 
   function mount() {
     const core = window.__TAURI__?.core;
