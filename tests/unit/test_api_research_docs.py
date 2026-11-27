@@ -134,7 +134,7 @@ async def test_history_revision_must_match_served_bytes_and_published_ref(
         assert args[-1] == f"{revision}:docs/research/candidate-evidence.md"
         return SimpleNamespace(stdout=states["content"])
 
-    monkeypatch.setattr(module.subprocess, "run", git)
+    monkeypatch.setattr("finboard_api.routes.research_docs.subprocess.run", git)
     detail = await module.read_research_doc(name, _fake_request(settings))
     assert detail.source_revision == revision
     states["content"] = "# Different checkout"
