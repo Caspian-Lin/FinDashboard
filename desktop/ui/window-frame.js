@@ -13,24 +13,46 @@ function mountWindowFrame({ window: kind, origin, recovery, stylesheet }) {
     const layout = new CSSStyleSheet();
     layout.replaceSync(`
       :root[data-finboard-window] {
-        --finboard-titlebar-height: 36px;
-        scroll-padding-block-start: var(--finboard-titlebar-height);
+        --finboard-window-button-width: 44px;
+        --finboard-window-controls-width: calc(3 * var(--finboard-window-button-width));
+        --finboard-window-controls-height: 34px;
+        --finboard-window-controls-inset: 8px;
+        --finboard-window-controls-bottom: calc(var(--finboard-window-controls-inset) + var(--finboard-window-controls-height));
       }
-      :root[data-finboard-window] body {
-        padding-block-start: var(--finboard-titlebar-height);
+      :root[data-finboard-window="research"] #root > .h-screen > div > header {
+        padding-inline-end: calc(1rem + var(--finboard-window-controls-width) + var(--finboard-window-controls-inset));
       }
-      :root[data-finboard-window="research"] #root > .h-screen,
+      @media (max-width: 520px) {
+        :root[data-finboard-window="research"] #root > .h-screen > div > header {
+          height: auto;
+          flex-wrap: wrap;
+          gap: .25rem;
+          padding-block: .25rem;
+          padding-inline-end: 1rem;
+        }
+        :root[data-finboard-window="research"] #root > .h-screen > div > header > :first-child {
+          min-width: 0;
+          max-width: calc(100% - var(--finboard-window-controls-width) - var(--finboard-window-controls-inset));
+        }
+        :root[data-finboard-window="research"] #root > .h-screen > div > header > :first-child > div {
+          min-width: 0;
+          overflow: hidden;
+          white-space: nowrap;
+        }
+        :root[data-finboard-window="research"] #root > .h-screen > div > header > :last-child {
+          width: 100%;
+          justify-content: flex-end;
+        }
+      }
       :root[data-finboard-window="research"] body > .fixed.inset-y-0.h-full {
-        height: calc(100dvh - var(--finboard-titlebar-height));
-      }
-      :root[data-finboard-window="research"] body > .fixed.inset-y-0.h-full {
-        inset-block-start: var(--finboard-titlebar-height);
+        height: calc(100dvh - var(--finboard-window-controls-bottom));
+        inset-block-start: var(--finboard-window-controls-bottom);
       }
       :root[data-finboard-window="research"] .fixed[role="dialog"][class~="top-[50%]"] {
-        inset-block-start: calc(50% + var(--finboard-titlebar-height) / 2);
+        inset-block-start: calc(50% + var(--finboard-window-controls-bottom) / 2);
       }
       :root[data-finboard-window="research"] .fixed[role="dialog"][class~="max-h-[90vh]"] {
-        max-height: min(90vh, calc(100dvh - var(--finboard-titlebar-height) - 16px));
+        max-height: min(90vh, calc(100dvh - var(--finboard-window-controls-bottom) - 16px));
       }
     `);
     document.adoptedStyleSheets = [...document.adoptedStyleSheets, layout];
@@ -42,15 +64,12 @@ function mountWindowFrame({ window: kind, origin, recovery, stylesheet }) {
     chrome.replaceSync(stylesheet);
     shadow.adoptedStyleSheets = [chrome];
     shadow.innerHTML = `
-      <div class="drag"><span class="title"></span></div>
       <span class="error" role="status" hidden></span>
       <div class="controls" role="group" aria-label="窗口控制">
         <button type="button" data-action="minimize" aria-label="最小化" title="最小化"></button>
         <button type="button" data-action="toggle_maximize" aria-label="最大化" title="最大化"></button>
         <button type="button" data-action="close" aria-label="关闭" title="关闭"></button>
       </div>`;
-    shadow.querySelector(".title").textContent =
-      kind === "research" ? "FinDashboard 研究工作台" : "FinDashboard 研究版";
     const maximize = shadow.querySelector('[data-action="toggle_maximize"]');
     const error = shadow.querySelector(".error");
 
@@ -78,8 +97,10 @@ function mountWindowFrame({ window: kind, origin, recovery, stylesheet }) {
     shadow.querySelector(".controls").addEventListener("mousedown", (event) => {
       if (event.button === 0) event.preventDefault();
     });
-    shadow.querySelector(".drag").addEventListener("mousedown", (event) => {
-      if (event.buttons !== 1) return;
+    const header = kind === "research" ? "#root > .h-screen > div > header" : ".topbar";
+    document.addEventListener("mousedown", (event) => {
+      const target = event.target;
+      if (event.buttons !== 1 || !(target instanceof Element) || !target.matches(header)) return;
       perform(event.detail === 2 ? "toggle_maximize" : "start_dragging");
     });
     let resizeTimer;

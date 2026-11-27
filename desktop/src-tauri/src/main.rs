@@ -73,6 +73,16 @@ fn operator_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Err("研究版安装资源缺失，请重新安装 MSI。".into())
 }
 
+fn with_local_webview_profile<'a, M: Manager<tauri::Wry>>(
+    builder: WebviewWindowBuilder<'a, tauri::Wry, M>,
+) -> std::io::Result<WebviewWindowBuilder<'a, tauri::Wry, M>> {
+    if cfg!(feature = "standalone") {
+        let profile = std::env::current_exe()?.with_file_name("webview2-profile");
+        return Ok(builder.data_directory(dunce::simplified(&profile).to_owned()));
+    }
+    Ok(builder)
+}
+
 #[tauri::command]
 async fn desktop_operation(
     app: AppHandle,
@@ -155,8 +165,7 @@ async fn desktop_open_workbench(
         workbench.destroy().map_err(|_| "无法关闭旧研究工作台。")?;
     }
     let frame = window_frame::initialization("research", &url.origin().ascii_serialization());
-    workbench_port.set(port);
-    if WebviewWindowBuilder::new(&app, "research", WebviewUrl::External(url))
+    let builder = WebviewWindowBuilder::new(&app, "research", WebviewUrl::External(url))
         .title("FinDashboard 研究工作台")
         .inner_size(1240.0, 800.0)
         .decorations(false)
@@ -166,10 +175,11 @@ async fn desktop_open_workbench(
         .on_navigation(move |url| {
             is_workbench_origin(url, port) || url.as_str() == window_frame::WORKBENCH_UNAVAILABLE
         })
-        .on_new_window(|_, _| NewWindowResponse::Deny)
-        .build()
-        .is_err()
-    {
+        .on_new_window(|_, _| NewWindowResponse::Deny);
+    let builder =
+        with_local_webview_profile(builder).map_err(|_| "无法确定 WebView2 配置目录。")?;
+    workbench_port.set(port);
+    if builder.build().is_err() {
         workbench_port.set(0);
         return Err("无法打开研究工作台，请检查 WebView2。".into());
     }
@@ -186,7 +196,8 @@ fn main() {
             window_frame::desktop_window_action
         ])
         .setup(|app| {
-            WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+            let builder = WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?;
+            with_local_webview_profile(builder)?
                 .initialization_script(window_frame::initialization(
                     "management",
                     "https://tauri.localhost",

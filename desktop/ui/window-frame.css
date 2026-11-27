@@ -1,12 +1,11 @@
 :host {
   position: fixed;
   z-index: 2147483647;
-  inset: 0 0 auto;
-  display: flex;
-  align-items: center;
-  height: var(--finboard-titlebar-height);
-  border-block-end: 1px solid var(--finboard-frame-border, hsl(var(--border, 0 0% 24%)));
-  background: var(--rail, hsl(var(--card, 0 0% 11%)));
+  /* 留出 Windows 的拖边命中区，三键在最大化和普通窗口使用相同边距。 */
+  inset: var(--finboard-window-controls-inset) var(--finboard-window-controls-inset) auto auto;
+  display: block;
+  width: var(--finboard-window-controls-width);
+  height: var(--finboard-window-controls-height);
   color: var(--text, hsl(var(--foreground, 0 0% 93%)));
   font: 600 12px/1.25 "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif;
   pointer-events: auto;
@@ -14,33 +13,30 @@
   box-sizing: border-box;
 }
 
-.drag {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  height: 100%;
-  padding-inline: 14px;
-}
-
-.title {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
 .error {
-  margin-inline: 8px;
+  position: absolute;
+  inset-block-start: calc(100% + 4px);
+  inset-inline-end: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--surface, hsl(var(--card, 0 0% 11%)));
   color: var(--danger, hsl(var(--destructive, 0 72% 66%)));
+  white-space: nowrap;
 }
 
-.controls { display: flex; align-self: stretch; }
+.controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  height: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--finboard-window-controls-surface, hsl(var(--card, 0 0% 11%)));
+}
 
 button {
   position: relative;
   display: grid;
   place-items: center;
-  inline-size: 46px;
   padding: 0;
   border: 0;
   background: transparent;

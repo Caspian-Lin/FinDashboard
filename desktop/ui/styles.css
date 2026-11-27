@@ -1,13 +1,13 @@
 :root {
   color-scheme: dark;
   --background: oklch(18% 0.014 64);
+  --finboard-window-controls-surface: var(--background);
   --rail: oklch(22% 0.017 66);
   --surface: oklch(25% 0.020 67);
   --surface-raised: oklch(30% 0.022 67);
   --text: oklch(95% 0.016 75);
   --muted: oklch(76% 0.024 72);
   --border: oklch(37% 0.027 70);
-  --finboard-frame-border: var(--border);
   --accent: oklch(85% 0.095 80);
   --on-accent: oklch(24% 0.036 60);
   --service: oklch(85% 0.095 80);
@@ -98,12 +98,12 @@ p { color: var(--muted); max-width: 65ch; }
 
 .rail {
   position: sticky;
-  inset-block-start: var(--finboard-titlebar-height, 0px);
+  inset-block-start: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2.9rem;
-  height: calc(100dvh - var(--finboard-titlebar-height, 0px));
+  height: 100dvh;
   padding: 1.28rem .6rem;
   background: var(--rail);
 }
@@ -166,6 +166,7 @@ main {
   justify-content: space-between;
   gap: .75rem;
   margin-block-end: 1.75rem;
+  padding-inline-end: calc(var(--finboard-window-controls-width, 0px) + var(--finboard-window-controls-inset, 0px));
 }
 
 .topbar button { flex-shrink: 0; }
@@ -461,11 +462,13 @@ summary { cursor: pointer; font-weight: 650; }
     padding: .48rem .8rem;
   }
   .rail-links { display: flex; justify-content: flex-end; gap: .3rem; }
+  :root[data-finboard-window="management"] .rail { display: grid; gap: .35rem; }
+  :root[data-finboard-window="management"] .rail-links { justify-content: flex-start; }
   .rail-links a { min-width: 3.2rem; min-height: 2.8rem; padding: .35rem .3rem; }
   .brand-mark { inline-size: 2.7rem; block-size: 2.7rem; padding-block-end: .65rem; }
   main { padding: .9rem 1rem 2rem; }
   h1 { font-size: 2.05rem; }
-  .topbar { margin-block-end: 1.15rem; }
+  .topbar { margin-block-end: 1.15rem; padding-inline-end: 0; }
   .dashboard { grid-template-columns: minmax(0, 1fr); gap: .75rem; }
   .service, .workbench, .sample, .codex { grid-column: 1 / -1; }
   .command { grid-template-columns: minmax(0, 1fr); }
