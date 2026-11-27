@@ -331,6 +331,10 @@ export const factorLabApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  previewFeatureSnapshot: (body: FeatureSnapshotCreate) =>
+    fetchJSON<{ decision_at: string; releases: {
+      release_id: string; version: string; checksum: string; symbol_count: number;
+    }[] }>("/research/factors/features/preflight", { method: "POST", body: JSON.stringify(body) }),
   startFeatureSnapshotJob: (body: FeatureSnapshotCreate) =>
     fetchJSON<JobOut>(`/research/factors/features/jobs`, {
       method: "POST",

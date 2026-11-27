@@ -8,6 +8,8 @@ import { Label } from "@/components/ui/label";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/states";
 import { EvidenceFields } from "@/components/research/StrategyExplanation";
 import { ResearchMemoryArticle } from "@/components/research/ResearchMemoryArticle";
+import FormalExperimentDialog from "@/components/research/FormalExperimentDialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import ResearchRunSetup from "@/components/research/ResearchRunSetup";
 import type { ResearchRunQueueIn } from "@/lib/research";
 import { ResearchTimestamp } from "@/components/research/ResearchTimestamp";
@@ -485,6 +487,8 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
   const qc = useQueryClient();
   const [notice, setNotice] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [formalOpen, setFormalOpen] = useState(false);
+  const [confirmUnseal, setConfirmUnseal] = useState<{ link: TopicArtifactLink; operationId: string } | null>(null);
   const goalVersion = topic.goal?.version ?? "";
   const artifacts = useQuery({
     queryKey: ["topic-artifacts", topic.topic_id],
@@ -495,14 +499,15 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
     void qc.invalidateQueries({ queryKey: ["topic-context", topic.topic_id] });
   };
   const unseal = useMutation({
-    mutationFn: (link: TopicArtifactLink) =>
+    mutationFn: ({ link, operationId }: { link: TopicArtifactLink; operationId: string }) =>
       topicActionApi.act(topic.topic_id, {
         action: "validation_experiment.unseal" as TopicActionName,
         goal_version: goalVersion,
         payload: { experiment_id: link.entity_id },
-        operation_id: newOperationId("topic-unseal"),
+        operation_id: operationId,
       }),
     onSuccess: (receipt) => {
+      setConfirmUnseal(null);
       setError(null);
       setNotice(
         `已提交一次性揭盲执行（${String(receipt.job_id ?? receipt.entity_id)}）；揭盲后不可重做。`,
@@ -530,9 +535,9 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-semibold">因子实验 / 沙箱运行 / OOS 实验</h3>
-        <span className="text-xs text-muted-foreground">
-          精确引用 · 状态读取时派生 · 代码只在 MCP 登记后按 artifact 引用
-        </span>
+        <Button type="button" variant="outline" size="sm" disabled={topic.status !== "active" || !goalVersion} onClick={() => setFormalOpen(true)}>
+          新建正式规格验证
+        </Button>
       </div>
       {artifacts.isLoading && <LoadingState />}
       {artifacts.isError && (
@@ -616,11 +621,14 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
                     variant="outline"
                     size="sm"
                     disabled={unseal.isPending || !goalVersion || topic.status !== "active"}
-                    onClick={() => unseal.mutate(link)}
+                    onClick={() => { unseal.reset(); setConfirmUnseal({ link, operationId: newOperationId("topic-unseal") }); }}
                   >
                     显式执行一次性揭盲
                   </Button>
                 )}
+                <Link className="ml-2 text-sm text-primary underline" to={`/research/experiments?experiment=${encodeURIComponent(link.entity_id)}&topic=${encodeURIComponent(topic.topic_id)}`}>
+                  复核正式实验
+                </Link>
               </div>
             ) : link.entity_type === "factor_experiment" ? (
               <div className="mt-2 space-y-1 text-sm">
@@ -682,6 +690,33 @@ function TopicArtifactsCard({ topic }: { topic: Topic }) {
         不会自动发起任何运行；只有显式提交动作（如一次性揭盲）才入队，服务端会要求课题 active
         且目标版本匹配，并按 operation_id 返回原回执而不是重复执行。
       </p>
+      {formalOpen && (
+        <FormalExperimentDialog topic={topic} onClose={() => setFormalOpen(false)} onCreated={(id) => {
+          setFormalOpen(false);
+          setNotice(`已登记实验 ${id}。在原课题中核对后，再单独确认揭盲。`);
+          refresh();
+        }} />
+      )}
+      <Dialog open={Boolean(confirmUnseal)} onOpenChange={(open) => {
+        if (!open && !unseal.isPending) setConfirmUnseal(null);
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>确认一次性揭盲</DialogTitle>
+            <DialogDescription>
+              服务端会为这个冻结实验提交执行任务。开始最终测试后，该窗口将被标记为已使用。
+            </DialogDescription>
+          </DialogHeader>
+          <p className="break-all text-sm">{confirmUnseal?.link.entity_id}</p>
+          {unseal.error && <p role="alert" className="text-sm text-destructive">{unseal.error.message}</p>}
+          <DialogFooter>
+            <Button variant="outline" disabled={unseal.isPending} onClick={() => setConfirmUnseal(null)}>返回</Button>
+            <Button disabled={unseal.isPending || !confirmUnseal} onClick={() => confirmUnseal && unseal.mutate(confirmUnseal)}>
+              {unseal.isPending ? "提交中" : "确认执行并消耗最终窗口"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

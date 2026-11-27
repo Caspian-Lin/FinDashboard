@@ -406,6 +406,7 @@ async def feature_snapshot_job_start(
     *,
     dataset_release_id: str,
     decision_at: datetime,
+    preview_only: bool = False,
 ) -> ToolEnvelope:
     """异步登记特征快照计算任务到统一队列,返回可轮询的 JobOut(issue #136)。
 
@@ -428,6 +429,14 @@ async def feature_snapshot_job_start(
             release, normalized_dt = await _validate_snapshot_input(
                 session, dataset_release_id, decision_at
             )
+            if preview_only:
+                return {
+                    "decision_at": normalized_dt.isoformat(),
+                    "releases": [
+                        {"release_id": release.release_id, "version": release.version,
+                         "checksum": release.release_checksum, "symbol_count": release.symbol_count}
+                    ],
+                }
             await session.rollback()  # 校验只读,释放行锁;executor 会重读
 
             payload: dict[str, Any] = {
@@ -462,6 +471,7 @@ async def feature_snapshot_job_start(
         arguments={
             "dataset_release_id": dataset_release_id,
             "decision_at": decision_at.isoformat(),
+            "preview_only": preview_only,
         },
         handler=_do,
         idempotency_key=(
@@ -854,12 +864,14 @@ def register(mcp: MCPServer) -> None:
     async def _feature_snapshot_job_start(
         dataset_release_id: str,
         decision_at: str,
+        preview_only: bool = False,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await feature_snapshot_job_start(
             app_context(ctx),
             dataset_release_id=dataset_release_id,
             decision_at=datetime.fromisoformat(decision_at),
+            preview_only=preview_only,
         )
 
     @mcp.tool(

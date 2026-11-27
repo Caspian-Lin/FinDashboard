@@ -586,6 +586,21 @@ async def create_feature_snapshot(
     return FeatureSnapshotOut.model_validate(snapshot.as_dict())
 
 
+@router.post("/factors/features/preflight")
+async def preview_feature_snapshot(
+    body: FeatureSnapshotCreate, session: AsyncSession = Depends(get_db_session)
+) -> dict[str, Any]:
+    releases, decision_at = await _load_feature_snapshot_input(body, session)
+    return {
+        "decision_at": decision_at.isoformat(),
+        "releases": [
+            {"release_id": release.release_id, "version": release.version,
+             "checksum": release.release_checksum, "symbol_count": release.symbol_count}
+            for release in releases
+        ],
+    }
+
+
 @router.post(
     "/factors/features/jobs",
     response_model=JobOut,

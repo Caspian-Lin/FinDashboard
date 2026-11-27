@@ -540,7 +540,28 @@ export const topicRunApi = {
  * Whitelisted topic actions (#516). The Web channel can only reference an
  * already-registered artifact; it never accepts Python / module paths.
  */
+export interface FormalExperimentPreview {
+  preview_checksum: string;
+  version_checksum: string;
+  baseline_run_id: string;
+  strategy_version: number;
+  dataset_releases: { artifact_id: string; version: string; checksum: string }[];
+  plan: Record<string, unknown>;
+  thresholds: Record<string, unknown>;
+  fee_config: Record<string, unknown>;
+  portfolio_config: Record<string, unknown>;
+  fee_policy_version?: string | null;
+  used_windows: { start: string; end: string; source?: string }[];
+}
+
 export const topicActionApi = {
+  previewValidation: (topicId: string, goalVersion: string, payload: Record<string, unknown>) =>
+    fetchJSON<FormalExperimentPreview>(
+      `/research/topics/${encodeURIComponent(topicId)}/actions/preview`,
+      { method: "POST", body: JSON.stringify({
+        action: "validation_experiment.create", goal_version: goalVersion, payload,
+      }) },
+    ),
   act: (
     topicId: string,
     body: {

@@ -314,8 +314,13 @@ export const api = {
 
   // ---- Backtest ----
   getStrategies: () => fetchJSON<StrategyInfo[]>("/backtest/strategies"),
-  runBacktest: (body: BacktestRunRequest) =>
-    fetchJSON<JobOut>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
+  previewBacktest: (body: BacktestRunRequest) =>
+    fetchJSON<BacktestPreview>("/backtest/preflight", { method: "POST", body: JSON.stringify(body) }),
+  runBacktest: (body: BacktestRunRequest, expectedPreviewChecksum?: string) =>
+    fetchJSON<JobOut>(
+      `/backtest/run${expectedPreviewChecksum ? `?expected_preview_checksum=${encodeURIComponent(expectedPreviewChecksum)}` : ""}`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   getBacktestHistory: (limit = 50) =>
     fetchJSON<BacktestHistoryItem[]>(`/backtest/history?limit=${limit}`),
   getBacktestHistoryDetail: (id: number) =>
@@ -693,6 +698,14 @@ export interface BacktestRunRequest {
   commission_min?: string;
   stamp_tax_rate?: string;
   slippage_bps?: string;
+}
+
+export interface BacktestPreview {
+  preview_checksum: string;
+  request: BacktestRunRequest;
+  provider_name: string;
+  benchmark: { symbol: string | null; equal_weight_universe: boolean };
+  matching: { matching_model_version: string; asset_rules_version: string };
 }
 
 export interface BacktestMetrics {

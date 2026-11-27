@@ -21,8 +21,9 @@ from finboard_api.schemas import (
     StrategyInfoOut,
 )
 from finboard_api.strategy_validation import strategy_info
+from finboard_app.backtest_preflight import describe_backtest_inputs
 from finboard_app.selection_schema import FactorSelectionParams
-from finboard_persistence import BackgroundJobPersistenceConflictError
+from finboard_persistence import BackgroundJobPersistenceConflictError, ResearchDatasetRepository
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -35,12 +36,34 @@ async def list_strategies() -> list[StrategyInfoOut]:
     return [strategy_info(definition) for definition in list_strategy_definitions()]
 
 
+def _provider_name(request: Request) -> str:
+    import os
+
+    settings = getattr(request.app.state, "settings", None)
+    return str(settings.data_provider) if settings is not None else os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+
+
+async def _describe_inputs(req: BacktestRunRequest, request: Request, session: AsyncSession) -> dict[str, Any]:
+    try:
+        return await describe_backtest_inputs(session, req.model_dump(mode="json"), _provider_name(request))
+    except (ValueError, ArithmeticError) as exc:
+        raise HTTPException(422, detail={"code": "exploratory_preflight_invalid", "message": str(exc)}) from exc
+
+
+@router.post("/preflight")
+async def preview_backtest(
+    req: BacktestRunRequest, request: Request, session: AsyncSession = Depends(get_db_session)
+) -> dict[str, Any]:
+    return await _describe_inputs(req, request, session)
+
+
 @router.post("/run", response_model=JobOut, status_code=202)
 async def run_backtest(
     req: BacktestRunRequest,
     response: Response,
     request: Request,
     session: AsyncSession = Depends(get_db_session),
+    expected_preview_checksum: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
 ) -> JobOut:
     """登记回测任务,立即返回 202 + job_id(issue #144)。
 
@@ -49,33 +72,30 @@ async def run_backtest(
     前端轮询 /api/jobs/{job_id} 拿到 run_id 后查 /api/backtest/history/{run_id}。
     """
     import hashlib
-    import os
 
     from finboard_api.job_helpers import enqueue_job
 
-    settings = getattr(request.app.state, "settings", None)
-    provider_name = (
-        settings.data_provider
-        if settings is not None
-        else os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
-    )
-    # issue #255:research_db 选股必需数据集批次未发布 → 入队秒级 422,
-    # 不再让任务排队跑完后以「0 交易成功」收场(与 #186 秒级失败风格对齐)。
-    from finboard_persistence import ResearchDatasetRepository
-
-    unpublished = await ResearchDatasetRepository(session).selection_inputs_gate(
-        req.selection.to_domain()
-    )
-    if unpublished:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "research_db 选股必需数据集批次未发布,拒绝入队(issue #255): "
-                f"{'、'.join(unpublished)}。请先执行 data_sync 摄取并完成批次"
-                "发布,或改用 inputs_mode=bars/snapshot。"
-            ),
-        )
-    request_dict = req.model_dump(mode="json")
+    provider_name = _provider_name(request)
+    if expected_preview_checksum:
+        preview = await _describe_inputs(req, request, session)
+        if preview["preview_checksum"] != expected_preview_checksum:
+            raise HTTPException(
+                409, detail={"code": "exploratory_preflight_drift", "message": "Backtest inputs changed. Preview them again."}
+            )
+        request_dict = preview["request"]
+    else:
+        # Legacy direct clients retain the original data-availability gate and payload.
+        unpublished = await ResearchDatasetRepository(session).selection_inputs_gate(req.selection.to_domain())
+        if unpublished:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "research_db 选股必需数据集批次未发布,拒绝入队(issue #255): "
+                    f"{'、'.join(unpublished)}。请先执行 data_sync 摄取并完成批次"
+                    "发布,或改用 inputs_mode=bars/snapshot。"
+                ),
+            )
+        request_dict = req.model_dump(mode="json")
     payload: dict[str, Any] = {
         "request": request_dict,
         "provider_name": provider_name,

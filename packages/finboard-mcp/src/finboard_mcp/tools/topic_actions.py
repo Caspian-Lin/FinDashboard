@@ -19,7 +19,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
 from finboard_app.research_operation import ResearchOperationError
-from finboard_app.research_topic_artifacts import run_topic_action
+from finboard_app.research_topic_artifacts import preview_topic_action, run_topic_action
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import run_tool
@@ -39,6 +39,7 @@ async def topic_action(
     goal_version: str,
     payload: dict[str, Any] | None = None,
     operation_id: str | None = None,
+    preview_only: bool = False,
 ) -> ToolEnvelope:
     """Run one whitelisted action inside the service's single transaction."""
 
@@ -46,13 +47,23 @@ async def topic_action(
         await _require_write_enabled(app)
         async with app.session_maker() as session:
             try:
+                context = _mcp_operation_context(app, operation_id)
+                if preview_only:
+                    return await preview_topic_action(
+                        session,
+                        topic_id=topic_id,
+                        action=action,
+                        goal_version=goal_version,
+                        payload=payload or {},
+                        ctx=context,
+                    )
                 result = await run_topic_action(
                     session,
                     topic_id=topic_id,
                     action=action,
                     goal_version=goal_version,
                     payload=payload or {},
-                    ctx=_mcp_operation_context(app, operation_id),
+                    ctx=context,
                     sandbox_enabled=app.settings.research_sandbox_enabled,
                 )
             except ResearchOperationError as exc:
@@ -68,6 +79,7 @@ async def topic_action(
             "action": action,
             "goal_version": goal_version,
             "operation_id": operation_id,
+            "preview_only": preview_only,
             "artifact_id": (payload or {}).get("artifact_id"),
             "experiment_id": (payload or {}).get("experiment_id"),
             "run_id": (payload or {}).get("run_id"),
@@ -88,7 +100,7 @@ def register(mcp: MCPServer) -> None:
             "run.submit / run.replay(委托 #515,需 research.run)、"
             "factor_experiment.create(登记因子实验,不执行,需 research.write)、"
             "code_run.execute(仅执行已登记 artifact,需 research.run)、"
-            "validation_experiment.create / add_trial(需 research.write)、"
+            "validation_experiment.create / add_trial(需 research.write;正式规格创建可 preview_only=true)、"
             "validation_experiment.unseal(一次性揭盲入队,需 research.run)。"
             "每个动作要求 topic 为 active 且 goal_version 等于当前目标版本,并写入"
             "不可变课题链接 + 回执(research_topic_action_receipts)+ 研究审计(同一事务)。"
@@ -110,6 +122,7 @@ def register(mcp: MCPServer) -> None:
         goal_version: str,
         payload: dict[str, Any] | None = None,
         operation_id: str | None = None,
+        preview_only: bool = False,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await topic_action(
@@ -119,6 +132,7 @@ def register(mcp: MCPServer) -> None:
             goal_version=goal_version,
             payload=payload,
             operation_id=operation_id,
+            preview_only=preview_only,
         )
 
 

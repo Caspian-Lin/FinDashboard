@@ -28,6 +28,7 @@ from finboard_app.research_operation import (
 from finboard_app.research_topic_artifacts import (
     TOPIC_ACTION_ENTITY_TYPES,
     list_topic_artifact_links,
+    preview_topic_action,
     run_topic_action,
 )
 from finboard_backtest.research_run import ResearchActorType
@@ -109,6 +110,26 @@ async def topic_action(
     if not created:
         response.status_code = 200
     return result
+
+
+@topic_actions_router.post("/{topic_id}/actions/preview")
+async def topic_action_preview(
+    topic_id: str,
+    body: TopicActionIn,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    try:
+        return await preview_topic_action(
+            session,
+            topic_id=topic_id,
+            action=body.action,
+            goal_version=body.goal_version,
+            payload=body.payload,
+            ctx=_context(request, body),
+        )
+    except ResearchOperationError as exc:
+        raise _http_error(exc) from exc
 
 
 @topic_actions_router.get("/{topic_id}/artifacts")
