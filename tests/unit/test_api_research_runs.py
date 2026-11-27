@@ -34,6 +34,7 @@ QUEUE_BODY_FIELDS = {
     "actor_type",
     "data_scope",
     "data_scope_resolution_id",
+    "expected_manifest_checksum",
 }
 
 REPLAY_BODY_FIELDS = {"idempotency_key", "requested_by", "actor_type"}
@@ -86,6 +87,8 @@ def test_openapi_request_component_names_and_fields_are_stable(
     assert queue_ref == {"$ref": "#/components/schemas/ResearchRunQueueIn"}
     queue_properties = cast("dict[str, object]", schemas["ResearchRunQueueIn"]["properties"])
     assert set(queue_properties) == QUEUE_BODY_FIELDS
+    required = cast("list[str]", schemas["ResearchRunQueueIn"]["required"])
+    assert "expected_manifest_checksum" not in required
 
     replay_ref = _request_schema_ref(schema, "/api/research/runs/{run_id}/replay")
     assert replay_ref == {"$ref": "#/components/schemas/ResearchRunReplayIn"}
