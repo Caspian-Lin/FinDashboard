@@ -24,6 +24,7 @@ from finboard_api.schemas import (
     BulkDownloadRequest,
     DataFetchRequest,
     DataPreviewOut,
+    DataSourceStatusOut,
     DataStatusListOut,
     DataStatusOut,
     DataStatusSelectionOut,
@@ -40,6 +41,13 @@ from finboard_api.schemas import (
     SymbolPoolUpdate,
     TushareQuotaOut,
 )
+from finboard_app.data_scheduler_config import (
+    DEFAULT_CONFIG_FILE,
+    DataScheduleConflictError,
+    data_schedule_revision,
+    read_data_schedule,
+    save_data_schedule,
+)
 from finboard_persistence import BackgroundJobPersistenceConflictError
 
 logger = structlog.get_logger(__name__)
@@ -53,7 +61,7 @@ router = APIRouter(prefix="/api/data", tags=["data"])
 
 _CACHE_DIR = "data_cache"
 _SYMBOLS_FILE = "symbols.yaml"
-_CONFIG_FILE = "data_config.json"
+_CONFIG_FILE = DEFAULT_CONFIG_FILE
 _SUPPORTED_BAR_PROVIDERS = {"akshare", "tushare", "yfinance"}
 
 def _request_settings(request: Request) -> Settings | None:
@@ -924,60 +932,56 @@ async def start_bulk_download(
 
 
 # ------------------------------------------------------------------ Scheduler Config
-def _load_config() -> dict[str, Any]:
-    import json
-    from pathlib import Path
+def _scheduler_config(cfg: dict[str, Any], settings: Settings | None) -> SchedulerConfigOut:
+    defaults = SchedulerConfigOut(revision=data_schedule_revision(cfg))
+    values = {key: cfg.get(key, default) for key, default in defaults.model_dump().items()
+              if key not in {"revision", "data_provider"}}
+    return SchedulerConfigOut(
+        **values,
+        revision=defaults.revision,
+        data_provider=settings.data_provider if settings is not None else "tushare",
+    )
 
-    p = Path(_CONFIG_FILE)
-    if p.exists():
-        data: dict[str, Any] = json.loads(p.read_text(encoding="utf-8"))
-        return data
-    return {}
+
+def _config_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, DataScheduleConflictError):
+        return HTTPException(409, detail={"code": "schedule_conflict", "message": "Data schedule changed."})
+    if isinstance(exc, PermissionError):
+        return HTTPException(403, detail={"code": "schedule_permission", "message": "Data schedule access denied."})
+    if isinstance(exc, OSError):
+        return HTTPException(503, detail={"code": "schedule_unavailable", "message": "Data schedule file unavailable."})
+    return HTTPException(500, detail={"code": "schedule_invalid", "message": "Invalid data schedule configuration."})
 
 
-def _save_config(cfg: dict[str, Any]) -> None:
-    import json
-    from pathlib import Path
-
-    Path(_CONFIG_FILE).write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+@router.get("/source-status", response_model=DataSourceStatusOut)
+async def get_source_status(request: Request) -> DataSourceStatusOut:
+    """Configured provider and locally known capabilities, without probing data sources."""
+    settings = _request_settings(request)
+    return DataSourceStatusOut(
+        provider=settings.data_provider if settings is not None else "tushare",
+        tushare_configured=bool(settings and settings.tushare_token),
+        sandbox_enabled=settings.research_sandbox_enabled if settings is not None else None,
+    )
 
 
 @router.get("/config", response_model=SchedulerConfigOut)
 async def get_scheduler_config(request: Request) -> SchedulerConfigOut:
     """获取定时任务配置。"""
-    cfg = _load_config()
-    settings = _request_settings(request)
-    return SchedulerConfigOut(
-        sync_enabled=cfg.get("sync_enabled", True),
-        sync_time=cfg.get("sync_time", "15:35"),
-        download_enabled=cfg.get("download_enabled", True),
-        download_time=cfg.get("download_time", "15:45"),
-        download_lookback_days=cfg.get("download_lookback_days", 5),
-        download_markets=cfg.get("download_markets", ["a_share"]),
-        download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "tushare",
-    )
+    try:
+        cfg = await asyncio.to_thread(read_data_schedule, Path(_CONFIG_FILE))
+        return _scheduler_config(cfg, _request_settings(request))
+    except (OSError, ValueError) as exc:
+        raise _config_http_error(exc) from exc
 
 
 @router.put("/config", response_model=SchedulerConfigOut)
-async def update_scheduler_config(
-    req: SchedulerConfigUpdate,
-    request: Request,
-) -> SchedulerConfigOut:
+async def update_scheduler_config(req: SchedulerConfigUpdate, request: Request) -> SchedulerConfigOut:
     """更新定时任务配置。"""
-    cfg = _load_config()
-    updates = req.model_dump(exclude_none=True)
-    cfg.update(updates)
-    _save_config(cfg)
-    settings = _request_settings(request)
-
-    return SchedulerConfigOut(
-        sync_enabled=cfg.get("sync_enabled", True),
-        sync_time=cfg.get("sync_time", "15:35"),
-        download_enabled=cfg.get("download_enabled", True),
-        download_time=cfg.get("download_time", "15:45"),
-        download_lookback_days=cfg.get("download_lookback_days", 5),
-        download_markets=cfg.get("download_markets", ["a_share"]),
-        download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "tushare",
-    )
+    updates = req.model_dump(exclude={"expected_revision"}, exclude_none=True)
+    try:
+        cfg = await asyncio.to_thread(
+            save_data_schedule, Path(_CONFIG_FILE), updates, expected_revision=req.expected_revision
+        )
+        return _scheduler_config(cfg, _request_settings(request))
+    except (OSError, ValueError) as exc:
+        raise _config_http_error(exc) from exc

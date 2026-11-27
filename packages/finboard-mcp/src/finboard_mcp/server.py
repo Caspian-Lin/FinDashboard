@@ -427,7 +427,7 @@ finboard_topic_write(operation="append") 追加轮次 + finboard_memory_remember
   标的集三选一 #261:symbols / symbols_from_release 复制既有可用发布 /
   full_market 全市场按 kind 展开,来源缺失/不可用/展开为空入队即
   invalid_argument)、
-  data_config_get/update(调度器配置)、etf_sync(默认 dry_run)/
+  data_config_get/update(调度器配置,可用 revision 保护并发更新)、etf_sync(默认 dry_run)/
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
   指数链路(#256/#394):sync_universe 自动登记指数(instrument_type=index,
   登记源 tushare index_basic 全量、按 is_index_code 收窄 A 股三所指数;

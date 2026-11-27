@@ -81,6 +81,7 @@ web/.vite/
 Thumbs.db
 desktop.ini
 /data_cache/
+/data_config.json.lock
 /data_releases/
 
 .zcode/
