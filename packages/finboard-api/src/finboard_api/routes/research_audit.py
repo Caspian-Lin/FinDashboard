@@ -21,9 +21,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.base import RequestResponseEndpoint
 
 from finboard_api.deps import get_db_session
 from finboard_app.research_audit import MAX_VALUE_CHARS, sanitize_params
@@ -167,10 +169,13 @@ async def list_audit(
     topic_id: str | None = Query(default=None, max_length=32),
     entry_id: str | None = Query(default=None, max_length=32),
     entity_id: str | None = Query(default=None, max_length=64),
+    job_id: str | None = Query(default=None, max_length=64),
+    run_id: str | None = Query(default=None, max_length=64),
     operation: str | None = Query(default=None, max_length=64),
     outcome: Outcome | None = None,
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = Query(default=None),
+    before: datetime | None = Query(default=None),
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=100, ge=1, le=MAX_AUDIT_PAGE),
     session: AsyncSession = Depends(get_db_session),
@@ -185,10 +190,13 @@ async def list_audit(
         topic_id=topic_id,
         entry_id=entry_id,
         entity_id=entity_id,
+        job_id=job_id,
+        run_id=run_id,
         operation=operation,
         outcome=outcome,
         since=from_,
         until=to,
+        before=before,
         cursor=_decode_cursor(cursor) if cursor else None,
         limit=limit,
     )
@@ -235,6 +243,32 @@ async def _mcp_credential(
         name=row.name,
         scopes=frozenset(row.scopes),
     )
+
+
+async def enforce_research_audit_read(
+    request: Request, call_next: RequestResponseEndpoint,
+) -> Response:
+    """完整版的研究审计读取沿用 audit.read 客户端作用域。"""
+    path = request.url.path
+    if request.method in {"GET", "HEAD"} and (
+        path == router.prefix or path.startswith(router.prefix + "/")
+    ):
+        try:
+            sessions = request.app.state.session_maker
+            async with sessions() as session:
+                identity = await _mcp_credential(request.headers.get("authorization"), session)
+                if "audit.read" not in identity.scopes:
+                    raise HTTPException(status_code=403, detail="需要 audit.read 权限")
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers={"Cache-Control": "no-store"},
+            )
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    return await call_next(request)
 
 
 @router.post("/client-events", response_model=ResearchClientEventOut, status_code=201)

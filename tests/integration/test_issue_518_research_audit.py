@@ -21,6 +21,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from finboard_api.app import create_app
 from finboard_api.deps import get_db_session
 from finboard_api.routes.jobs import router as jobs_router
 from finboard_api.routes.research_audit import router as research_audit_router
@@ -40,10 +41,12 @@ from finboard_app.research_topic_lifecycle import TopicRevisionConflictError
 from finboard_app.research_workspace import workspace_write
 from finboard_mcp.context import McpAppContext
 from finboard_persistence import McpClientRepository, session_factory
+from finboard_persistence.background_job_repo import BackgroundJobRepository
 from finboard_persistence.models import (
     BackgroundJobModel,
     ResearchAuditEventModel,
     ResearchRunModel,
+    ResearchTopicLinkModel,
     ResearchTopicModel,
 )
 from finboard_persistence.research_audit_repo import ResearchAuditRepository
@@ -480,6 +483,61 @@ async def _client_credential(
         )
         await session.commit()
     return client_id, token.token
+
+
+async def test_task_and_audit_deep_links_preserve_scope_and_archival(engine: AsyncEngine) -> None:
+    sessions = session_factory(engine)
+    suffix = uuid4().hex[:16]
+    job_id, run_id, topic_id, audit_id = (f"{prefix}-{suffix}" for prefix in ("BJ", "RR", "RT", "RA"))
+    occurred_at = datetime(2026, 11, 1, tzinfo=UTC)
+    async with sessions() as session:
+        jobs = BackgroundJobRepository(session)
+        row, _ = await jobs.create_or_get(
+            job_id=job_id, idempotency_key=f"test-{suffix}", kind="research_run",
+            queue="research", status="failed", priority=0, payload={"run_id": run_id},
+            payload_checksum="0" * 64, max_attempts=3, requested_by="api:research",
+        )
+        row.archived_at = datetime.now(UTC)
+        session.add(ResearchTopicLinkModel(
+            topic_id=topic_id, goal_version="v1", entity_type="research_run",
+            entity_id=run_id, created_by="fixture",
+        ))
+        await ResearchAuditRepository(session).append(
+            audit_id=audit_id, occurred_at=occurred_at, actor="worker:test", actor_type="worker",
+            source="worker", operation="job.failed", outcome="failed", params_digest="0" * 64,
+            entity_type="background_job", entity_id=job_id, correlation={"run_id": run_id},
+        )
+        await session.commit()
+
+    _, token = await _client_credential(engine, scopes=["audit.read"])
+    _, ordinary = await _client_credential(engine, scopes=["research.read"])
+    app = create_app()
+    app.state.session_maker = sessions
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        jobs_query = {"topic_id": topic_id, "request_source": "web"}
+        hidden = await client.get("/api/jobs", params=jobs_query)
+        assert hidden.json() == []
+        archived = await client.get("/api/jobs", params={**jobs_query, "archived": "only"})
+        assert archived.status_code == 200, archived.text
+        assert archived.headers["X-Total-Count"] == "1"
+        assert [item["job_id"] for item in archived.json()] == [job_id]
+        links = await client.get(f"/api/jobs/{job_id}/research-links")
+        assert links.json() == {"topic_ids": [topic_id], "run_ids": [run_id]}
+
+        audit_url = "/api/research/audit"
+        assert (await client.get(audit_url)).status_code == 401
+        denied = await client.get(audit_url + "/coverage", headers={"Authorization": f"Bearer {ordinary}"})
+        assert denied.status_code == 403
+        headers = {"Authorization": f"Bearer {token}"}
+        filters = {"job_id": job_id, "run_id": run_id}
+        audit = await client.get(audit_url, params=filters, headers=headers)
+        assert audit.status_code == 200, audit.text
+        assert audit.headers["Cache-Control"] == "no-store"
+        assert [item["audit_id"] for item in audit.json()["items"]] == [audit_id]
+        outside = await client.get(
+            audit_url, params={**filters, "before": occurred_at.isoformat()}, headers=headers,
+        )
+        assert outside.json()["items"] == []
 
 
 async def test_client_events_disabled_by_default(

@@ -73,11 +73,15 @@ async def audit_query(
     client_id: str | None = None,
     source: str | None = None,
     topic_id: str | None = None,
+    entry_id: str | None = None,
     entity_id: str | None = None,
+    job_id: str | None = None,
+    run_id: str | None = None,
     operation: str | None = None,
     outcome: str | None = None,
     from_: str | None = None,
     to: str | None = None,
+    before: str | None = None,
     limit: int = 100,
 ) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
@@ -93,6 +97,7 @@ async def audit_query(
             )
         since = _parse_time(from_, name="from")
         until = _parse_time(to, name="to")
+        end = _parse_time(before, name="before")
         async with app.session_maker() as session:
             repo = ResearchAuditRepository(session)
             if audit_id is not None:
@@ -105,11 +110,15 @@ async def audit_query(
                 client_id=client_id,
                 source=source,
                 topic_id=topic_id,
+                entry_id=entry_id,
                 entity_id=entity_id,
+                job_id=job_id,
+                run_id=run_id,
                 operation=operation,
                 outcome=outcome,
                 since=since,
                 until=until,
+                before=end,
                 limit=limit,
             )
             page = rows[:limit]
@@ -123,11 +132,15 @@ async def audit_query(
                     "client_id": client_id,
                     "source": source,
                     "topic_id": topic_id,
+                    "entry_id": entry_id,
                     "entity_id": entity_id,
+                    "job_id": job_id,
+                    "run_id": run_id,
                     "operation": operation,
                     "outcome": outcome,
                     "from": from_,
                     "to": to,
+                    "before": before,
                 },
                 "coverage_note": (
                     "迁移/接入之前的写操作没有审计行;空结果表示「此前无审计记录」,"
@@ -144,11 +157,15 @@ async def audit_query(
             "client_id": client_id,
             "source": source,
             "topic_id": topic_id,
+            "entry_id": entry_id,
             "entity_id": entity_id,
+            "job_id": job_id,
+            "run_id": run_id,
             "operation": operation,
             "outcome": outcome,
             "from": from_,
             "to": to,
+            "before": before,
             "limit": limit,
         },
         handler=_do,
@@ -160,7 +177,8 @@ def register(mcp: MCPServer) -> None:
         name="finboard_audit_query",
         description=(
             "研究操作审计只读查询(scope audit.read)。给 audit_id 读单条;否则按 "
-            "actor/client_id/source/topic_id/entity_id/operation/outcome/from/to 过滤,"
+            "actor/client_id/source/topic_id/entry_id/entity_id/job_id/run_id/"
+            "operation/outcome/from/to/before 过滤,"
             "limit≤200,只返回脱敏摘要与 sha256 digest。迁移/接入前无记录,空结果"
             "不代表没有操作;served 事实与 client_declared 并列展示。"
         ),
@@ -171,11 +189,15 @@ def register(mcp: MCPServer) -> None:
         client_id: str | None = None,
         source: str | None = None,
         topic_id: str | None = None,
+        entry_id: str | None = None,
         entity_id: str | None = None,
+        job_id: str | None = None,
+        run_id: str | None = None,
         operation: str | None = None,
         outcome: str | None = None,
         from_: str | None = None,
         to: str | None = None,
+        before: str | None = None,
         limit: int = 100,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
@@ -186,11 +208,15 @@ def register(mcp: MCPServer) -> None:
             client_id=client_id,
             source=source,
             topic_id=topic_id,
+            entry_id=entry_id,
             entity_id=entity_id,
+            job_id=job_id,
+            run_id=run_id,
             operation=operation,
             outcome=outcome,
             from_=from_,
             to=to,
+            before=before,
             limit=limit,
         )
 

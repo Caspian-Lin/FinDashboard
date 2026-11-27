@@ -118,10 +118,13 @@ class ResearchAuditRepository:
         topic_id: str | None = None,
         entry_id: str | None = None,
         entity_id: str | None = None,
+        job_id: str | None = None,
+        run_id: str | None = None,
         operation: str | None = None,
         outcome: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        before: datetime | None = None,
         cursor: tuple[datetime, int] | None = None,
         limit: int = 100,
     ) -> list[ResearchAuditEventModel]:
@@ -148,6 +151,18 @@ class ResearchAuditRepository:
             stmt = stmt.where(ResearchAuditEventModel.entry_id == entry_id)
         if entity_id:
             stmt = stmt.where(ResearchAuditEventModel.entity_id == entity_id)
+        if job_id:
+            stmt = stmt.where(or_(
+                ResearchAuditEventModel.correlation["job_id"].as_string() == job_id,
+                (ResearchAuditEventModel.entity_type == "background_job")
+                & (ResearchAuditEventModel.entity_id == job_id),
+            ))
+        if run_id:
+            stmt = stmt.where(or_(
+                ResearchAuditEventModel.correlation["run_id"].as_string() == run_id,
+                (ResearchAuditEventModel.entity_type == "research_run")
+                & (ResearchAuditEventModel.entity_id == run_id),
+            ))
         if operation:
             stmt = stmt.where(ResearchAuditEventModel.operation == operation)
         if outcome:
@@ -156,6 +171,8 @@ class ResearchAuditRepository:
             stmt = stmt.where(ResearchAuditEventModel.occurred_at >= since)
         if until is not None:
             stmt = stmt.where(ResearchAuditEventModel.occurred_at <= until)
+        if before is not None:
+            stmt = stmt.where(ResearchAuditEventModel.occurred_at < before)
         if cursor is not None:
             occurred_at, row_id = cursor
             stmt = stmt.where(

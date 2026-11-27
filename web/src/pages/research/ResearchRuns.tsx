@@ -653,6 +653,9 @@ export default function ResearchRuns() {
                         <span className="font-mono">
                           {detail.strategy_id}@{tl(strategyVersionLabel(detail))}
                         </span>
+                        <Link to={`/research/audit?run=${encodeURIComponent(selectedId)}`} className="text-primary underline">
+                          {tl({ zh: "研究审计", en: "Research audit" })}
+                        </Link>
                       </div>
                     )}
                   </div>

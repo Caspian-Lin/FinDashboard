@@ -100,10 +100,17 @@ def create_app() -> FastAPI:
             identity = await resolve_identity(token) if scheme.lower() == "bearer" and token else None
             if identity is None:
                 return JSONResponse(
-                    {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"},
+                    {"error": "unauthorized"}, status_code=401,
+                    headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"},
                 )
             if "audit.read" not in identity.scopes:
-                return JSONResponse({"error": "permission_denied"}, status_code=403)
+                return JSONResponse(
+                    {"error": "permission_denied"}, status_code=403,
+                    headers={"Cache-Control": "no-store"},
+                )
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         return await call_next(request)
 
     for router in (

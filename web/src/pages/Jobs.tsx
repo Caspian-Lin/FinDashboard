@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Archive,
   ArchiveRestore,
@@ -25,7 +25,12 @@ import {
   JOB_STATUS_OPTIONS,
   jobKindLabel,
 } from "@/lib/jobs";
+import { TaskCenterNav } from "@/components/jobs/TaskCenterNav";
+import { dayBound } from "@/lib/task-center";
+import { workspaceApi } from "@/lib/research-workspace";
+import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
+import { PageContainer } from "@/components/ui/page-container";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -76,13 +81,19 @@ export default function Jobs() {
   const kindFilter = searchParams.get("kind") ?? ALL;
   const archivedFilter = (searchParams.get("archived") ?? "exclude") as JobArchivedFilter;
   const page = Math.max(1, Number.parseInt(searchParams.get("page") ?? "1", 10) || 1);
-  const [expandedId, setExpandedId] = React.useState<string | null>(() => searchParams.get("job"));
+  const directJobId = searchParams.get("job");
+  const [row, setRow] = React.useState<{ context: string | null; id: string | null }>();
+  const expandedId = row && row.context === directJobId ? row.id : directJobId;
+  const topic = searchParams.get("topic") ?? "";
+  const source = searchParams.get("source") ?? ALL;
+  const from = searchParams.get("from") ?? "";
+  const through = searchParams.get("through") ?? "";
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [bulkNotice, setBulkNotice] = React.useState<string | null>(null);
 
-  const setFilter = (key: "status" | "kind" | "archived", value: string) => {
+  const setFilter = (key: string, value: string) => {
     const next = new URLSearchParams(searchParams);
-    if (value === ALL || (key === "archived" && value === "exclude")) next.delete(key);
+    if (!value || value === ALL || (key === "archived" && value === "exclude")) next.delete(key);
     else next.set(key, value);
     // 过滤条件变更时页码重置回第 1 页(issue #373)。
     next.delete("page");
@@ -100,7 +111,7 @@ export default function Jobs() {
   );
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["jobs", statusFilter, kindFilter, archivedFilter, page],
+    queryKey: ["jobs", statusFilter, kindFilter, archivedFilter, topic, source, from, through, page],
     queryFn: () =>
       api.listJobs({
         status: statusFilter === ALL ? undefined : [statusFilter as JobStatus],
@@ -108,6 +119,10 @@ export default function Jobs() {
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
         archived: archivedFilter,
+        topic_id: topic.trim() || undefined,
+        request_source: source === ALL ? undefined : source,
+        created_from: dayBound(from),
+        created_before: dayBound(through, true),
       }),
     // 轮询只在还有非终态任务时进行;全部终态后自动停止,避免静态页面持续请求。
     refetchInterval: (query) => {
@@ -176,6 +191,14 @@ export default function Jobs() {
 
   const jobs = data?.items ?? [];
   const total = data?.total ?? 0;
+  const queryTopics = useQuery({ queryKey: ["job-filter-topics"], queryFn: () => workspaceApi.topics() });
+  const showDirect = !!directJobId && !isLoading && !jobs.some((job) => job.job_id === directJobId);
+  const directJob = useQuery({
+    queryKey: ["job", directJobId],
+    queryFn: () => api.getJob(directJobId ?? ""),
+    enabled: showDirect,
+    refetchInterval: (query) => query.state.data && isJobRunning(query.state.data) ? POLL_MS : false,
+  });
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   // 页码越界(过滤/归档后总页数缩水)自动回退到最后一页。
   React.useEffect(() => {
@@ -185,7 +208,7 @@ export default function Jobs() {
   const bulkTargetCount = bulkData?.total ?? 0;
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-6">
+    <PageContainer>
       <PageHeader
         title={t("jobs.title")}
         description={t("jobs.description")}
@@ -218,6 +241,7 @@ export default function Jobs() {
         }
       />
 
+      <TaskCenterNav />
       <div className="flex flex-wrap items-end gap-4">
         <div className="space-y-1.5">
           <div className="flex items-center gap-1">
@@ -275,6 +299,31 @@ export default function Jobs() {
             </SelectContent>
           </Select>
         </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="jobs-topic">{t("taskCenter.topic")}</Label>
+          <Input id="jobs-topic" list="job-topic-options" value={topic} onChange={(e) => setFilter("topic", e.target.value)} className="h-11 w-48 sm:h-9" />
+          <datalist id="job-topic-options">
+            {queryTopics.data?.items.map((item) => <option key={item.topic_id} value={item.topic_id}>{item.title}</option>)}
+          </datalist>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="jobs-source">{t("taskCenter.requestSource")}</Label>
+          <Select value={source} onValueChange={(value) => setFilter("source", value)}>
+            <SelectTrigger id="jobs-source" className="h-11 w-40 sm:h-9"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL}>{t("taskCenter.allSources")}</SelectItem>
+              {["web", "mcp", "worker", "other"].map((key) => <SelectItem key={key} value={key}>{t(`taskCenter.${key}`)}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="jobs-from">{t("taskCenter.from")}</Label>
+          <Input type="date" id="jobs-from" className="h-11 sm:h-9" value={from} onChange={(e) => setFilter("from", e.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="jobs-through">{t("taskCenter.through")}</Label>
+          <Input type="date" id="jobs-through" className="h-11 sm:h-9" min={from || undefined} value={through} onChange={(e) => setFilter("through", e.target.value)} />
+        </div>
         <div className="text-sm text-muted-foreground">
           {t("jobs.totalCount", { count: total })}{activeCount > 0 ? t("jobs.activeCount", { count: activeCount }) : ""}
         </div>
@@ -291,6 +340,18 @@ export default function Jobs() {
         </Alert>
       )}
 
+      {showDirect && (
+        <section className="space-y-3 rounded-lg border border-border bg-card p-4" aria-label={t("taskCenter.linkedJob")}>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-semibold">{t("taskCenter.linkedJob")}</h2>
+            <code className="text-xs">{directJobId}</code>
+            {directJob.data && <StatusBadge status={directJob.data.status} />}
+          </div>
+          {directJob.isLoading && <LoadingState rows={2} />}
+          {directJob.isError && <ErrorState message={directJob.error.message} onRetry={() => directJob.refetch()} />}
+          {directJob.data && <JobDetail job={directJob.data} />}
+        </section>
+      )}
       {isLoading ? (
         <LoadingState rows={6} />
       ) : isError ? (
@@ -329,7 +390,7 @@ export default function Jobs() {
                     job={job}
                     expanded={expandedId === job.job_id}
                     onToggleExpand={() =>
-                      setExpandedId((prev) => (prev === job.job_id ? null : job.job_id))
+                      setRow({ context: directJobId, id: expandedId === job.job_id ? null : job.job_id })
                     }
                     onCancel={() => cancelMutation.mutate(job.job_id)}
                     cancelling={cancelMutation.isPending && cancelMutation.variables === job.job_id}
@@ -375,7 +436,7 @@ export default function Jobs() {
           </nav>
         </>
       )}
-    </div>
+    </PageContainer>
   );
 }
 
@@ -405,6 +466,7 @@ function JobRow({
   const { t, tl, lang } = useT();
   const active = isJobRunning(job);
   const archived = job.archived_at != null;
+  const leaseExpired = active && job.lease_until != null && Date.parse(job.lease_until) < Date.now();
   return (
     <>
       <TableRow data-state={expanded ? "selected" : undefined} className={archived ? "opacity-60" : undefined}>
@@ -431,6 +493,8 @@ function JobRow({
               </span>
             )}
           </div>
+          {leaseExpired && <span className="text-xs text-destructive">{t("taskCenter.leaseExpiredShort")}</span>}
+          {job.error_code && <span className="block break-words text-xs text-destructive">{job.error_code}</span>}
         </TableCell>
         {/* 进度列(issue #442):条 + done/total·百分比 + 阶段/时长,ProgressLine 收口。 */}
         <TableCell className="min-w-40">
@@ -503,11 +567,19 @@ function JobDetail({ job }: { job: JobOut }) {
     refetchInterval: isJobRunning(job) ? POLL_MS : false,
   });
   const runStatus = live?.run_status ?? job.run_status ?? null;
+  const lease = (live ?? job).lease_until;
+  const leaseExpired = isJobRunning(job) && lease != null && Date.parse(lease) < Date.now();
+  const evidence = useQuery({
+    queryKey: ["job-research-links", job.job_id],
+    queryFn: () => api.getJobResearchLinks(job.job_id),
+    refetchInterval: isJobRunning(job) ? POLL_MS : false,
+  });
   const mismatched =
     runStatus != null && RUN_STUCK_STATUSES.has(runStatus) && isJobRunning(job);
   const rows: [string, string][] = [
     [t("jobs.queue"), job.queue],
     [t("jobs.priority"), String(job.priority)],
+    [t("jobs.attempts"), `${job.attempt}/${job.max_attempts}`],
     ["Worker", job.worker_id ?? "—"],
     [t("jobs.idempotencyKey"), job.idempotency_key],
     ...(isResearchRun
@@ -524,6 +596,13 @@ function JobDetail({ job }: { job: JobOut }) {
   ];
   return (
     <div className="space-y-3">
+      {leaseExpired && <Alert variant="destructive"><AlertDescription>{t("taskCenter.leaseExpired")}</AlertDescription></Alert>}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+        {evidence.data?.topic_ids.map((id) => <Link className="text-primary underline" key={id} to={`/research/topics?topic=${encodeURIComponent(id)}`}>{t("taskCenter.topic")} {id}</Link>)}
+        {evidence.data?.run_ids.map((id) => <Link className="text-primary underline" key={id} to={`/research/runs?run=${encodeURIComponent(id)}`}>{t("taskCenter.run")} {id}</Link>)}
+        <Link className="text-primary underline" to={`/research/audit?job=${encodeURIComponent(job.job_id)}`}>{t("taskCenter.audit")}</Link>
+        {evidence.isError && <span className="text-muted-foreground">{t("taskCenter.linksUnavailable")}</span>}
+      </div>
       {mismatched && (
         <Alert variant="destructive">
           <AlertDescription>

@@ -113,6 +113,7 @@ from finboard_mcp.tools.workspace import register as register_workspace_tools
 _INSTRUCTIONS = """\
 冻结发布包:finboard_data_bundle_export 需 data.write,只导出已登记冻结发布到专用目录。
 finboard_data_bundle_status 查询文件标识/任务的脱敏状态,ZIP 导入由 CLI 或 Web 显式提交。
+任务列表支持课题、声明来源和创建时间筛选;审计读者可按 job_id/run_id 查询关联事件。
 
 FinBoard 研究 MCP —— 量化研究工具集
 

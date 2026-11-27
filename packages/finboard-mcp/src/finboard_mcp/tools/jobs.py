@@ -192,6 +192,10 @@ async def job_list(
     queue: list[str] | None = None,
     limit: int = 100,
     archived: str = "exclude",
+    topic_id: str | None = None,
+    request_source: str | None = None,
+    created_from: datetime | None = None,
+    created_before: datetime | None = None,
 ) -> ToolEnvelope:
     async def _do() -> list[dict[str, Any]]:
         valid = {item.value for item in BackgroundJobStatus}
@@ -202,6 +206,13 @@ async def job_list(
                 "invalid_argument",
                 f"未知归档过滤值: {archived}(合法 {sorted(ARCHIVE_FILTER_VALUES)})",
             )
+        for value in (created_from, created_before):
+            if value is not None and value.tzinfo is None:
+                raise McpToolError("invalid_argument", "时间必须带时区")
+        if created_from is not None and created_before is not None and created_before <= created_from:
+            raise McpToolError("invalid_argument", "结束时间必须晚于开始时间")
+        if request_source not in {None, "web", "mcp", "worker", "other"}:
+            raise McpToolError("invalid_argument", "未知声明来源")
         safe_limit = max(1, min(500, limit))
         async with app.session_maker() as session:
             rows = await BackgroundJobRepository(session).list_recent(
@@ -210,6 +221,10 @@ async def job_list(
                 queues=queue,
                 limit=safe_limit,
                 archived=archived,
+                topic_id=topic_id,
+                request_source=request_source,
+                created_from=created_from,
+                created_before=created_before,
             )
             return [_job_out(row) for row in rows]
 
@@ -222,6 +237,10 @@ async def job_list(
             "queue": queue,
             "limit": limit,
             "archived": archived,
+            "topic_id": topic_id,
+            "request_source": request_source,
+            "created_from": created_from.isoformat() if created_from else None,
+            "created_before": created_before.isoformat() if created_before else None,
         },
         handler=_do,
     )
@@ -630,6 +649,7 @@ def register(mcp: MCPServer) -> None:
         name="finboard_job_list",
         description=(
             "列出后台任务(最近优先,可选按 kind/status/queue 过滤,默认 100 条)。"
+            "支持 topic_id/request_source/created_from/created_before。来源取请求者标签。"
             "archived=exclude(默认)只看未归档;only 只看已归档;all 不区分"
             "(issue #221:归档隐藏不删除,单查 finboard_job_get 始终可达)。"
             "返回 JobOut 列表(job_id/kind/queue/status/priority/payload/"
@@ -645,6 +665,10 @@ def register(mcp: MCPServer) -> None:
         queue: list[str] | None = None,
         limit: int = 100,
         archived: str = "exclude",
+        topic_id: str | None = None,
+        request_source: str | None = None,
+        created_from: datetime | None = None,
+        created_before: datetime | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await job_list(
@@ -654,6 +678,10 @@ def register(mcp: MCPServer) -> None:
             queue=queue,
             limit=limit,
             archived=archived,
+            topic_id=topic_id,
+            request_source=request_source,
+            created_from=created_from,
+            created_before=created_before,
         )
 
     @mcp.tool(

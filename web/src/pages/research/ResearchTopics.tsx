@@ -1945,7 +1945,15 @@ export default function ResearchTopics() {
                   </form>
                 )}
                 <section>
-                  <h3 className="mb-3 font-semibold">证据与轮次时间线</h3>
+                  <div className="mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                    <h3 className="font-semibold">证据与轮次时间线</h3>
+                    {topicId && (
+                      <>
+                        <Link className="text-sm text-primary underline" to={`/jobs?topic=${encodeURIComponent(topicId)}`}>查看课题任务</Link>
+                        <Link className="text-sm text-primary underline" to={`/research/audit?topic=${encodeURIComponent(topicId)}`}>查看课题审计</Link>
+                      </>
+                    )}
+                  </div>
                   {entries.isLoading && <LoadingState />}
                   {entries.isError && (
                     <ErrorState message={String(entries.error)} onRetry={() => entries.refetch()} />
@@ -1954,6 +1962,11 @@ export default function ResearchTopics() {
                     <article key={e.entry_id} className="space-y-3 border-t border-border py-4">
                       <p className="text-xs text-muted-foreground">
                         <ResearchTimestamp value={e.created_at} /> · {e.created_by} · {e.entry_id}
+                        {topicId && (
+                          <Link className="ms-2 text-primary underline" to={`/research/audit?topic=${encodeURIComponent(topicId)}&entry=${encodeURIComponent(e.entry_id)}`}>
+                            操作回执
+                          </Link>
+                        )}
                       </p>
                       {e.entry_type === "lifecycle" ? (
                         <>

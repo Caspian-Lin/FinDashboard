@@ -429,6 +429,10 @@ export const api = {
     limit?: number;
     offset?: number;
     archived?: JobArchivedFilter;
+    topic_id?: string;
+    request_source?: string;
+    created_from?: string;
+    created_before?: string;
   }) => {
     const q = new URLSearchParams();
     params?.kind?.forEach((k) => q.append("kind", k));
@@ -437,6 +441,10 @@ export const api = {
     if (params?.limit) q.set("limit", String(params.limit));
     if (params?.offset) q.set("offset", String(params.offset));
     if (params?.archived) q.set("archived", params.archived);
+    if (params?.topic_id) q.set("topic_id", params.topic_id);
+    if (params?.request_source) q.set("request_source", params.request_source);
+    if (params?.created_from) q.set("created_from", params.created_from);
+    if (params?.created_before) q.set("created_before", params.created_before);
     const resp = await fetch(`${BASE}/jobs${q.toString() ? "?" + q : ""}`, {
       headers: { "Content-Type": "application/json" },
     });
@@ -452,6 +460,8 @@ export const api = {
     const total = Number.parseInt(resp.headers.get("x-total-count") ?? "0", 10);
     return { items, total: Number.isNaN(total) ? items.length : total };
   },
+  getJobResearchLinks: (jobId: string) =>
+    fetchJSON<{ topic_ids: string[]; run_ids: string[] }>(`/jobs/${encodeURIComponent(jobId)}/research-links`),
   // ---- 任务诊断重放(火焰图,issue #373 服务化;CLI 见 #383) ----
   // 能力表:放行 kind → 重放副作用说明 / 拒绝 kind → 原因(静态,可长缓存)。
   flamegraphMeta: () =>
