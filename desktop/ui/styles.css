@@ -13,7 +13,7 @@
   --service-text: oklch(25% 0.044 61);
   --service-muted: oklch(37% 0.060 63);
   --service-field: oklch(92% 0.053 83);
-  --service-border: oklch(60% 0.089 72);
+  --service-border: oklch(54% 0.089 72);
   --workbench: oklch(33% 0.053 153);
   --workbench-text: oklch(94% 0.029 145);
   --workbench-muted: oklch(83% 0.045 147);
@@ -448,7 +448,7 @@ summary { cursor: pointer; font-weight: 650; }
 @media (max-width: 520px) {
   body { grid-template-columns: minmax(0, 1fr); }
   .rail {
-    z-index: 1;
+    position: static;
     flex-direction: row;
     justify-content: space-between;
     height: auto;
@@ -458,12 +458,11 @@ summary { cursor: pointer; font-weight: 650; }
   .rail-links { display: flex; justify-content: flex-end; gap: .3rem; }
   .rail-links a { min-width: 3.2rem; min-height: 2.8rem; padding: .35rem .3rem; }
   .brand-mark { inline-size: 2.7rem; block-size: 2.7rem; padding-block-end: .65rem; }
-  main { padding: .9rem 1rem 2rem; scroll-margin-block-start: 4rem; }
+  main { padding: .9rem 1rem 2rem; }
   h1 { margin-block-end: 1.15rem; font-size: 2.05rem; }
   .dashboard { grid-template-columns: minmax(0, 1fr); gap: .75rem; }
   .service, .workbench, .sample, .codex { grid-column: 1 / -1; }
   .command { grid-template-columns: minmax(0, 1fr); }
-  .diagnostics, .maintenance { scroll-margin-block-start: 4rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

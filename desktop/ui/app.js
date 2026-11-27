@@ -126,19 +126,21 @@ async function perform(operation) {
     ui['result-meta'].textContent = `退出码 ${result.exit_code} · ${result.elapsed_seconds.toFixed(1)} s`;
 
     if (operation.kind === 'status') {
-      if (result.status) renderStatus(result.status);
-      else if (result.exit_code) setStatusUnknown();
+      if (result.exit_code === 0 && result.status) renderStatus(result.status);
+      else setStatusUnknown();
     } else {
       try {
         const refreshed = await run({ kind: 'status' }, false);
-        if (refreshed.status) renderStatus(refreshed.status);
+        if (refreshed.exit_code === 0 && refreshed.status) renderStatus(refreshed.status);
         else setStatusUnknown();
       } catch {
         setStatusUnknown();
       }
     }
 
-    if (result.exit_code === 0) {
+    if (result.exit_code === 0 && operation.kind === 'status' && !result.status) {
+      setResult('安装器没有返回可识别的状态，请刷新后重试。', true);
+    } else if (result.exit_code === 0) {
       setResult(done[operation.kind]);
       if (operation.kind.startsWith('uninstall_')) closePurge();
     } else {
