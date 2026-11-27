@@ -1042,6 +1042,7 @@ export interface ResearchDocSummary {
 
 export interface ResearchDocDetail extends ResearchDocSummary {
   content: string;
+  source_revision?: string | null;
 }
 
 export const researchDocsApi = {

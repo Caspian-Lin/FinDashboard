@@ -232,10 +232,16 @@ export default function ResearchDocs() {
                 <h2 className="break-words text-base font-semibold text-foreground">{detailQuery.data.title}</h2>
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <span className="break-all font-mono">{detailQuery.data.path}</span>
-                  <a className="text-primary underline" target="_blank" rel="noreferrer"
-                    href={`https://github.com/Caspian-Lin/FinDashboard/commits/dev/docs/research/${detailQuery.data.path.split("/").map(encodeURIComponent).join("/")}`}>
-                    {tl({ zh: "查看仓库版本历史", en: "View repository history" })}
-                  </a>
+                  {detailQuery.data.source_revision ? (
+                    <a className="text-primary underline" target="_blank" rel="noreferrer"
+                      href={`https://github.com/Caspian-Lin/FinDashboard/commits/${detailQuery.data.source_revision}/docs/research/${detailQuery.data.path.split("/").map(encodeURIComponent).join("/")}`}>
+                      {tl({ zh: "查看仓库版本历史", en: "View repository history" })}
+                    </a>
+                  ) : (
+                    <a className="text-primary underline" href="#document-source">
+                      {tl({ zh: "查看当前文档源文本", en: "View current document source" })}
+                    </a>
+                  )}
                 </div>
               </div>
               <div className="px-5 py-4">
@@ -245,6 +251,14 @@ export default function ResearchDocs() {
                 >
                   {detailQuery.data.content}
                 </ReactMarkdown>
+                {!detailQuery.data.source_revision && (
+                  <details id="document-source" className="mt-6 rounded-md border p-3">
+                    <summary className="cursor-pointer text-sm font-medium">
+                      {tl({ zh: "当前文档源文本", en: "Current document source" })}
+                    </summary>
+                    <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs">{detailQuery.data.content}</pre>
+                  </details>
+                )}
               </div>
             </div>
           )}
