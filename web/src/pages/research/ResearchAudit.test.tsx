@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -8,13 +8,15 @@ import ResearchAudit from "./ResearchAudit";
 afterEach(() => vi.unstubAllGlobals());
 
 function renderPage() {
+  const client = new QueryClient();
   render(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={["/research/audit?job=BJ-example"]}>
         <ResearchAudit />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return client;
 }
 
 async function signIn() {
@@ -66,4 +68,26 @@ it("审计凭据权限不足只显示拒绝反馈", async () => {
   await signIn();
   expect(await screen.findByText("凭据无效或缺少 audit.read 权限。")).toBeVisible();
   expect(fetchAudit).toHaveBeenCalledTimes(1);
+});
+
+it("服务端撤销后隐藏已加载回执并停止带凭据查询", async () => {
+  let revoked = false;
+  const fetchAudit = vi.fn(async (path: string) => {
+    if (revoked) return new Response(null, { status: 403 });
+    return path.endsWith("/coverage")
+      ? Response.json({ gaps: [], retention_days: 365 })
+      : Response.json({
+        items: [{ audit_id: "RA-old", operation: "seen receipt", correlation: {}, params_summary: {} }],
+        next_cursor: null,
+      });
+  });
+  vi.stubGlobal("fetch", fetchAudit);
+  const client = renderPage();
+  await signIn();
+  expect(await screen.findByText("seen receipt")).toBeVisible();
+  revoked = true;
+  await act(() => client.refetchQueries({ queryKey: ["research-audit"], type: "active" }));
+  expect(await screen.findByText("凭据无效或缺少 audit.read 权限。")).toBeVisible();
+  expect(screen.queryByText("seen receipt")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "清除凭据" })).not.toBeInTheDocument();
 });

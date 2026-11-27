@@ -164,8 +164,17 @@ export default function ResearchAudit() {
     setSearchParams(params, { replace: true });
   };
   const loadError = coverage.error ?? events.error;
-  const denied = loadError instanceof AuditError && [401, 403].includes(loadError.status);
+  const denied = [coverage.error, events.error].some(
+    (error) => error instanceof AuditError && [401, 403].includes(error.status),
+  );
   const authorized = coverage.isSuccess && !denied;
+  const [accessDenied, setAccessDenied] = React.useState(false);
+  React.useEffect(() => {
+    if (!denied) return;
+    setAccessDenied(true);
+    setCredential((current) => ({ token: "", session: current.session + 1 }));
+    setDraft("");
+  }, [denied]);
   const activeRefs = idFields.map(([key]) => searchParams.get(key)).filter(Boolean);
 
   return (
@@ -180,6 +189,7 @@ export default function ResearchAudit() {
               event.preventDefault();
               if (!draft.trim()) return;
               setCredential({ token: draft.trim(), session: session + 1 });
+              setAccessDenied(false);
               setDraft("");
               setPaging({ filter, stack: [null] });
             }}
@@ -221,7 +231,7 @@ export default function ResearchAudit() {
           </div>
         ))}
       </div>
-      {coverage.data && (
+      {authorized && coverage.data && (
         <section className="space-y-2 rounded-lg border border-border bg-card p-4 text-sm">
           <h2 className="font-semibold">{t("taskCenter.coverage")}</h2>
           <dl className="flex flex-wrap gap-x-6 gap-y-1">
@@ -234,13 +244,13 @@ export default function ResearchAudit() {
           </ul>
         </section>
       )}
-      {denied && <Alert variant="destructive"><AlertDescription>{t("taskCenter.deniedCredential")}</AlertDescription></Alert>}
+      {(denied || accessDenied) && <Alert variant="destructive"><AlertDescription>{t("taskCenter.deniedCredential")}</AlertDescription></Alert>}
       {loadError && !denied && <ErrorState message={t("taskCenter.auditError")} onRetry={() => coverage.isError ? coverage.refetch() : events.refetch()} />}
       {(coverage.isLoading || events.isLoading) && <LoadingState rows={4} />}
-      {events.data && events.data.items.length === 0 &&
+      {authorized && events.data && events.data.items.length === 0 &&
         <EmptyState icon={<ClipboardList className="h-8 w-8" />} title={t("taskCenter.noRecords")} description={t("taskCenter.emptyAudit")} />
       }
-      {events.data && events.data.items.length > 0 && (
+      {authorized && events.data && events.data.items.length > 0 && (
         <>
           <ul className="divide-y divide-border rounded-lg border border-border bg-card">
             {events.data.items.map((event) => <EventRow key={event.audit_id} event={event} />)}
