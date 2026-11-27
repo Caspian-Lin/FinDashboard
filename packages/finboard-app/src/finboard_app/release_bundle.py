@@ -25,6 +25,7 @@ from finboard_data.release_bundle import (
     BundleCalendarDay,
     ReleaseBundle,
     ReleaseBundleError,
+    bundle_calendar_exchanges,
     export_release_bundle,
     inspect_release_bundle,
     unpack_release_bundle,
@@ -110,14 +111,7 @@ async def _complete_file_io[T](func: Callable[[], T]) -> T:
 async def _calendar(
     session: AsyncSession, releases: Sequence[ResearchDatasetRelease],
 ) -> tuple[BundleCalendarDay, ...]:
-    exchanges = {
-        item.exchange.upper()
-        for release in releases
-        for item in release.instruments
-        if item.exchange
-    }
-    if any(item.market.value == "a_share" for r in releases for item in r.instruments):
-        exchanges.update(("SSE", "SZSE"))
+    exchanges = bundle_calendar_exchanges(releases)
     stmt = (
         select(TradeCalModel)
         .where(

@@ -19,7 +19,11 @@ from finboard_app.release_bundle import (
 from finboard_app.research_audit import ResearchAuditEvent, ResearchAuditRecorder
 from finboard_app.research_operation import ResearchOperationContext
 from finboard_backtest.background_jobs.contracts import ExecutorError, JobResult
-from finboard_data.release_bundle import ReleaseBundleError, inspect_release_bundle
+from finboard_data.release_bundle import (
+    ReleaseBundleError,
+    inspect_release_bundle,
+    verify_release_bundle,
+)
 from finboard_data.releases import DatasetReleaseError
 
 if TYPE_CHECKING:
@@ -115,7 +119,7 @@ class ReleaseBundleExecutor:
                 await progress(1, 2, "bundle_export")
                 # 进程若在原子发布包后中断, 复验现有结果即可续接。
                 if path.is_file():
-                    archive = await asyncio.to_thread(inspect_release_bundle, path)
+                    archive = await asyncio.to_thread(verify_release_bundle, path)
                     if [release.release_id for release in archive.releases] != release_ids:
                         raise ReleaseBundleError("bundle_export_identity_mismatch")
                 else:

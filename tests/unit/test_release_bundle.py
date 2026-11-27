@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import zipfile
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -22,6 +22,7 @@ from finboard_data.release_bundle import (
     export_release_bundle,
     inspect_release_bundle,
     unpack_release_bundle,
+    verify_release_bundle,
 )
 from finboard_data.releases import (
     ReleaseDatasetKind,
@@ -129,6 +130,8 @@ async def test_bad_digest_extra_file_and_quota_fail_closed(
     assert not list(target.iterdir())
     assert inspect_release_bundle(corrupted).releases[0].release_id == release.release_id
     with pytest.raises(ReleaseBundleError, match="bundle_file_checksum_mismatch"):
+        verify_release_bundle(corrupted)
+    with pytest.raises(ReleaseBundleError, match="bundle_file_checksum_mismatch"):
         unpack_release_bundle(corrupted, target)
 
     with zipfile.ZipFile(clean, "a") as output:
@@ -142,7 +145,21 @@ async def test_export_rejects_conflict_without_replacing_existing_file(tmp_path:
     source, release, calendar = await _fixture(tmp_path)
     archive = tmp_path / "portable.zip"
     export_release_bundle(archive, source, [release], calendar)
+    assert verify_release_bundle(archive).releases[0].release_checksum == release.release_checksum
     with pytest.raises(FileExistsError):
         export_release_bundle(archive, source, [release], calendar)
     with zipfile.ZipFile(archive) as bundle:
         assert json.loads(bundle.read(BUNDLE_INDEX))["releases"][0]["release_id"] == release.release_id
+
+
+@pytest.mark.asyncio
+async def test_calendar_rejects_unrelated_exchange_or_date(tmp_path: Path) -> None:
+    source, release, days = await _fixture(tmp_path)
+    archive = tmp_path / "foreign-calendar.zip"
+    for foreign in (
+        replace(days[0], exchange="UNKNOWN"),
+        replace(days[-1], cal_date=release.end_date + timedelta(days=1)),
+    ):
+        with pytest.raises(ReleaseBundleError, match="bundle_calendar_outside_release_scope"):
+            export_release_bundle(archive, source, [release], [*days, foreign])
+        assert not archive.exists()

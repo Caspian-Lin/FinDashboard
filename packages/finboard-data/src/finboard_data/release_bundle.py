@@ -216,6 +216,38 @@ def _calendar_from_wire(data: object) -> tuple[BundleCalendarDay, ...]:
     return tuple(days[key] for key in sorted(days))
 
 
+def bundle_calendar_exchanges(releases: Sequence[ResearchDatasetRelease]) -> set[str]:
+    exchanges = {
+        item.exchange.upper()
+        for release in releases
+        for item in release.instruments
+        if item.exchange
+    }
+    if any(item.market.value == "a_share" for release in releases for item in release.instruments):
+        exchanges.update(("SSE", "SZSE"))
+    return exchanges
+
+
+def _validate_calendar(
+    calendar: Sequence[BundleCalendarDay], releases: Sequence[ResearchDatasetRelease],
+) -> None:
+    exchanges = bundle_calendar_exchanges(releases)
+    start = min(release.start_date for release in releases)
+    end = max(release.end_date for release in releases)
+    if any(day.exchange not in exchanges or not start <= day.cal_date <= end for day in calendar):
+        raise ReleaseBundleError("bundle_calendar_outside_release_scope")
+    for release in releases:
+        if release.dataset_kind is not ReleaseDatasetKind.BARS:
+            continue
+        required_exchanges = bundle_calendar_exchanges((release,))
+        if not any(
+            day.is_open and day.exchange in required_exchanges
+            and release.start_date <= day.cal_date <= release.end_date
+            for day in calendar
+        ):
+            raise ReleaseBundleError("bundle_calendar_missing")
+
+
 def _read_small(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
     if archive.getinfo(name).file_size > limit:
         raise ReleaseBundleError("bundle_metadata_too_large")
@@ -269,8 +301,7 @@ def _archive_index(
             expected_files.add(name)
         releases.append(release)
     calendar = _calendar_from_wire(index.get("calendar"))
-    if any(r.dataset_kind is ReleaseDatasetKind.BARS for r in releases) and not calendar:
-        raise ReleaseBundleError("bundle_calendar_missing")
+    _validate_calendar(calendar, releases)
     if expected_files != set(files):
         raise ReleaseBundleError("bundle_unreferenced_files")
     return ReleaseBundle(tuple(releases), calendar, unpacked, archive_bytes), files
@@ -281,6 +312,23 @@ def inspect_release_bundle(path: Path, *, limit: int = MAX_BUNDLE_BYTES) -> Rele
     try:
         with zipfile.ZipFile(path) as archive:
             bundle, _ = _archive_index(archive, path.stat().st_size, limit)
+    except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
+        raise ReleaseBundleError("bundle_unreadable_archive") from exc
+    return bundle
+
+
+def verify_release_bundle(path: Path, *, limit: int = MAX_BUNDLE_BYTES) -> ReleaseBundle:
+    """验证保存在受控导出目录中的已有归档, 不重复解包落盘。"""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            bundle, files = _archive_index(archive, path.stat().st_size, limit)
+            for name, digest in files.items():
+                actual = hashlib.sha256()
+                with archive.open(name) as source:
+                    while block := source.read(_BLOCK_SIZE):
+                        actual.update(block)
+                if actual.hexdigest() != digest:
+                    raise ReleaseBundleError(f"bundle_file_checksum_mismatch:{name}")
     except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
         raise ReleaseBundleError("bundle_unreadable_archive") from exc
     return bundle

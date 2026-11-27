@@ -51,7 +51,7 @@ async def test_bundle_import_registers_all_indexes_and_keeps_existing_metadata(
     source = tmp_path / "source"
     release, dates = _read_bundle(old_zip, source)
     first = release.instruments[0]
-    days = tuple(BundleCalendarDay("TEST559", day, True, "bundle-fixture") for day in sorted(dates))
+    days = tuple(BundleCalendarDay("SSE", day, True, "bundle-fixture") for day in sorted(dates))
     archive = tmp_path / "release.zip"
     export_release_bundle(archive, source, [release], days)
     target = tmp_path / "receiver"
@@ -162,7 +162,7 @@ async def test_web_preview_then_explicit_import_runs_data_worker(
     release, dates = _read_bundle(old_zip, source)
     export_release_bundle(
         archive, source, [release],
-        [BundleCalendarDay("TEST559", day, True, "fixture") for day in sorted(dates)],
+        [BundleCalendarDay("SSE", day, True, "fixture") for day in sorted(dates)],
     )
     target = tmp_path / "receiver-web"
     monkeypatch.setenv("FINBOARD_DATA_RELEASE_ROOT", str(target))
