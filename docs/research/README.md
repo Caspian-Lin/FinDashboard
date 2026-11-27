@@ -20,6 +20,8 @@ agent、外部研究 Agent(经 MCP 接入,按自身配置只读引用)。
 
 `rounds/_TEMPLATE.md` 是轮次日志模板,新轮次复制改名填写。
 
+[多资产候选策略证据台账](candidate-evidence.md)维护各候选的冻结版本、实际执行证据、待补验证和晋级状态。
+
 ## 更新流程(canonical 文档走 PR)
 
 - **文档是 canonical**:修改本目录一律走 PR(版本化、人类可审)。
