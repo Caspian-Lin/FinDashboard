@@ -45,6 +45,10 @@ Web 默认入口为 `http://127.0.0.1:8176/`，MCP 为同端口的 `/mcp`。端�
 
 让 Agent 用 `FBDEMO01.SH` 至 `FBDEMO08.SH` 和基准 `FBDEMOIDX.SH`，锁定 `synthetic-starter-v1` 发布。先在策略 Studio 保存并发布使用 `momentum` 与 `volatility_20d` 的无代码规格。然后在课题下预览 2024-01-02 至 2024-02-23、每周调仓、有至少一个尾部交易日的数据范围。将预览返回的 `resolution_id` 与 scope 一起提交 `finboard_topic_run_start`，沿用原 `BJ-` 等待，并读取原 `RR-` 的摘要和冻结依据。固定复测规格可查 `scripts/smoke_research_distribution.py`。
 
+### 桌面 Agent 接入
+
+Windows MSI 将 Codex CLI、DSH、OpenCode 的预设与凭据绑定到当前桌面实例。通用 Streamable HTTP 客户端可领取独立的只读配置。每个客户端的切换、撤销和停启验证见桌面指南。 [桌面接入操作](research-desktop.md#agent-接入)
+
 ### 自备数据源
 
 Windows MSI 可在桌面控制台的「Tushare 数据源」保存凭据、重启研究服务并查看接口权限。下列命令适用于在线 ZIP。Web 可查看已配置状态，凭据由桌面控制台或命令行维护。 [桌面操作指南](research-desktop.md#tushare-数据源)

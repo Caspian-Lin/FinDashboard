@@ -79,7 +79,46 @@ function Install-Codex {
     if ($LASTEXITCODE -ne 0) { throw "Codex plugin install failed. Check codex plugin marketplace list." }
 }
 
+function Test-DesktopManagedOpenCode([string]$Path) {
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $owner = "// FinDashboard Desktop $DesktopProject" + [Environment]::NewLine
+    $content = [IO.File]::ReadAllText($Path)
+    if (!$content.StartsWith($owner, [StringComparison]::Ordinal)) { return $false }
+    try { $config = $content.Substring($owner.Length) | ConvertFrom-Json }
+    catch { return $false }
+    if (($config.PSObject.Properties.Name -join ",") -cne "mcp") { return $false }
+    if (($config.mcp.PSObject.Properties.Name -join ",") -ceq "servers") {
+        return (($config.mcp.servers.PSObject.Properties.Name -join ",") -ceq $DesktopProject)
+    }
+    return (($config.mcp.PSObject.Properties.Name -join ",") -ceq $DesktopProject)
+}
+
 function Install-OpenCode {
+    if ($DesktopAction) {
+        $executable = Get-Command opencode.cmd, opencode.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (!$executable) { throw "desktop_client_missing: Install OpenCode and retry its Desktop setup." }
+        $version = (& $executable.Source --version 2>$null | Select-Object -Last 1)
+        if ($LASTEXITCODE -ne 0 -or $version -notmatch '^v?([12])\.') {
+            throw "desktop_opencode_version: Desktop requires a supported OpenCode CLI version."
+        }
+        $generation = $Matches[1]
+        $workspace = Get-DesktopClientWorkspace "opencode"
+        $name = "$DesktopProject"
+        $entry = @{type = "local"; command = @("powershell.exe") + $BridgeArgs}
+        $mcp = if ($generation -ceq "2") { @{servers = @{$name = $entry}} }
+            else { @{$name = $entry} }
+        $path = Join-Path $workspace "opencode.jsonc"
+        $owner = "// FinDashboard Desktop $DesktopProject"
+        Assert-DesktopPath (Join-Path $workspace ".opencode/skills")
+        Assert-DesktopPath $path
+        if ((Test-Path -LiteralPath $path) -and !(Test-DesktopManagedOpenCode $path)) {
+            throw "desktop_opencode_config: Desktop will only replace its own OpenCode workspace configuration."
+        }
+        # 保存项目级接入，避免改写 OpenCode 的全局模型、MCP 或用户项目设置。
+        Write-File $path ($owner + [Environment]::NewLine + (@{mcp = $mcp} | ConvertTo-Json -Depth 8))
+        Install-Skill (Join-Path $workspace ".opencode/skills")
+        return
+    }
     $arguments = @("mcp", "add", "finboard-research", "--global", "--", "powershell.exe") + $BridgeArgs
     $shim = Get-Command opencode.cmd -ErrorAction SilentlyContinue
     if ($shim) { & $shim.Source @arguments } else { & opencode @arguments }
@@ -88,16 +127,43 @@ function Install-OpenCode {
     Install-Skill (Join-Path $config "opencode/skills")
 }
 
-function Install-Dsh {
+function Get-DshProfileRoot {
     $dsh = Join-Path (Resolve-Path "~").Path ".dsh"
     if ($env:DSH_HOME) { $dsh = $env:DSH_HOME }
+    return (Join-Path $dsh "profiles")
+}
+
+function Get-DshProfilePatch([string]$Profile) {
+    if ($Profile -notmatch "^[a-zA-Z0-9_-]{1,64}$") { throw "Invalid DSH profile name." }
+    return (Join-Path (Get-DshProfileRoot) "$Profile/cordis.patch.yml")
+}
+
+function Get-DesktopDshMarker {
+    $name = [regex]::Escape($DesktopProject)
+    return "(?ms)^# BEGIN FINDASHBOARD $name\r?\n.*?^# END FINDASHBOARD $name\r?\n?"
+}
+
+function Remove-DesktopDshPatch([string]$Profile) {
+    if (!$Profile) { return }
+    $path = Get-DshProfilePatch $Profile
+    Assert-DesktopPath $path
+    if (Test-Path -LiteralPath $path) {
+        $old = [IO.File]::ReadAllText($path)
+        $next = [regex]::Replace($old, (Get-DesktopDshMarker), "")
+        if ($next -cne $old) { Write-File $path $next }
+    }
+}
+
+function Install-Dsh {
     $profile = if ($Options["--profile"]) { $Options["--profile"] } else { "desktop" }
-    if ($profile -notmatch "^[a-zA-Z0-9_-]+$") { throw "Invalid DSH profile name." }
-    $profileRoot = Join-Path $dsh "profiles/$profile"
+    $path = Get-DshProfilePatch $profile
+    $profileRoot = Split-Path -Parent $path
     if (!(Test-Path -LiteralPath $profileRoot)) { throw "Open DSH once to create profile '$profile', then run setup again." }
-    $path = Join-Path $profileRoot "cordis.patch.yml"
+    if ($DesktopAction) { Assert-DesktopPath $path }
     $existing = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { "" }
-    $existing = [regex]::Replace($existing, '(?ms)^# BEGIN FINDASHBOARD\r?\n.*?^# END FINDASHBOARD\r?\n?', "")
+    $marker = if ($DesktopAction) { Get-DesktopDshMarker }
+        else { '(?ms)^# BEGIN FINDASHBOARD\r?\n.*?^# END FINDASHBOARD\r?\n?' }
+    $existing = [regex]::Replace($existing, $marker, "")
     $withoutComments = [regex]::Replace($existing, '(?m)^[ \t]*#.*$', "").Trim()
     if ($withoutComments -eq "[]") {
         $existing = [regex]::Replace($existing, '(?m)^[ \t]*\[\][ \t]*\r?$', "")
@@ -109,21 +175,25 @@ function Install-Dsh {
     $cliArgs = ConvertTo-Json -Compress -InputObject @($BridgeArgs + "-PrintToken")
     $auth = ('(function(){return "Bearer "+process.getBuiltinModule("node:child_process").execFileSync("powershell.exe",' + $cliArgs + ',{encoding:"utf8",windowsHide:true}).trim()})()').Replace("'", "''")
     $skillEntry = ""
-    if ($existing -match '(?m)^- id: skill-filesystem\s*$') {
-        $existing = [regex]::Replace($existing, '(?m)(^- id: skill-filesystem\s*\r?\n[ \t]+disabled:)\s*true\b', '$1 false')
-    } else {
-        $skillEntry = @"
+    if (!$DesktopAction) {
+        if ($existing -match '(?m)^- id: skill-filesystem\s*$') {
+            $existing = [regex]::Replace($existing, '(?m)(^- id: skill-filesystem\s*\r?\n[ \t]+disabled:)\s*true\b', '$1 false')
+        } else {
+            $skillEntry = @"
 - id: skill-filesystem
   disabled: false
 "@
+        }
     }
+    $ownership = if ($DesktopAction) { " $DesktopProject" } else { "" }
+    $serverName = if ($DesktopAction) { $DesktopProject } else { "finboard-research" }
     $block = @"
-# BEGIN FINDASHBOARD
+# BEGIN FINDASHBOARD$ownership
 - insert:
-    - id: finboard-research-mcp
+    - id: $serverName-mcp
       name: '@deepseek-ai/dsh-mcp-client'
       config:
-        serverName: finboard-research
+        serverName: $serverName
         transport: streamable-http
         url: $Endpoint/mcp
         headers:
@@ -132,10 +202,11 @@ function Install-Dsh {
         toolCallTimeoutMs: 360000
         failOnStartupError: false
 $skillEntry
-# END FINDASHBOARD
+# END FINDASHBOARD$ownership
 "@
     Write-File $path ($existing.TrimEnd() + [Environment]::NewLine + $block + [Environment]::NewLine)
-    $workspace = Join-Path $Root "workspace"
+    $workspace = if ($DesktopAction) { Get-DesktopClientWorkspace "dsh" } else { Join-Path $Root "workspace" }
+    if ($DesktopAction) { Assert-DesktopPath (Join-Path $workspace ".agents/skills") }
     Install-Skill (Join-Path $workspace ".agents/skills")
     Write-Host "For DSH skills, open this project folder: $workspace"
 }
@@ -161,6 +232,21 @@ function Configure-Client {
     Invoke-ClientChange { Set-ClientCredential }
 }
 
+function Register-ClientCredential([string]$ClientName, [string]$Preset) {
+    $id = "MC-" + (To-Hex (New-RandomBytes 6))
+    $secret = [Convert]::ToBase64String((New-RandomBytes 32)).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+    $token = "fbmc_${id}_$secret"
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { $digest = To-Hex ($hash.ComputeHash($Utf8.GetBytes($token))) }
+    finally { $hash.Dispose() }
+    $registration = @{
+        client_id = $id; token_hash = $digest; token_prefix = $secret.Substring(0, 16)
+        client = $ClientName; preset = $Preset
+    } | ConvertTo-Json -Compress
+    [void](Invoke-Operator "client-register" $registration)
+    return @{client_id = $id; token = $token}
+}
+
 function Set-ClientCredential {
     $path = Join-Path $Root "$Client.json"
     $old = if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } else { $null }
@@ -177,24 +263,19 @@ function Set-ClientCredential {
     if ($old -and $old.preset -eq $preset) {
         try { $valid = Test-Credential (Get-Plaintext $old.sealed) } catch { $valid = $false }
     }
+    $profile = if ($DesktopAction -and $Client -ceq "dsh") { $Options["--profile"] }
+    $oldProfile = if ($old) { $old.profile }
     if (!$valid) {
-        $id = "MC-" + (To-Hex (New-RandomBytes 6))
-        $secret = [Convert]::ToBase64String((New-RandomBytes 32)).TrimEnd("=").Replace("+", "-").Replace("/", "_")
-        $token = "fbmc_${id}_$secret"
-        $hash = [Security.Cryptography.SHA256]::Create()
-        try { $digest = To-Hex ($hash.ComputeHash($Utf8.GetBytes($token))) }
-        finally { $hash.Dispose() }
-        $registration = @{
-            client_id = $id; token_hash = $digest; token_prefix = $secret.Substring(0, 16)
-            client = $Client; preset = $preset
-        } | ConvertTo-Json -Compress
-        [void](Invoke-Operator "client-register" $registration)
+        $registered = Register-ClientCredential $Client $preset
+        $id = $registered.client_id
+        $token = $registered.token
         try {
             if (!(Test-Credential $token)) { throw "MCP initialization failed. Check finboard status and rerun setup." }
             Add-Type -AssemblyName System.Security
             $sealed = [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect(
                 $Utf8.GetBytes($token), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser))
             $credential = [PSCustomObject]@{client_id = $id; preset = $preset; sealed = $sealed}
+            if ($profile) { $credential | Add-Member -NotePropertyName profile -NotePropertyValue $profile }
             if ($old) {
                 $credential | Add-Member -NotePropertyName pending_revoke_id -NotePropertyValue $old.client_id
             }
@@ -209,6 +290,12 @@ function Set-ClientCredential {
             throw $failure
         }
         Complete-ClientRotation $path $credential
+    } elseif ($profile -and $profile -cne $oldProfile) {
+        $old | Add-Member -NotePropertyName profile -NotePropertyValue $profile -Force
+        Write-File $path ($old | ConvertTo-Json -Compress)
+    }
+    if ($profile -and $oldProfile -and $profile -cne $oldProfile) {
+        Remove-DesktopDshPatch $oldProfile
     }
     Write-Host "FinDashboard is ready at $Endpoint. Reopen $Client to use the $preset credential."
 }

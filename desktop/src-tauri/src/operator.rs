@@ -11,25 +11,71 @@ use std::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Preset {
+    #[default]
     Readonly,
     TopicWriter,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Harness {
+    #[default]
+    Codex,
+    Dsh,
+    Opencode,
+}
+
+impl Harness {
+    fn arg(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Dsh => "dsh",
+            Self::Opencode => "opencode",
+        }
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     Status {},
-    Install { port: u16 },
+    Install {
+        port: u16,
+    },
     Stop {},
     Import {},
-    Attach { preset: Preset },
+    Attach {
+        preset: Preset,
+        #[serde(default)]
+        client: Harness,
+        profile: Option<String>,
+    },
+    Detach {
+        client: Harness,
+    },
+    ClientWorkspace {
+        client: Harness,
+        open: bool,
+    },
+    ClientIssue {
+        name: String,
+        #[serde(default)]
+        preset: Preset,
+    },
+    ClientRevoke {
+        name: String,
+    },
     SourceStatus {},
-    SourceConfigure { token: String },
+    SourceConfigure {
+        token: String,
+    },
     UninstallPreserve {},
-    UninstallPurge { confirmation: String },
+    UninstallPurge {
+        confirmation: String,
+    },
 }
 
 pub enum Invocation {
@@ -37,7 +83,11 @@ pub enum Invocation {
     Install(u16),
     Stop,
     Import,
-    Attach(Preset),
+    Attach(Preset, Harness, Option<String>),
+    Detach(Harness),
+    ClientWorkspace(Harness, bool),
+    ClientIssue(String, Preset),
+    ClientRevoke(String),
     SourceStatus,
     SourceConfigure(String),
     UninstallPreserve,
@@ -45,6 +95,25 @@ pub enum Invocation {
 }
 
 const PURGE_CONFIRMATION: &str = "DELETE-THIS-INSTANCE";
+
+fn valid_profile(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_client_name(name: &str) -> bool {
+    name.len() <= 32
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
 
 impl TryFrom<Operation> for Invocation {
     type Error = String;
@@ -56,7 +125,35 @@ impl TryFrom<Operation> for Invocation {
             Operation::Install { .. } => return Err("请输入 1024 至 65535 的端口。".into()),
             Operation::Stop {} => Self::Stop,
             Operation::Import {} => Self::Import,
-            Operation::Attach { preset } => Self::Attach(preset),
+            Operation::Attach {
+                preset,
+                client,
+                profile,
+            } if (client == Harness::Dsh && profile.as_deref().is_some_and(valid_profile))
+                || (client != Harness::Dsh && profile.is_none()) =>
+            {
+                Self::Attach(preset, client, profile)
+            }
+            Operation::Attach { .. } => return Err("请选择已有的 DSH profile。".into()),
+            Operation::Detach { client } => Self::Detach(client),
+            Operation::ClientWorkspace { client, open } if client != Harness::Codex => {
+                Self::ClientWorkspace(client, open)
+            }
+            Operation::ClientWorkspace { .. } => {
+                return Err("请选择 DSH 或 OpenCode 工作区。".into())
+            }
+            Operation::ClientIssue { name, preset } if valid_client_name(&name) => {
+                Self::ClientIssue(name, preset)
+            }
+            Operation::ClientRevoke { name } if valid_client_name(&name) => {
+                Self::ClientRevoke(name)
+            }
+            Operation::ClientIssue { .. } | Operation::ClientRevoke { .. } => {
+                return Err(
+                    "客户端名称使用 1–32 个小写字母、数字、短横线或下划线，以字母或数字开头。"
+                        .into(),
+                )
+            }
             Operation::SourceStatus {} => Self::SourceStatus,
             Operation::SourceConfigure { token }
                 if !token.is_empty()
@@ -89,8 +186,19 @@ impl Invocation {
             Self::Install(_) => &["desktop-install", "--port"],
             Self::Stop => &["desktop-stop"],
             Self::Import => &["desktop-import"],
-            Self::Attach(Preset::Readonly) => &["desktop-attach", "--preset", "readonly"],
-            Self::Attach(Preset::TopicWriter) => &["desktop-attach", "--preset", "topic-writer"],
+            Self::Attach(Preset::Readonly, _, _) => &["desktop-attach", "--preset", "readonly"],
+            Self::Attach(Preset::TopicWriter, _, _) => {
+                &["desktop-attach", "--preset", "topic-writer"]
+            }
+            Self::Detach(_) => &["desktop-detach", "--client"],
+            Self::ClientWorkspace(_, _) => &["desktop-client-workspace", "--client"],
+            Self::ClientIssue(_, Preset::Readonly) => {
+                &["desktop-client-issue", "--preset", "readonly", "--name"]
+            }
+            Self::ClientIssue(_, Preset::TopicWriter) => {
+                &["desktop-client-issue", "--preset", "topic-writer", "--name"]
+            }
+            Self::ClientRevoke(_) => &["desktop-client-revoke", "--name"],
             Self::SourceStatus => &["desktop-source-status"],
             Self::SourceConfigure(_) => &["desktop-source-configure"],
             Self::UninstallPreserve => &["desktop-uninstall", "--mode", "preserve"],
@@ -103,8 +211,26 @@ impl Invocation {
             ],
         };
         let mut args: Vec<_> = words.iter().map(|word| (*word).to_owned()).collect();
-        if let Self::Install(port) = self {
-            args.push(port.to_string());
+        match self {
+            Self::Install(port) => args.push(port.to_string()),
+            Self::Attach(_, client, profile) => {
+                if *client != Harness::Codex {
+                    args.extend(["--client".into(), client.arg().into()]);
+                }
+                if let Some(profile) = profile {
+                    args.extend(["--profile".into(), profile.clone()]);
+                }
+            }
+            Self::Detach(client) => args.push(client.arg().into()),
+            Self::ClientWorkspace(client, open) => {
+                args.extend([
+                    client.arg().into(),
+                    "--mode".into(),
+                    if *open { "open" } else { "location" }.into(),
+                ]);
+            }
+            Self::ClientIssue(name, _) | Self::ClientRevoke(name) => args.push(name.clone()),
+            _ => {}
         }
         args
     }
@@ -132,6 +258,31 @@ pub struct Status {
     pub project: Option<String>,
     #[serde(default)]
     pub volumes: Vec<String>,
+    #[serde(default)]
+    pub clients: Vec<HarnessStatus>,
+    #[serde(default)]
+    pub generic_clients: Vec<GenericStatus>,
+    #[serde(default)]
+    pub dsh_profiles: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct HarnessStatus {
+    pub name: String,
+    pub preset: Option<String>,
+    pub scopes: Vec<String>,
+    pub profile: Option<String>,
+    pub credential_active: Option<bool>,
+    pub pending_revocation: bool,
+    pub repair_required: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GenericStatus {
+    pub name: String,
+    pub preset: String,
+    pub scopes: Vec<String>,
+    pub pending_revocation: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -147,6 +298,26 @@ pub struct OperationResult {
     pub command: String,
     pub status: Option<Status>,
     pub source: Option<SourceDiagnostic>,
+    pub connection: Option<Connection>,
+    pub workspace: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Connection {
+    pub name: String,
+    pub url: String,
+    pub credential: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ConnectionReceipt {
+    connection: Connection,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceReceipt {
+    workspace: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -192,6 +363,8 @@ enum OutputKind {
     Log,
     Status,
     Source,
+    Connection,
+    Workspace,
     Silent,
 }
 
@@ -199,6 +372,8 @@ enum OutputKind {
 struct ParsedOutput {
     status: Option<Status>,
     source: Option<SourceDiagnostic>,
+    connection: Option<Connection>,
+    workspace: Option<String>,
 }
 
 fn safe_line(raw: &str) -> String {
@@ -240,6 +415,18 @@ fn read_output(
         if matches!(kind, OutputKind::Source) {
             if let Ok(diagnostic) = serde_json::from_str(line) {
                 output.source = Some(diagnostic);
+            }
+            continue;
+        }
+        if matches!(kind, OutputKind::Connection) {
+            if let Ok(receipt) = serde_json::from_str::<ConnectionReceipt>(line) {
+                output.connection = Some(receipt.connection);
+            }
+            continue;
+        }
+        if matches!(kind, OutputKind::Workspace) {
+            if let Ok(receipt) = serde_json::from_str::<WorkspaceReceipt>(line) {
+                output.workspace = Some(receipt.workspace);
             }
             continue;
         }
@@ -350,10 +537,14 @@ pub fn execute(
         OutputKind::Source
     } else if parse_status {
         OutputKind::Status
+    } else if matches!(invocation, Invocation::ClientIssue(..)) {
+        OutputKind::Connection
+    } else if matches!(invocation, Invocation::ClientWorkspace(..)) {
+        OutputKind::Workspace
     } else {
         OutputKind::Log
     };
-    let stderr_kind = if parse_source {
+    let stderr_kind = if parse_source || matches!(stdout_kind, OutputKind::Connection) {
         OutputKind::Silent
     } else {
         OutputKind::Log
@@ -381,12 +572,17 @@ pub fn execute(
     if parse_source && output.source.is_none() {
         return Err("无法确认 Tushare 操作结果。请检查服务是否就绪，再检查权限。".into());
     }
+    if matches!(stdout_kind, OutputKind::Connection) && output.connection.is_none() {
+        return Err("未收到接入凭据。请核对本机研究服务并重新签发。".into());
+    }
     Ok(OperationResult {
         exit_code,
         elapsed_seconds: started.elapsed().as_secs_f64(),
         command: equivalent_command(script, &arguments),
         status: output.status,
         source: output.source,
+        connection: output.connection,
+        workspace: output.workspace,
     })
 }
 
@@ -431,6 +627,8 @@ mod tests {
         .is_err());
         let attach = Invocation::try_from(Operation::Attach {
             preset: Preset::TopicWriter,
+            client: Harness::Codex,
+            profile: None,
         })
         .unwrap();
         assert_eq!(
@@ -470,6 +668,40 @@ mod tests {
         let _ = read_output(token.as_bytes(), "stderr", OutputKind::Silent, &|_| {
             panic!("source diagnostics must not return stderr lines")
         });
+    }
+
+    #[test]
+    fn client_scope_commands_accept_only_managed_identifiers() {
+        let issue =
+            serde_json::from_str::<Operation>(r#"{"kind":"client_issue","name":"report-reader"}"#)
+                .unwrap();
+        assert_eq!(
+            Invocation::try_from(issue).unwrap().args(),
+            [
+                "desktop-client-issue",
+                "--preset",
+                "readonly",
+                "--name",
+                "report-reader"
+            ]
+        );
+        for name in ["../outside", "--preset", "", "UPPER", "with spaces"] {
+            assert!(Invocation::try_from(Operation::ClientRevoke { name: name.into() }).is_err());
+        }
+        assert!(Invocation::try_from(Operation::Attach {
+            preset: Preset::Readonly,
+            client: Harness::Dsh,
+            profile: Some("../other-profile".into()),
+        })
+        .is_err());
+        let response = br#"{"connection":{"name":"report-reader","url":"http://127.0.0.1:8376/mcp","credential":"mock","scopes":["research.read"]}}"#;
+        let parsed = read_output(
+            response.as_slice(),
+            "stdout",
+            OutputKind::Connection,
+            &|_| panic!("The one-time connection must not enter progress logs"),
+        );
+        assert_eq!(parsed.connection.unwrap().scopes, ["research.read"]);
     }
 
     #[test]

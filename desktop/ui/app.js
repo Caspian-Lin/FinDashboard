@@ -5,7 +5,11 @@ const labels = {
   install: '正在启动研究服务',
   stop: '正在停止研究服务',
   import: '正在校验并导入合成样例',
-  attach: '正在接入 Codex 并验证凭据',
+  attach: '正在配置客户端并验证凭据',
+  detach: '正在撤销所选客户端的接入',
+  client_workspace: '正在检查本机工作区',
+  client_issue: '正在签发接入配置',
+  client_revoke: '正在撤销接入凭据',
   source_status: '正在检查 Tushare 权限',
   source_configure: '正在检查 Tushare 凭据并应用配置',
   uninstall_preserve: '正在卸载服务并保留数据',
@@ -16,7 +20,9 @@ const done = {
   install: '研究服务已就绪。',
   stop: '研究服务已停止。',
   import: '合成样例已登记。可以打开研究工作台。',
-  attach: 'Codex 接入已验证。请重开 Codex，使新配置生效。',
+  attach: '接入已验证。请重开所选客户端，使新配置生效。',
+  detach: '所选客户端的接入已撤销。',
+  client_revoke: '所选接入凭据已撤销。',
   uninstall_preserve: '服务已卸载，研究数据已保留。可从 Windows「已安装的应用」移除管理程序。',
   uninstall_purge: '本实例已清理。可从 Windows「已安装的应用」移除管理程序。',
 };
@@ -26,6 +32,7 @@ const serviceLabels = {
   wrong_engine: '需要 Linux 容器模式',
 };
 const presets = { readonly: '只读', 'topic-writer': '课题与研究运行' };
+const harnesses = { codex: 'Codex CLI', dsh: 'DeepSeek Harness', opencode: 'OpenCode' };
 const workbenchPreferenceKey = 'finboard-workbench-target';
 const workbenchActions = { in_app: '在应用内打开', browser: '在浏览器中打开' };
 const sourceCapabilities = {
@@ -89,6 +96,67 @@ function renderSourceDiagnostic(diagnostic, saving) {
   ui['source-details'].open = Object.values(checks).some((check) => check !== 'available');
 }
 
+function harnessStatus() {
+  return status?.clients?.find((entry) => entry.name === ui.harness.value);
+}
+
+function renderHarnessStatus() {
+  const entry = harnessStatus();
+  ui.preset.value = entry?.preset ?? 'readonly';
+  const profiles = status?.dsh_profiles ?? [];
+  ui['harness-profile'].replaceChildren(...profiles.map((profile) => {
+    const option = document.createElement('option');
+    option.value = profile;
+    option.textContent = profile;
+    return option;
+  }));
+  ui['harness-profile'].value = profiles.includes(entry?.profile)
+    ? entry.profile : profiles.includes('desktop') ? 'desktop' : profiles[0] ?? '';
+  ui['workspace-address'].hidden = true;
+  const name = harnesses[ui.harness.value];
+  ui['harness-state'].textContent = entry?.pending_revocation
+    ? '先前的凭据待撤销，请重新接入后复查。'
+    : entry?.repair_required || entry?.credential_active === false
+      ? '无法确认现有凭据，可重新接入。'
+      : entry?.preset
+        ? `${name} · ${presets[entry.preset]}${entry.credential_active ? ' · 已验连' : ''}`
+        : `尚未接入 ${name}。`;
+  if (ui.harness.value === 'dsh' && !profiles.length) {
+    ui['harness-state'].textContent = '请在 DeepSeek Harness 创建一个 profile，再刷新状态。';
+  }
+  ui.scopes.textContent = entry?.scopes?.join(' · ') ?? '';
+  ui.scopes.hidden = !entry?.scopes?.length;
+}
+
+function renderGenericClients() {
+  const selected = ui['generic-list'].value;
+  const clients = status?.generic_clients ?? [];
+  const options = clients.map((entry) => {
+    const option = document.createElement('option');
+    option.value = entry.name;
+    option.textContent = `${entry.name} · ${presets[entry.preset]}${entry.pending_revocation ? ' · 待完成撤销' : ''}`;
+    return option;
+  });
+  ui['generic-list'].replaceChildren(...options);
+  if (clients.some((entry) => entry.name === selected)) ui['generic-list'].value = selected;
+  ui['generic-current'].hidden = clients.length === 0;
+}
+
+function clearGenericConnection() {
+  ui['generic-config'].value = '';
+  ui['generic-connection'].hidden = true;
+}
+
+function renderGenericConnection(connection) {
+  ui['generic-config'].value = JSON.stringify({
+    transport: 'streamable-http',
+    url: connection.url,
+    headers: { Authorization: `Bearer ${connection.credential}` },
+  }, null, 2);
+  ui['generic-connection'].hidden = false;
+  ui['generic-state'].textContent = `${connection.name} 已验连。作用域 ${connection.scopes.join(' · ')}。请保存本次配置。`;
+}
+
 function setResult(message, error = false) {
   ui['result-status'].textContent = message;
   ui['result-status'].dataset.error = String(error);
@@ -113,9 +181,23 @@ function reconcile() {
   ui['source-token'].disabled = busy || !running;
   ui['source-save'].disabled = busy || !running || !ui['source-token'].value;
   ui['source-probe'].disabled = busy || !running;
+  const client = harnessStatus();
+  const isDsh = ui.harness.value === 'dsh';
+  ui.harness.disabled = busy;
   ui.preset.disabled = busy || !running;
-  ui.attach.disabled = busy || !running;
-  ui.attach.textContent = !status?.preset ? '接入 Codex' : ui.preset.value === status.preset ? '重新接入' : '切换预设';
+  ui['harness-profile-field'].hidden = !isDsh;
+  ui['harness-profile'].disabled = busy || !running;
+  ui.attach.disabled = busy || !running || (isDsh && !/^[a-zA-Z0-9_-]{1,64}$/.test(ui['harness-profile'].value));
+  ui.attach.textContent = !client?.preset ? '接入并验连' : ui.preset.value === client.preset ? '重新接入' : '切换预设';
+  ui.detach.disabled = busy || !running || !(client?.preset || client?.repair_required);
+  ui['workspace-actions'].hidden = ui.harness.value === 'codex' || !client?.preset;
+  ui['workspace-open'].disabled = busy;
+  ui['workspace-copy'].disabled = busy;
+  ui['generic-name'].disabled = busy || !running;
+  ui['generic-preset'].disabled = busy || !running;
+  ui['generic-issue'].disabled = busy || !running || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(ui['generic-name'].value);
+  ui['generic-list'].disabled = busy;
+  ui['generic-revoke'].disabled = busy || !running || !ui['generic-list'].value;
   for (const operation of ['open-workbench', 'open-workbench-alternate', 'copy-workbench-address']) {
     ui[operation].disabled = busy || !running;
   }
@@ -147,19 +229,14 @@ function renderStatus(next) {
   ui['service-detail'].textContent = next.repair || (next.running
     ? `Docker Desktop 已连接 · 127.0.0.1:${next.port}` : installHint);
   ui.port.value = String(next.port);
-  if (next.preset in presets) ui.preset.value = next.preset;
-  ui['codex-state'].textContent = next.pending_revocation
-    ? '上一次切换仍有旧凭据待撤销。请重新接入所选预设。'
-    : next.credential_active === false
-      ? 'Codex 凭据已失效，请重新接入。'
-      : presets[next.preset] ? `当前预设为「${presets[next.preset]}」。` : '尚未接入 Codex。';
-  ui.scopes.textContent = next.scopes.join(' · ');
-  ui.scopes.hidden = next.scopes.length === 0;
+  renderHarnessStatus();
+  renderGenericClients();
   ui['purge-scope'].textContent = [next.project, ...(next.volumes ?? [])].filter(Boolean).join(' · ');
   reconcile();
 }
 
 function startRecord() {
+  clearGenericConnection();
   ui.log.textContent = '';
   ui.log.hidden = true;
   ui.command.hidden = true;
@@ -189,12 +266,14 @@ async function perform(operation) {
     return;
   }
   busy = true;
+  const genericOperation = operation.kind === 'client_issue' || operation.kind === 'client_revoke';
   startRecord();
   setResult(`${labels[operation.kind]}…`);
   if (operation.kind.startsWith('source_')) {
     ui['source-state'].textContent = `${labels[operation.kind]}…`;
     ui['source-state'].dataset.error = 'false';
   }
+  if (genericOperation) ui['generic-state'].textContent = `${labels[operation.kind]}…`;
   reconcile();
   try {
     const result = await run(operation);
@@ -216,16 +295,36 @@ async function perform(operation) {
       }
     }
 
-    if (result.source) {
+    if (result.connection) {
+      renderGenericConnection(result.connection);
+      setResult('已签发通用 MCP 接入配置。');
+    } else if (result.workspace) {
+      if (operation.open) setResult('已打开本机工作区。');
+      else {
+        try {
+          await navigator.clipboard.writeText(result.workspace);
+          setResult('已复制工作区路径。');
+        } catch {
+          ui['workspace-address'].value = result.workspace;
+          ui['workspace-address'].hidden = false;
+          ui['workspace-address'].focus();
+          ui['workspace-address'].select();
+          setResult('剪贴板不可用。请按 Ctrl+C 复制已选中的路径。', true);
+        }
+      }
+    } else if (result.source) {
       renderSourceDiagnostic(result.source, operation.kind === 'source_configure');
       setResult(ui['source-state'].textContent, ui['source-state'].dataset.error === 'true');
     } else if (result.exit_code === 0 && operation.kind === 'status' && !result.status) {
       setResult('安装器没有返回可识别的状态，请刷新后重试。', true);
     } else if (result.exit_code === 0) {
       setResult(done[operation.kind]);
+      if (operation.kind === 'client_revoke') ui['generic-state'].textContent = done.client_revoke;
       if (operation.kind.startsWith('uninstall_')) closePurge();
     } else {
-      setResult('操作未完成。请查看诊断，处理后可以重试。', true);
+      const message = '操作未完成。请查看诊断，处理后可以重试。';
+      setResult(message, true);
+      if (genericOperation) ui['generic-state'].textContent = message;
     }
   } catch (error) {
     if (operation.kind === 'status') setStatusUnknown();
@@ -234,6 +333,7 @@ async function perform(operation) {
       ui['source-state'].dataset.error = 'true';
       ui['source-details'].hidden = true;
     }
+    if (genericOperation) ui['generic-state'].textContent = String(error);
     setResult(String(error), true);
   } finally {
     busy = false;
@@ -248,8 +348,9 @@ function setStatusUnknown() {
   ui['service-state'].textContent = '未确认';
   ui['service-state'].dataset.tone = 'warning';
   ui['service-detail'].textContent = '请刷新本机状态。';
-  ui['codex-state'].textContent = '尚未确认 Codex 接入。';
+  ui['harness-state'].textContent = '尚未确认客户端状态。请先刷新本机状态。';
   ui.scopes.hidden = true;
+  ui['generic-current'].hidden = true;
 }
 
 function closePurge() {
@@ -270,6 +371,11 @@ function updateNavigation() {
 ui.refresh.addEventListener('click', () => perform({ kind: 'status' }));
 ui.port.addEventListener('input', reconcile);
 ui.preset.addEventListener('change', reconcile);
+ui.harness.addEventListener('change', () => {
+  renderHarnessStatus();
+  reconcile();
+});
+ui['harness-profile'].addEventListener('change', reconcile);
 ui['service-form'].addEventListener('submit', (event) => {
   event.preventDefault();
   perform({ kind: 'install', port: Number(ui.port.value) });
@@ -285,7 +391,41 @@ ui['source-form'].addEventListener('submit', (event) => {
   ui['source-token'].value = '';
   perform({ kind: 'source_configure', token });
 });
-ui.attach.addEventListener('click', () => perform({ kind: 'attach', preset: ui.preset.value }));
+ui.attach.addEventListener('click', () => {
+  const client = ui.harness.value;
+  perform({
+    kind: 'attach', client, preset: ui.preset.value,
+    profile: client === 'dsh' ? ui['harness-profile'].value : null,
+  });
+});
+ui.detach.addEventListener('click', () => perform({ kind: 'detach', client: ui.harness.value }));
+ui['workspace-open'].addEventListener('click', () => perform({ kind: 'client_workspace', client: ui.harness.value, open: true }));
+ui['workspace-copy'].addEventListener('click', () => perform({ kind: 'client_workspace', client: ui.harness.value, open: false }));
+ui['generic-name'].addEventListener('input', reconcile);
+ui['generic-list'].addEventListener('change', reconcile);
+ui['generic-form'].addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (ui['generic-issue'].disabled) return;
+  perform({ kind: 'client_issue', name: ui['generic-name'].value, preset: ui['generic-preset'].value });
+});
+ui['generic-revoke'].addEventListener('click', () => perform({ kind: 'client_revoke', name: ui['generic-list'].value }));
+ui['generic-close'].addEventListener('click', () => {
+  clearGenericConnection();
+  ui['generic-state'].textContent = '接入配置已收起。需要新配置时可重新签发。';
+  ui['generic-name'].focus();
+});
+ui['generic-copy'].addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(ui['generic-config'].value);
+    clearGenericConnection();
+    ui['generic-state'].textContent = '配置已复制。请粘贴到所选客户端。';
+    ui['generic-name'].focus();
+  } catch {
+    ui['generic-config'].focus();
+    ui['generic-config'].select();
+    ui['generic-state'].textContent = '剪贴板不可用。请按 Ctrl+C 复制已选中的配置，随后点击完成。';
+  }
+});
 ui.preserve.addEventListener('click', () => perform({ kind: 'uninstall_preserve' }));
 ui['show-purge'].addEventListener('click', () => {
   ui['purge-form'].hidden = false;

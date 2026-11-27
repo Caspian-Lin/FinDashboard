@@ -273,7 +273,20 @@ main {
 
 .sample { grid-column: span 5; }
 .codex { grid-column: span 7; }
-.source-panel { grid-column: 1 / -1; }
+.source-panel, .generic-panel { grid-column: 1 / -1; }
+#harness-profile { max-inline-size: 10rem; }
+#workspace-address { inline-size: 100%; }
+.connection-result { margin-block-start: 1rem; inline-size: min(100%, 34rem); }
+.connection-result textarea {
+  padding: .55rem .7rem;
+  border: 1px solid var(--input-border);
+  border-radius: var(--control-radius);
+  background: var(--surface);
+  color: var(--text);
+  font: .86rem/1.5 Consolas, monospace;
+  resize: vertical;
+}
+.connection-result .actions { margin-block-start: .6rem; }
 .source-details { margin-block-start: .6rem; }
 .source-capabilities { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .3rem 1rem; }
 .source-capabilities dd { margin: 0; }

@@ -413,6 +413,9 @@ function Get-DesktopRuntime($State, [string]$DockerKind) {
         preset = $null
         scopes = @()
         credential_active = $null
+        clients = @()
+        generic_clients = @()
+        dsh_profiles = @()
         pending_revocation = $false
         repair = $null
         project = $DesktopProject
@@ -443,23 +446,155 @@ function Get-DesktopRuntime($State, [string]$DockerKind) {
             $result.repair = "Check Docker Desktop and verify this instance's project resources."
         }
     }
-    if (Test-Path -LiteralPath $DesktopCredentialPath) {
-        try {
-            $credential = Read-DesktopJson $DesktopCredentialPath "desktop_codex_failed: Could not read Codex setup state."
-            if ($credential.preset -notin @("readonly", "topic-writer")) { throw "invalid credential preset" }
-            $result.preset = $credential.preset
-            $result.scopes = @("research.read")
-            if ($credential.preset -ceq "topic-writer") { $result.scopes += @("research.write", "research.run") }
-            $result.pending_revocation = [bool]$credential.pending_revoke_id
-            if ($result.running) {
-                $result.credential_active = Test-Credential (Get-Plaintext $credential.sealed)
-                if (!$result.credential_active) { $result.repair = "Reconnect Codex to refresh its credential." }
+    $result.clients = @(foreach ($name in @("codex", "dsh", "opencode")) {
+        Get-DesktopHarnessStatus $name $result.running
+    })
+    $codexStatus = $result.clients[0]
+    $result.preset = $codexStatus.preset
+    $result.scopes = $codexStatus.scopes
+    $result.pending_revocation = $codexStatus.pending_revocation
+    $result.credential_active = $codexStatus.credential_active
+    try {
+        $result.generic_clients = @(foreach ($record in (Get-DesktopGenericRecords)) {
+            @{
+                name = $record.name; preset = $record.preset
+                scopes = @(Get-DesktopClientScopes $record.preset)
+                pending_revocation = [bool]$record.pending_revoke_id
             }
-        } catch {
-            if (!$result.repair) { $result.repair = "Reconnect Codex to refresh its credential." }
-        }
+        })
+    } catch {
+        if (!$result.repair) { $result.repair = "Check the local generic MCP client setup before changing its credentials." }
+    }
+    $profileRoot = Get-DshProfileRoot
+    if (Test-Path -LiteralPath $profileRoot -PathType Container) {
+        $result.dsh_profiles = @(Get-ChildItem -LiteralPath $profileRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -cmatch '^[a-zA-Z0-9_-]{1,64}$' -and
+                !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            Select-Object -ExpandProperty Name | Sort-Object)
     }
     return $result
+}
+
+function Get-DesktopClientScopes([string]$Preset) {
+    if ($Preset -ceq "readonly") { return "research.read" }
+    if ($Preset -ceq "topic-writer") { return @("research.read", "research.write", "research.run") }
+}
+
+function Get-DesktopClientWorkspace([string]$ClientName) {
+    $directory = switch -CaseSensitive ($ClientName) {
+        "dsh" { "workspace" }
+        "opencode" { "opencode-workspace" }
+        default { throw "desktop_invalid_arguments: Only DSH and OpenCode have a Desktop workspace." }
+    }
+    $workspace = Join-Path $Root $directory
+    Assert-DesktopPath $workspace
+    return $workspace
+}
+
+function Get-DesktopHarnessStatus([string]$Name, [bool]$Running) {
+    $entry = [ordered]@{name = $Name; preset = $null; scopes = @(); profile = $null
+        credential_active = $null; pending_revocation = $false; repair_required = $false}
+    try {
+        $path = Join-Path $Root "$Name.json"
+        Assert-DesktopPath $path
+        if (Test-Path -LiteralPath $path) {
+            $credential = Read-DesktopJson $path "desktop_client_setup: The local client setup could not be read."
+            if ($credential.preset -cnotin @("readonly", "topic-writer")) { throw "invalid preset" }
+            $entry.preset = $credential.preset
+            $entry.scopes = @(Get-DesktopClientScopes $credential.preset)
+            $entry.pending_revocation = [bool]$credential.pending_revoke_id
+            if ($Name -ceq "dsh" -and $credential.profile -cmatch '^[a-zA-Z0-9_-]{1,64}$') {
+                $entry.profile = $credential.profile
+            }
+            if ($Running) { $entry.credential_active = Test-Credential (Get-Plaintext $credential.sealed) }
+        }
+    } catch { $entry.repair_required = $true }
+    return $entry
+}
+
+function Get-DesktopGenericPath([string]$Name) {
+    if ($Name -cnotmatch '^[a-z0-9][a-z0-9_-]{0,31}$') {
+        throw "desktop_invalid_arguments: Use 1–32 lowercase letters, digits, hyphens or underscores for the client name."
+    }
+    $path = Join-Path $Root "generic-clients/client-$Name.json"
+    Assert-DesktopPath $path
+    return $path
+}
+
+function Read-DesktopGenericRecord([string]$Name) {
+    $path = Get-DesktopGenericPath $Name
+    if (!(Test-Path -LiteralPath $path)) { return }
+    $state = Read-DesktopJson $path "desktop_client_setup: The local client setup could not be read."
+    if ($state.name -cne $Name -or $state.client_id -cnotmatch '^MC-[0-9a-f]{12}$' -or
+        $state.preset -cnotin @("readonly", "topic-writer") -or
+        ($state.pending_revoke_id -and $state.pending_revoke_id -cnotmatch '^MC-[0-9a-f]{12}$')) {
+        throw "desktop_client_setup: The local client setup could not be verified."
+    }
+    return $state
+}
+
+function Get-DesktopGenericRecords {
+    $directory = Join-Path $Root "generic-clients"
+    Assert-DesktopPath $directory
+    if (Test-Path -LiteralPath $directory -PathType Container) {
+        foreach ($file in (Get-ChildItem -LiteralPath $directory -Filter "client-*.json" -File)) {
+            Read-DesktopGenericRecord $file.BaseName.Substring(7)
+        }
+    }
+}
+
+function Issue-DesktopGenericClient([string]$Name, [string]$Preset) {
+    $path = Get-DesktopGenericPath $Name
+    $previous = Read-DesktopGenericRecord $Name
+    Complete-ClientRotation $path $previous
+    $issued = Register-ClientCredential "generic-$Name" $Preset
+    try {
+        if (!(Test-Credential $issued.token)) { throw "desktop_client_setup: MCP initialization did not succeed." }
+        $state = [PSCustomObject]@{name = $Name; client_id = $issued.client_id; preset = $Preset}
+        if ($previous) {
+            $state | Add-Member -NotePropertyName pending_revoke_id -NotePropertyValue $previous.client_id
+        }
+        Write-File $path ($state | ConvertTo-Json -Compress)
+    } catch {
+        $failure = $_
+        try { [void](Invoke-Operator "client-revoke" (@{client_id = $issued.client_id} | ConvertTo-Json -Compress)) }
+        catch { Write-Warning "An unused credential could not be revoked. Its token was not returned." }
+        throw $failure
+    }
+    Complete-ClientRotation $path $state
+    return @{connection = @{name = $Name; url = "$Endpoint/mcp"; credential = $issued.token
+        scopes = @(Get-DesktopClientScopes $Preset)}}
+}
+
+function Revoke-DesktopGenericClient([string]$Name) {
+    $path = Get-DesktopGenericPath $Name
+    $state = Read-DesktopGenericRecord $Name
+    if (!$state) { return }
+    Complete-ClientRotation $path $state
+    [void](Invoke-Operator "client-revoke" (@{client_id = $state.client_id} | ConvertTo-Json -Compress))
+    [IO.File]::Delete($path)
+}
+
+function Revoke-DesktopHarness([string]$Name) {
+    $Client = $Name
+    $DesktopCredentialPath = Join-Path $Root "$Name.json"
+    Assert-DesktopPath $DesktopCredentialPath
+    switch -CaseSensitive ($Name) {
+        "codex" { Unregister-DesktopCodex }
+        "dsh" {
+            if (Test-Path -LiteralPath $DesktopCredentialPath) {
+                $credential = Read-DesktopJson $DesktopCredentialPath "desktop_client_setup: The DSH setup could not be read."
+                Remove-DesktopDshPatch $credential.profile
+            }
+        }
+        "opencode" {
+            $workspace = Get-DesktopClientWorkspace $Name
+            $path = Join-Path $workspace "opencode.jsonc"
+            Assert-DesktopPath $path
+            if (Test-DesktopManagedOpenCode $path) { [IO.File]::Delete($path) }
+        }
+    }
+    if (Test-Path -LiteralPath $DesktopCredentialPath) { Revoke-Client }
 }
 
 function Test-DesktopVolumePair($Resources) {
@@ -490,17 +625,24 @@ function Remove-DesktopInstallation($State, $Resources) {
         $State.lifecycle = if ($Options["--mode"] -ceq "purge") { "purging" } else { "preserving" }
         Write-File $StatePath ($State | ConvertTo-Json -Depth 8 -Compress)
     }
-    Write-Host "Checking this Desktop instance's Codex registration and Docker resources..."
-    Unregister-DesktopCodex
-    if (Test-Path -LiteralPath $DesktopCredentialPath) {
+    Write-Host "Checking this Desktop instance's client credentials and Docker resources..."
+    $harnesses = @("codex", "dsh", "opencode" | Where-Object {
+        $path = Join-Path $Root "$_.json"
+        Assert-DesktopPath $path
+        Test-Path -LiteralPath $path
+    })
+    $generic = @(Get-DesktopGenericRecords)
+    if ($harnesses.Count -or $generic.Count) {
         if ("$($DesktopProject)_postgres" -notin $Resources.volume) {
-            throw "desktop_missing_volume: The original database volume is missing. Restore it before revoking Codex."
+            throw "desktop_missing_volume: The original database volume is missing. Restore it before revoking clients."
         }
         [void](Invoke-DesktopCompose @("up", "-d", "--wait", "--wait-timeout", "90", "--pull", "never", "--no-build", "postgres"))
         $DesktopDetachedOperator = $true
-        Revoke-Client
+        foreach ($name in $harnesses) { Revoke-DesktopHarness $name }
+        foreach ($record in $generic) { Revoke-DesktopGenericClient $record.name }
         $Resources = Get-DesktopOwnedResources $State
     }
+    if ("codex" -cnotin $harnesses) { Unregister-DesktopCodex }
     if ($Resources.container.Count -or $Resources.network.Count) {
         Write-Host "Removing this Desktop instance's containers and network..."
         [void](Invoke-DesktopCompose @("down", "--remove-orphans"))
@@ -561,7 +703,11 @@ function Remove-DesktopInstallation($State, $Resources) {
 function Invoke-DesktopAction {
     $allowedOptions = switch -CaseSensitive ($Action) {
         "desktop-install" { "--port" }
-        "desktop-attach" { "--preset" }
+        "desktop-attach" { "--preset"; "--client"; "--profile" }
+        "desktop-detach" { "--client" }
+        "desktop-client-workspace" { "--client"; "--mode" }
+        "desktop-client-issue" { "--name"; "--preset" }
+        "desktop-client-revoke" { "--name" }
         "desktop-uninstall" { "--mode"; "--confirm" }
         { $_ -cin @("desktop-status", "desktop-stop", "desktop-import",
             "desktop-source-status", "desktop-source-configure") } { }
@@ -570,8 +716,21 @@ function Invoke-DesktopAction {
     if ($Options.Keys | Where-Object { $_ -cnotin $allowedOptions }) {
         throw "desktop_invalid_arguments: Unsupported option for this Desktop operation."
     }
-    if ($Action -ceq "desktop-attach" -and $Options["--preset"] -cnotin @("readonly", "topic-writer")) {
+    if ($Action -ceq "desktop-client-issue" -and !$Options.ContainsKey("--preset")) {
+        $Options["--preset"] = "readonly"
+    }
+    if ($Action -cin @("desktop-attach", "desktop-client-issue") -and
+        $Options["--preset"] -cnotin @("readonly", "topic-writer")) {
         throw "desktop_invalid_arguments: Choose readonly or topic-writer."
+    }
+    if ($Action -ceq "desktop-attach" -and !$Options.ContainsKey("--client")) { $Options["--client"] = "codex" }
+    if ($Action -cin @("desktop-attach", "desktop-detach") -and $Options["--client"] -cnotin @("codex", "dsh", "opencode")) {
+        throw "desktop_invalid_arguments: Choose Codex, DSH, or OpenCode."
+    }
+    if ($Action -ceq "desktop-attach" -and (($Options["--client"] -ceq "dsh" -and
+            $Options["--profile"] -cnotmatch '^[a-zA-Z0-9_-]{1,64}$') -or
+            ($Options["--client"] -cne "dsh" -and $Options.ContainsKey("--profile")))) {
+        throw "desktop_invalid_arguments: Choose an existing DSH profile for this setup."
     }
     if ($Action -ceq "desktop-uninstall" -and ($Options["--mode"] -cnotin @("preserve", "purge") -or
             ($Options["--mode"] -ceq "purge" -and $Options["--confirm"] -cne "DELETE-THIS-INSTANCE") -or
@@ -583,10 +742,20 @@ function Invoke-DesktopAction {
     }
     $manifest = Read-DesktopManifest
     $Root = Resolve-DesktopRoot $manifest
+    if ($Action -ceq "desktop-client-workspace") {
+        $workspace = Get-DesktopClientWorkspace $Options["--client"]
+        if (!(Test-Path -LiteralPath $workspace -PathType Container) -or
+            $Options["--mode"] -cnotin @("open", "location")) {
+            throw "desktop_client_setup: Configure the client before opening its Desktop workspace."
+        }
+        if ($Options["--mode"] -ceq "open") { Start-Process -FilePath $workspace -ErrorAction Stop }
+        @{workspace = $workspace} | ConvertTo-Json -Compress
+        return
+    }
     $StatePath = Join-Path $Root "state.json"
     $Bridge = Join-Path $Root "mcp-bridge.ps1"
-    $Client = "codex"
-    $DesktopCredentialPath = Join-Path $Root "codex.json"
+    $Client = if ($Action -cin @("desktop-attach", "desktop-detach")) { $Options["--client"] } else { "codex" }
+    $DesktopCredentialPath = Join-Path $Root "$Client.json"
     $DesktopDocker = Find-DesktopDocker
     $DockerKind = Get-DesktopDockerKind
     if ($Action -ceq "desktop-status") {
@@ -674,15 +843,23 @@ function Invoke-DesktopAction {
             }
             "desktop-attach" {
                 if (!(Test-DesktopGateway $State.port)) {
-                    throw "desktop_gateway_unavailable: Start this Desktop instance before connecting Codex."
+                    throw "desktop_gateway_unavailable: Start this Desktop instance before connecting a client."
                 }
-                Write-Host "Registering the Codex plugin and checking its research credential..."
+                Write-Host "Configuring the selected client and checking its research credential..."
                 try { Configure-Client }
                 catch {
                     if ($_.Exception.Message -match '^desktop_[a-z_]+: ') { throw }
-                    throw "desktop_codex_failed: Codex setup did not complete. Retry to apply the preset and finish any pending revocation."
+                    throw "desktop_client_setup: Setup did not complete. Check the client and, for DSH, its profile."
                 }
             }
+            "desktop-detach" { Revoke-DesktopHarness $Client }
+            "desktop-client-issue" {
+                if (!(Test-DesktopGateway $State.port)) {
+                    throw "desktop_gateway_unavailable: Start this Desktop instance before connecting a client."
+                }
+                Issue-DesktopGenericClient $Options["--name"] $Options["--preset"] | ConvertTo-Json -Depth 4 -Compress
+            }
+            "desktop-client-revoke" { Revoke-DesktopGenericClient $Options["--name"] }
             "desktop-import" {
                 Write-Host "Verifying and importing the synthetic starter data..."
                 $bundle = Join-Path $DesktopResourceRoot "starter.zip"
