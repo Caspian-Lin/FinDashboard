@@ -46,7 +46,7 @@ test("home, keyboard skip, edition boundaries, and old URLs", async ({ page }, i
   await page.goto("/strategies?preset=example#saved");
   await expect(page).toHaveURL(/\/backtest\?preset=example#saved$/);
   await page.goto("/fixture-route-missing");
-  await expect(page.getByRole("heading", { level: 1 })).toContainText(research ? /404|not found/i : /404|找不到/);
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(research ? /does not exist|has been moved/i : /不存在|已被移动/);
   expect(wire.unexpected).toEqual([]);
 });
 

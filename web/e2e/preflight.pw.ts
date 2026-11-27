@@ -35,16 +35,24 @@ test("published strategy run keeps preflight separate from worker submission", a
   expect(wire.unexpected).toEqual([]);
 });
 
-test("formal OOS registration requires preflight and leaves the holdout sealed", async ({ page }, info) => {
+test("formal OOS registration previews, registers, and confirms a one-time holdout from the original topic", async ({ page }, info) => {
   test.skip(info.project.name !== "research", "Run the frozen formal workflow in the research edition.");
   await preferences(page, "zh", "light");
   const checksum = "b".repeat(64);
   const experimentId = "VE-new-frozen";
+  let unsealed = false;
   const wire = await mockApi(page, ({ url, method, body }) => {
     if (url.pathname === `/api/research/experiments/${experimentId}`) {
-      return { json: { experiment_id: experimentId, status: "hypothesis", version_stamp: {},
-        hypothesis: "冻结规格的独立证据", plan: {}, thresholds: {}, robustness: {}, trials: [], created_at: evidenceRun.created_at } };
+      return { json: { experiment_id: experimentId, status: unsealed ? "validated_oos" : "hypothesis", version_stamp: {},
+        hypothesis: "冻结规格的独立证据", plan: {}, thresholds: {}, robustness: {}, trials: [], created_at: evidenceRun.created_at,
+        final_test_unsealed: unsealed, oos_outcome: unsealed ? "not_supported" : "inconclusive" } };
     }
+    if (url.pathname === `/api/research/topics/${topicId}/artifacts`) return { json: { items: [{
+      entity_type: "validation_experiment", entity_id: experimentId, state: unsealed ? "completed" : "pending",
+      status: unsealed ? "validated_oos" : "hypothesis", goal_version: "v1", final_test_unsealed: unsealed,
+      evidence_gaps: [], trial_budget: { used: unsealed ? 1 : 0, limit: 1 },
+    }] } };
+    if (url.pathname.endsWith("/coverage")) return { status: 404, json: { detail: "No fixture coverage yet" } };
     if (method === "POST" && url.pathname === `/api/research/topics/${topicId}/actions/preview`) {
       const payload = body.payload as { plan: { benchmark_symbol: string } };
       expect(payload.plan.benchmark_symbol).toBe("000001.SH");
@@ -55,6 +63,11 @@ test("formal OOS registration requires preflight and leaves the holdout sealed",
       } };
     }
     if (method === "POST" && url.pathname === `/api/research/topics/${topicId}/actions`) {
+      if (body.action === "validation_experiment.unseal") {
+        expect(body.payload).toEqual(expect.objectContaining({ experiment_id: experimentId }));
+        unsealed = true;
+        return { status: 201, json: { entity_id: experimentId, job_id: jobId } };
+      }
       expect(body.action).toBe("validation_experiment.create");
       expect(body.payload).toEqual(expect.objectContaining({ expected_preview_checksum: checksum }));
       return { status: 201, json: { entity_id: experimentId, job_id: null } };
@@ -77,5 +90,19 @@ test("formal OOS registration requires preflight and leaves the holdout sealed",
   await dialog.getByRole("button", { name: "登记实验", exact: true }).click();
   await expect(page.getByRole("link", { name: "回原课题执行与复核" })).toHaveAttribute("href", `/research/topics?topic=${topicId}`);
   expect(wire.writes().length).toBe(2);
-  expect(wire.writes().some((request) => request.body.action === "validation_experiment.unseal" || request.body.job_id === jobId)).toBe(false);
+  expect(wire.writes().some((request) => request.body.action === "validation_experiment.unseal")).toBe(false);
+
+  await page.getByRole("link", { name: "回原课题执行与复核" }).click();
+  const start = page.getByRole("button", { name: "显式执行一次性揭盲" });
+  await start.click();
+  const confirm = page.getByRole("dialog", { name: "确认一次性揭盲" });
+  await confirm.getByRole("button", { name: "返回", exact: true }).click();
+  expect(wire.writes().length).toBe(2);
+  await start.click();
+  await confirm.getByRole("button", { name: "确认执行并消耗最终窗口" }).click();
+  await expect(page.getByRole("link", { name: "查看揭盲任务" })).toHaveAttribute("href", `/jobs?job=${jobId}`);
+  expect(wire.writes().filter((request) => request.body.action === "validation_experiment.unseal")).toHaveLength(1);
+  await page.getByRole("link", { name: "复核正式实验" }).click();
+  await expect(page.getByText("已揭盲 · 最终窗口已使用")).toBeVisible();
+  await expect(page.getByText("OOS：假设未获支持").first()).toBeVisible();
 });

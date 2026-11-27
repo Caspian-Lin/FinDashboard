@@ -41,3 +41,22 @@ test("archived failure preserves the task, scoped audit, and return path", async
   await expect(archivedTask.getByText(failedJob.error_summary)).toBeVisible();
   expect(wire.writes()).toEqual([]);
 });
+
+test("task pagination preserves URL and reads the next bounded page", async ({ page }, info) => {
+  test.skip(info.project.name !== "full", "Pagination is shared by both editions.");
+  await preferences(page, "zh", "dark");
+  const second = "BJ-FIXTURE-PAGE-2";
+  const wire = await mockApi(page, ({ url }) => {
+    if (url.pathname !== "/api/jobs") return undefined;
+    const index = Number(url.searchParams.get("offset") ?? 0);
+    const item = { ...failedJob, job_id: index ? second : jobId, archived_at: null };
+    return { json: [item], headers: { "X-Total-Count": "11" } };
+  });
+  await page.goto("/jobs");
+  await expect(page.getByText(jobId, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "下一页" }).click();
+  await expect(page.getByText(second, { exact: true })).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("page")).toBe("2");
+  expect(wire.requests.some((request) => request.url.pathname === "/api/jobs" && request.url.searchParams.get("offset") === "10")).toBe(true);
+  expect(wire.writes()).toEqual([]);
+});

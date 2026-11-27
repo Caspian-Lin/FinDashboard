@@ -11,7 +11,8 @@ import { ResearchMemoryArticle } from "@/components/research/ResearchMemoryArtic
 import FormalExperimentDialog from "@/components/research/FormalExperimentDialog";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import ResearchRunSetup from "@/components/research/ResearchRunSetup";
-import type { ResearchRunQueueIn } from "@/lib/research";
+import { useT } from "@/i18n";
+import { researchDocsApi, type ResearchRunQueueIn } from "@/lib/research";
 import { ResearchTimestamp } from "@/components/research/ResearchTimestamp";
 import { TopicDataCard } from "@/components/data/TopicDataCard";
 import {
@@ -258,6 +259,27 @@ function SourceFact({ reference }: { reference: EvidenceRef }) {
     </div>
   );
 }
+function TopicGoalSource({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const { tl } = useT();
+  const docs = useQuery({ queryKey: ["research-docs"], queryFn: researchDocsApi.list });
+  const options = docs.data?.docs ?? [];
+  if (options.length === 0) {
+    return <Field label={tl({ zh: "目标来源（研究文档相对路径）", en: "Goal source (repository document path)" })}
+      required value={value} onChange={onChange} />;
+  }
+  return (
+    <label className="grid gap-1 text-sm">
+      <span className="font-medium">{tl({ zh: "目标来源（正式文档）", en: "Goal source (canonical document)" })}</span>
+      <select className="h-11 min-w-0 rounded-md border border-input bg-background px-3" required
+        value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">{tl({ zh: "选择仓库文档", en: "Choose a repository document" })}</option>
+        {options.map((doc) => <option value={doc.path} key={doc.path}>{doc.title}</option>)}
+        {value && !options.some((doc) => doc.path === value) && <option value={value}>{value}</option>}
+      </select>
+    </label>
+  );
+}
+
 function Field({
   label,
   value,
@@ -1667,9 +1689,7 @@ export default function ResearchTopics() {
                           setActivation({ ...activation, goal: { ...activation.goal, version: v } })
                         }
                       />
-                      <Field
-                        label="目标来源（研究文档相对路径）"
-                        required
+                      <TopicGoalSource
                         value={activation.goal.source.ref_id}
                         onChange={(v) =>
                           setActivation({

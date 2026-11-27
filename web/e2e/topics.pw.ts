@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { activeTopic, mockApi, preferences, topicId } from "./fixtures";
 
-test("create a manual draft in an empty workspace without starting work", async ({ page }, info) => {
+test("create and activate a manual topic without starting work", async ({ page }, info) => {
   test.skip(info.project.name !== "research", "Exercise the empty path in the research edition.");
   await preferences(page, "zh", "light");
   const manualId = "RT-manual-draft";
@@ -11,6 +11,15 @@ test("create a manual draft in an empty workspace without starting work", async 
       draft = { ...activeTopic, ...body, topic_id: manualId, status: "draft", goal: null, revision: 1 };
       return { status: 201, json: draft };
     }
+    if (url.pathname === `/api/research/topics/${manualId}/activate` && method === "POST") {
+      expect(body.goal).toEqual(expect.objectContaining({ source: { kind: "document", ref_id: "ROADMAP.md" } }));
+      draft = { ...draft, status: "active", goal: body.goal, revision: 2 };
+      return { json: draft };
+    }
+    if (url.pathname === "/api/research/docs") return { json: { docs: [{ path: "ROADMAP.md", title: "研究路线" }] } };
+    if (url.pathname === `/api/research/topics/${manualId}/context`) return { status: 404, json: { detail: "No historical rounds" } };
+    if (url.pathname === `/api/research/topics/${manualId}/artifacts`) return { json: { items: [], total: 0 } };
+    if (url.pathname === `/api/research/topics/${manualId}/runs`) return { json: { items: [], has_more: false } };
     if (url.pathname === "/api/research/topics") return { json: { items: draft ? [draft] : [], total: draft ? 1 : 0 } };
     if (url.pathname === `/api/research/topics/${manualId}`) return { json: draft };
     if (url.pathname === `/api/research/topics/${manualId}/entries`) return { json: { items: [], total: 0 } };
@@ -24,7 +33,15 @@ test("create a manual draft in an empty workspace without starting work", async 
   await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect(page).toHaveURL(`/research/topics?topic=${manualId}`);
   await expect(page.getByText("空库首个研究问题", { exact: true }).first()).toBeVisible();
-  expect(wire.writes().map((request) => request.url.pathname)).toEqual(["/api/research/topics"]);
+  await page.getByRole("button", { name: "补齐目标并激活", exact: true }).click();
+  await page.getByLabel("目标版本", { exact: true }).fill("v1");
+  await page.getByRole("combobox", { name: /目标来源/ }).selectOption({ label: "研究路线" });
+  await page.getByLabel("目标和验收门槛", { exact: true }).fill("评估冻结样例在两段窗口的风险变化。");
+  await page.getByRole("button", { name: "激活课题", exact: true }).click();
+  await expect(page.getByRole("button", { name: "发起研究运行", exact: true })).toBeVisible();
+  expect(wire.writes().map((request) => request.url.pathname)).toEqual([
+    "/api/research/topics", `/api/research/topics/${manualId}/activate`,
+  ]);
 });
 
 test("agent handoff opens the original topic from the old workspace link", async ({ page }, info) => {

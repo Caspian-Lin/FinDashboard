@@ -68,8 +68,9 @@ const defaults: Record<string, unknown> = {
   [`/api/research/topics/${topicId}`]: activeTopic,
   [`/api/research/topics/${topicId}/entries`]: { items: [], total: 0 },
   [`/api/research/topics/${topicId}/context`]: {
-    topic: activeTopic, recent_rounds: [], open_questions: [], source_refs: [], auto_facts: [],
-    agent_interpretations: [], reviewed_conclusions: [], suggested_next_reads: [],
+    topic: activeTopic, goal, lifecycle: { since: stamp, last: null }, open_questions: [], next_step: activeTopic.next_step,
+    recent_rounds: [], active_links: [], experiment_links: [], entry_types: {}, dangling_refs: [],
+    evidence_levels: {}, next_actions: [], generated_at: stamp, revision: 2, excerpted: false, bounds: {},
   },
   [`/api/research/topics/${topicId}/runs`]: { items: [], has_more: false },
   [`/api/research/topics/${topicId}/artifacts`]: { items: [], total: 0 },

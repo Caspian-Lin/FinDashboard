@@ -58,7 +58,13 @@ async function findTopicScope(topicId: string) {
   const end = window.decision_end ?? window.end ?? plan.test_end;
   if (!symbols.length || typeof start !== "string" || typeof end !== "string") return null;
   if (scope.bars_adjustment && scope.bars_adjustment !== "qfq") return null;
-  return { symbols, start, end, benchmark };
+  const datasets = strings(object(scope.datasets).required);
+  if (datasets.some((name) => !(name in datasetLabels))) return null;
+  return {
+    symbols, start, end, benchmark, datasets,
+    warmup: typeof scope.warmup_sessions === "number" ? scope.warmup_sessions : undefined,
+    tail: typeof scope.tail_sessions === "number" ? scope.tail_sessions : undefined,
+  };
 }
 
 export function BackfillRequestCard({ topicId }: { topicId: string | null }) {
@@ -83,6 +89,9 @@ export function BackfillRequestCard({ topicId }: { topicId: string | null }) {
       setSelected(scope.symbols.map((code) => ({ code, name: code, market: "", instrument_type: "" })));
       setStart(scope.start);
       setEnd(scope.end);
+      if (scope.warmup !== undefined) setWarmup(scope.warmup);
+      if (scope.tail !== undefined) setTail(scope.tail);
+      if (scope.datasets.length) setDatasets([...new Set(["bars", ...scope.datasets])]);
       setBenchmark(typeof scope.benchmark === "string"
         ? { code: scope.benchmark, market: "", name: scope.benchmark, instrument_type: "" }
         : null);
@@ -125,7 +134,7 @@ export function BackfillRequestCard({ topicId }: { topicId: string | null }) {
   const spec: BackfillSpec = {
     scope: {
       universe: { explicit_symbols: selected.map((item) => item.code),
-        markets: [...new Set(selected.map((item) => item.market).filter(Boolean))] },
+        markets: selected.every((item) => item.market) ? [...new Set(selected.map((item) => item.market))] : [] },
       decision: { start, end }, benchmarks: benchmark ? [benchmark.code] : [],
       datasets: { required: datasets }, warmup_sessions: warmup, tail_sessions: tail, bars_adjustment: "qfq",
     },
@@ -162,10 +171,13 @@ export function BackfillRequestCard({ topicId }: { topicId: string | null }) {
           {topicId && (
             <div className="space-y-2">
               <Button type="button" variant="outline" disabled={reuseScope.isPending || startRequest.isPending} onClick={() => reuseScope.mutate(topicId)}>
-                {tl({ zh: "沿用课题最近的冻结范围", en: "Use the Latest Frozen Topic Scope" })}
+                {tl({ zh: "预填最近研究的范围字段", en: "Prefill Latest Research Scope" })}
               </Button>
               {reuseScope.isSuccess && !reuseScope.data && <p className="text-sm text-muted-foreground">
-                {tl({ zh: "没有可沿用的前复权逐标的范围，请从目录选标的并填写窗口。", en: "No reusable adjusted instrument scope. Choose instruments and dates below." })}
+                {tl({ zh: "没有可直接预填的前复权逐标的范围，请从目录选标的并核对窗口。", en: "No reusable adjusted instrument scope. Choose instruments and dates below." })}
+              </p>}
+              {reuseScope.data && <p className="text-sm text-muted-foreground">
+                {tl({ zh: "已预填可用字段。请核对标的、窗口、行情来源和发布选项。", en: "Scope fields are prefilled. Check instruments, windows, source, and publishing options." })}
               </p>}
               {reuseScope.error && <p role="alert" className="break-words text-sm text-destructive">{reuseScope.error.message}</p>}
             </div>
