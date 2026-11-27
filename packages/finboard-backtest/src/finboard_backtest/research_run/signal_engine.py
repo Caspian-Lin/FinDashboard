@@ -138,6 +138,9 @@ from finboard_backtest.strategy_spec.universe_precheck import (
 )
 
 if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+
     from finboard_backtest.factor_lab import PriceFeatureProcessPool
     from finboard_backtest.portfolio import CovarianceEstimate
     from finboard_data.factor_lab import FeatureSnapshot
@@ -1000,6 +1003,19 @@ def _covariance_price_layout(
     return _CovariancePriceLayout(estimable, short_history, window, min_points)
 
 
+def _covariance_returns(
+    price_series: Mapping[str, Sequence[float]], layout: _CovariancePriceLayout,
+) -> Iterator[tuple[str, npt.NDArray[np.float64]]]:
+    import numpy as np
+
+    for symbol in layout.estimable:
+        values = np.asarray(price_series[symbol][-layout.window:], dtype=np.float64)
+        previous = values[:-1]
+        # 零前价用零收益占位,保持最短共同窗口的各列等长。
+        safe_previous = np.where(previous == 0.0, 1.0, previous)
+        yield symbol, np.where(previous == 0.0, 0.0, values[1:] / safe_previous - 1.0)
+
+
 def _estimate_covariance(
     price_series: Mapping[str, Sequence[float]],
 ) -> CovarianceEstimate | None:
@@ -1044,7 +1060,6 @@ def _estimate_covariance(
     组合流水线按 fail_closed 拒绝(风险贡献硬约束启用时缺协方差必须失败)。
     """
     import numpy as np
-    import numpy.typing as npt
 
     from finboard_backtest.portfolio import estimate_covariance
 
@@ -1056,12 +1071,7 @@ def _estimate_covariance(
 
     returns_by_ticker: dict[str, npt.NDArray[np.float64]] = {}
     degenerate: list[str] = []
-    for symbol in layout.estimable:
-        values = np.asarray(price_series[symbol][-window:], dtype=np.float64)
-        prev = values[:-1]
-        # 零前价跳点以 0.0 收益占位(旧实现按条件跳过 → ragged 长度不齐)。
-        safe_prev = np.where(prev == 0.0, 1.0, prev)
-        series_returns = np.where(prev == 0.0, 0.0, values[1:] / safe_prev - 1.0)
+    for symbol, series_returns in _covariance_returns(price_series, layout):
         if float(np.var(series_returns)) == 0.0:
             degenerate.append(symbol)
         returns_by_ticker[symbol] = series_returns
@@ -1100,6 +1110,56 @@ def _timed_covariance(
         return _estimate_covariance(price_series)
     finally:
         record_stage_timing(stage, started)
+
+
+def _validate_skipped_covariance(
+    price_series: Mapping[str, Sequence[float]], layout: _CovariancePriceLayout,
+) -> None:
+    """复核被跳过的候选池输入,在诊断中注明没有候选池估计矩阵。"""
+    import numpy as np
+
+    started = perf_counter()
+    try:
+        degenerate: list[str] = []
+        # 极端波动回退原估计器处理,避免把样本方差尚可表示而其平方溢出的输入视作正常。
+        variance_limit = math.sqrt(np.finfo(np.float64).max) / len(layout.estimable) ** 2
+        for symbol, values in _covariance_returns(price_series, layout):
+            variance = float(np.var(values))
+            if not math.isfinite(variance) or variance >= variance_limit:
+                # 原估计器允许少量 NaN,共同观测不足或矩阵计算失败时抛出原异常。
+                _timed_covariance(price_series, "initial_covariance")
+                return
+            if variance == 0.0:
+                degenerate.append(symbol)
+        if degenerate:
+            logger.warning(
+                "research_run.covariance_degenerate_symbols",
+                count=len(degenerate), samples=degenerate[:10],
+                n_observations=layout.window - 1, scope="candidate_pool", estimated=False,
+            )
+        imputation_candidates = sorted(set(layout.short_history) | set(degenerate))
+        if imputation_candidates:
+            logger.warning(
+                "research_run.covariance_short_history_symbols",
+                count=len(imputation_candidates), samples=imputation_candidates[:10],
+                n_observations=layout.window - 1, window_points=layout.window,
+                min_points=layout.min_points, scope="candidate_pool", estimated=False,
+            )
+    finally:
+        record_stage_timing("skipped_candidate_covariance_validation", started)
+
+
+def _defer_candidate_covariance(
+    price_series: Mapping[str, Sequence[float]],
+) -> DeferredCovariance | None:
+    layout = _covariance_price_layout(price_series)
+    if layout is None:
+        return None
+    return DeferredCovariance(
+        frozenset((*layout.estimable, *layout.short_history)),
+        partial(_timed_covariance, price_series, "initial_covariance"),
+        partial(_validate_skipped_covariance, price_series, layout),
+    )
 
 
 def _impute_unestimable_assets(
@@ -2507,12 +2567,7 @@ async def iter_decision_load_contexts(
         covariance = None
         deferred_covariance = None
         if manifest.uses_lazy_effective_covariance:
-            layout = _covariance_price_layout(price_series)
-            if layout is not None:
-                deferred_covariance = DeferredCovariance(
-                    frozenset((*layout.estimable, *layout.short_history)),
-                    partial(_timed_covariance, price_series, "initial_covariance"),
-                )
+            deferred_covariance = _defer_candidate_covariance(price_series)
         else:
             covariance = await asyncio.to_thread(_timed_covariance, price_series, "initial_covariance")
         return DecisionLoadContext(

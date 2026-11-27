@@ -38,6 +38,7 @@ from finboard_app.research_run_submission import ResearchRunSubmitInput
 from finboard_backtest.portfolio import (
     PSD_MIN_EIGENVALUE,
     AssetLotInfo,
+    CovarianceError,
     CovarianceEstimate,
 )
 from finboard_backtest.portfolio.builder import _covariance_problem
@@ -58,7 +59,10 @@ from finboard_backtest.research_run.portfolio_pipeline import (
     PortfolioPipelineAdapter,
     _covariance_with_target_coverage,
 )
-from finboard_backtest.research_run.signal_engine import _estimate_covariance
+from finboard_backtest.research_run.signal_engine import (
+    _defer_candidate_covariance,
+    _estimate_covariance,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -293,6 +297,49 @@ def test_deferred_coverage_rebuild_skips_first_estimate() -> None:
     assert expected is not None
     assert result.tickers == expected.tickers
     assert result.matrix.tobytes() == expected.matrix.tobytes()
+
+
+def test_skipped_candidate_estimate_reports_degenerate_and_short_history() -> None:
+    series = {code: _prices(40, seed=seed) for seed, code in enumerate(("A.SH", "B.SH", "Z.SH"))}
+    candidates = {
+        "A.SH": series["A.SH"], "B.SH": series["B.SH"],
+        "F.SH": [12.0] * 40, "S.SH": [10.0, 10.1],
+    }
+    item = replace(
+        _item(covariance=None, provider=lambda codes: {code: series[code] for code in codes}),
+        deferred_covariance=_defer_candidate_covariance(candidates),
+    )
+    with structlog.testing.capture_logs() as logs:
+        result = _covariance_with_target_coverage(item, current_weights={"Z.SH": 0.02})
+    assert result is not None
+    skipped = {event["event"]: event for event in logs if event.get("estimated") is False}
+    assert skipped["research_run.covariance_degenerate_symbols"]["samples"] == ["F.SH"]
+    short = skipped["research_run.covariance_short_history_symbols"]
+    assert short["samples"] == ["F.SH", "S.SH"]
+    assert short["scope"] == "candidate_pool"
+    assert "imputed_variance" not in short
+
+
+@pytest.mark.parametrize("all_prices_missing", [False, True])
+def test_skipped_candidate_preserves_legacy_common_observation_checks(all_prices_missing: bool) -> None:
+    series = {code: _prices(40, seed=seed) for seed, code in enumerate(("A.SH", "B.SH", "Z.SH"))}
+    incomplete = _prices(40, seed=7)
+    incomplete[0] = float("nan")
+    candidates = {
+        "A.SH": series["A.SH"], "B.SH": series["B.SH"],
+        "X.SH": [float("nan")] * 40 if all_prices_missing else incomplete,
+    }
+    item = replace(
+        _item(covariance=None, provider=lambda codes: {code: series[code] for code in codes}),
+        deferred_covariance=_defer_candidate_covariance(candidates),
+    )
+    if all_prices_missing:
+        with pytest.raises(CovarianceError, match="仅 0 个共同观测"):
+            _covariance_with_target_coverage(item, current_weights={"Z.SH": 0.02})
+    else:
+        result = _covariance_with_target_coverage(item, current_weights={"Z.SH": 0.02})
+        assert result is not None
+        assert result.tickers == ["A.SH", "B.SH", "Z.SH"]
 
 
 @pytest.mark.parametrize("fallback", ["complete", "no_provider", "missing_data", "short"])

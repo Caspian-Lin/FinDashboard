@@ -118,6 +118,7 @@ class DeferredCovariance:
 
     tickers: frozenset[str]
     evaluate: Callable[[], CovarianceEstimate | None]
+    validate_skipped_input: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,6 +1247,8 @@ def _covariance_with_target_coverage(
             needed=len(needed),
         )
         return deferred.evaluate() if deferred is not None else covariance
+    if deferred is not None and deferred.validate_skipped_input is not None:
+        deferred.validate_skipped_input()
     logger.warning(
         "research_run.covariance_coverage_rebuilt",
         missing=sorted(missing)[:10],
