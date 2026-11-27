@@ -182,12 +182,18 @@ function Set-DesktopEnvironment($State, $Images, [int]$Port) {
     $env:FINBOARD_DB_SECRET_FILE = Join-Path $Root "postgres-password"
 }
 
-function Invoke-DesktopCompose(
+function Invoke-DesktopComposeResult(
     [string[]]$Arguments, [int]$Timeout = 150, [IO.Stream]$InputData = $null
 ) {
     $composeArgs = @("compose", "--project-name", $DesktopProject, "--project-directory", $DesktopResourceRoot,
         "--file", $Compose, "--file", (Join-Path $DesktopResourceRoot "compose.desktop.yaml"))
-    $result = Invoke-DesktopDocker ($composeArgs + $Arguments) $Timeout $InputData
+    return Invoke-DesktopDocker ($composeArgs + $Arguments) $Timeout $InputData
+}
+
+function Invoke-DesktopCompose(
+    [string[]]$Arguments, [int]$Timeout = 150, [IO.Stream]$InputData = $null
+) {
+    $result = Invoke-DesktopComposeResult $Arguments $Timeout $InputData
     if ($result.exitCode -ne 0) {
         $diagnostic = $result.stderr
         if ($diagnostic -match 'port is already allocated|ports are not available|address already in use') {
@@ -208,6 +214,42 @@ function Invoke-DesktopOperator([string]$Command, [IO.Stream]$InputData) {
         @("exec", "-T", "gateway", "python", "/opt/finboard/entrypoint.py", "operator", $Command)
     }
     return (Invoke-DesktopCompose $arguments 120 $InputData | ConvertFrom-Json)
+}
+
+function Invoke-DesktopSource([bool]$Configure, [int]$Port, [IO.Stream]$InputData) {
+    if (!(Test-DesktopGateway $Port)) {
+        throw "desktop_gateway_unavailable: Start this Desktop instance before checking Tushare."
+    }
+    $operation = if ($Configure) { "source-configure" } else { "source-status" }
+    $result = Invoke-DesktopComposeResult @("exec", "-T", "gateway", "python", "/opt/finboard/entrypoint.py",
+        "operator", $operation) 180 $InputData
+    try { $reply = $result.stdout | ConvertFrom-Json }
+    catch { throw "desktop_tushare_unavailable: Tushare checks did not return a result. Retry after checking the service." }
+    $allowed = @("available", "credentials_missing", "invalid_credentials", "permission_denied",
+        "quota_exhausted", "connection_failed", "coverage_insufficient")
+    if ($reply.source -cne "tushare" -or $reply.capabilities.daily -cnotin $allowed -or
+        (!$Configure -and $result.exitCode -ne 0) -or $result.exitCode -notin @(0, 1)) {
+        throw "desktop_tushare_unavailable: Tushare checks did not return a result. Retry after checking the service."
+    }
+    $checks = [ordered]@{}
+    foreach ($name in @("daily", "adj_factor", "index_daily", "daily_basic", "fina_indicator", "trade_cal")) {
+        $value = $reply.capabilities.$name
+        if ($value -is [string] -and $value -cin $allowed) { $checks[$name] = $value }
+    }
+    $saved = $Configure -and $result.exitCode -eq 0 -and $checks.trade_cal -ceq "available"
+    $restart = "not_requested"
+    if ($saved) {
+        $restart = "failed"
+        try {
+            [void](Invoke-DesktopCompose @("restart", "gateway", "worker") 60)
+            [void](Invoke-DesktopCompose @("up", "-d", "--wait", "--wait-timeout", "120", "--pull",
+                "never", "--no-build", "gateway", "worker"))
+            if (Test-DesktopGateway $Port) { $restart = "ready" }
+        } catch {
+            # 凭据已经保存。恢复服务启动，不重发凭据。
+        }
+    }
+    return [ordered]@{source = "tushare"; saved = $saved; restart = $restart; capabilities = $checks}
 }
 
 function Get-DesktopOwnedResources($State) {
@@ -521,7 +563,8 @@ function Invoke-DesktopAction {
         "desktop-install" { "--port" }
         "desktop-attach" { "--preset" }
         "desktop-uninstall" { "--mode"; "--confirm" }
-        { $_ -cin @("desktop-status", "desktop-stop", "desktop-import") } { }
+        { $_ -cin @("desktop-status", "desktop-stop", "desktop-import",
+            "desktop-source-status", "desktop-source-configure") } { }
         default { throw "desktop_invalid_action: Unknown Desktop operation." }
     }
     if ($Options.Keys | Where-Object { $_ -cnotin $allowedOptions }) {
@@ -617,6 +660,14 @@ function Invoke-DesktopAction {
             throw "desktop_not_installed: Start or reinstall the offline research services first."
         }
         switch -CaseSensitive ($Action) {
+            "desktop-source-status" {
+                Invoke-DesktopSource $false $State.port | ConvertTo-Json -Depth 4 -Compress
+            }
+            "desktop-source-configure" {
+                $inputData = [Console]::OpenStandardInput()
+                try { Invoke-DesktopSource $true $State.port $inputData | ConvertTo-Json -Depth 4 -Compress }
+                finally { $inputData.Dispose() }
+            }
             "desktop-stop" {
                 [void](Invoke-DesktopCompose @("stop"))
                 Write-Host "Desktop research services stopped."

@@ -8,13 +8,18 @@ const ui = path.join(__dirname, '..', 'ui');
 const source = readFileSync(path.join(ui, 'app.js'), 'utf8');
 const page = readFileSync(path.join(ui, 'index.html'), 'utf8');
 
-async function loadWorkbench({ storage = new Map(), running = true, clipboardDenied = false } = {}) {
-  const nodes = new Map(Array.from(page.matchAll(/\bid="([^"]+)"/g), ([, id]) => [id, {
+function element(id) {
+  return {
     id, value: '', dataset: {}, handlers: {},
     setAttribute() {}, focus() {},
     select() { this.selected = true; },
+    replaceChildren(...children) { this.children = children; },
     addEventListener(type, listener) { this.handlers[type] = listener; },
-  }]));
+  };
+}
+
+async function loadWorkbench({ storage = new Map(), running = true, clipboardDenied = false, sourceDiagnostic } = {}) {
+  const nodes = new Map(Array.from(page.matchAll(/\bid="([^"]+)"/g), ([, id]) => [id, element(id)]));
   nodes.get('workbench-target').value = 'in_app';
   const calls = [];
   const copies = [];
@@ -23,6 +28,7 @@ async function loadWorkbench({ storage = new Map(), running = true, clipboardDen
   vm.runInNewContext(source, {
     document: {
       querySelectorAll(selector) { return selector === '[id]' ? Array.from(nodes.values()) : []; },
+      createElement: element,
     },
     window: {
       addEventListener() {},
@@ -33,6 +39,9 @@ async function loadWorkbench({ storage = new Map(), running = true, clipboardDen
           if (command === 'desktop_open_workbench') {
             if (launchError) throw launchError;
             return args.action === 'address' ? `http://127.0.0.1:${port}/research` : null;
+          }
+          if (args.operation.kind.startsWith('source_')) {
+            return { exit_code: 0, elapsed_seconds: 0, command: 'source-operation', source: sourceDiagnostic };
           }
           return {
             exit_code: 0, elapsed_seconds: 0, command: 'status',
@@ -100,4 +109,38 @@ test('stopped services disable the workbench and native launch errors stay actio
   await ready.click('open-workbench-alternate');
   assert.match(ready.nodes.get('workbench-status').textContent, /复制工作台地址/);
   assert.equal(ready.nodes.get('workbench-status').dataset.error, 'true');
+});
+
+test('Tushare permission probe displays named outcomes without exposing credentials', async () => {
+  const session = await loadWorkbench({ sourceDiagnostic: {
+    saved: false, restart: 'not_requested',
+    capabilities: {
+      daily: 'available', adj_factor: 'permission_denied', index_daily: 'connection_failed',
+      daily_basic: 'quota_exhausted', fina_indicator: 'coverage_insufficient',
+    },
+  } });
+  await session.click('source-probe');
+  const labels = session.nodes.get('source-capabilities').children.map((node) => node.textContent);
+  assert.deepEqual(Array.from(labels), [
+    '股票日线', '可用', '复权因子', '权限不足', '指数日线', '网络或服务不可用',
+    '每日指标', '已达配额', '财务指标', '样本无数据',
+  ]);
+  assert.equal(session.nodes.get('source-details').open, true);
+});
+
+test('Tushare configuration distinguishes a saved credential from a failed restart', async () => {
+  const session = await loadWorkbench({ sourceDiagnostic: {
+    saved: true, restart: 'failed', capabilities: { daily: 'available', trade_cal: 'available' },
+  } });
+  const input = session.nodes.get('source-token');
+  input.value = 'fake-tushare-token';
+  input.handlers.input();
+  session.nodes.get('source-form').handlers.submit({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(input.value, '');
+  const command = session.calls.find(([, args]) => args.operation?.kind === 'source_configure');
+  assert.equal(command[1].operation.token, 'fake-tushare-token');
+  assert.match(session.nodes.get('source-state').textContent, /已保存.*重启未确认/);
+  assert.equal(session.nodes.get('source-state').dataset.error, 'true');
+  assert.doesNotMatch(session.nodes.get('command-text').value, /fake-tushare-token/);
 });

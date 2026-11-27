@@ -47,6 +47,8 @@ Web 默认入口为 `http://127.0.0.1:8176/`，MCP 为同端口的 `/mcp`。端�
 
 ### 自备数据源
 
+Windows MSI 可在桌面控制台的「Tushare 数据源」保存凭据、重启研究服务并查看接口权限。下列命令适用于在线 ZIP。Web 可查看已配置状态，凭据由桌面控制台或命令行维护。 [桌面操作指南](research-desktop.md#tushare-数据源)
+
 ```powershell
 .\finboard.cmd source-configure
 .\finboard.cmd source-status

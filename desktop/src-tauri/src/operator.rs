@@ -1,5 +1,6 @@
 use std::{
-    io::{BufRead, BufReader, Read},
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Command, Stdio},
     sync::OnceLock,
@@ -17,7 +18,7 @@ pub enum Preset {
     TopicWriter,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     Status {},
@@ -25,17 +26,20 @@ pub enum Operation {
     Stop {},
     Import {},
     Attach { preset: Preset },
+    SourceStatus {},
+    SourceConfigure { token: String },
     UninstallPreserve {},
     UninstallPurge { confirmation: String },
 }
 
-#[derive(Debug)]
 pub enum Invocation {
     Status,
     Install(u16),
     Stop,
     Import,
     Attach(Preset),
+    SourceStatus,
+    SourceConfigure(String),
     UninstallPreserve,
     UninstallPurge,
 }
@@ -53,6 +57,15 @@ impl TryFrom<Operation> for Invocation {
             Operation::Stop {} => Self::Stop,
             Operation::Import {} => Self::Import,
             Operation::Attach { preset } => Self::Attach(preset),
+            Operation::SourceStatus {} => Self::SourceStatus,
+            Operation::SourceConfigure { token }
+                if !token.is_empty()
+                    && token.len() <= 256
+                    && token.bytes().all(|byte| byte.is_ascii_graphic()) =>
+            {
+                Self::SourceConfigure(token)
+            }
+            Operation::SourceConfigure { .. } => return Err("请输入有效的 Tushare Token。".into()),
             Operation::UninstallPreserve {} => Self::UninstallPreserve,
             Operation::UninstallPurge { confirmation } if confirmation == PURGE_CONFIRMATION => {
                 Self::UninstallPurge
@@ -78,6 +91,8 @@ impl Invocation {
             Self::Import => &["desktop-import"],
             Self::Attach(Preset::Readonly) => &["desktop-attach", "--preset", "readonly"],
             Self::Attach(Preset::TopicWriter) => &["desktop-attach", "--preset", "topic-writer"],
+            Self::SourceStatus => &["desktop-source-status"],
+            Self::SourceConfigure(_) => &["desktop-source-configure"],
             Self::UninstallPreserve => &["desktop-uninstall", "--mode", "preserve"],
             Self::UninstallPurge => &[
                 "desktop-uninstall",
@@ -92,6 +107,10 @@ impl Invocation {
             args.push(port.to_string());
         }
         args
+    }
+
+    fn source_diagnostic(&self) -> bool {
+        matches!(self, Self::SourceStatus | Self::SourceConfigure(_))
     }
 }
 
@@ -127,6 +146,59 @@ pub struct OperationResult {
     pub elapsed_seconds: f64,
     pub command: String,
     pub status: Option<Status>,
+    pub source: Option<SourceDiagnostic>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SourceDiagnostic {
+    pub saved: bool,
+    pub restart: SourceRestart,
+    pub capabilities: BTreeMap<SourceCapability, SourceCheck>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRestart {
+    NotRequested,
+    Ready,
+    Failed,
+}
+
+#[derive(Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCapability {
+    Daily,
+    AdjFactor,
+    IndexDaily,
+    DailyBasic,
+    FinaIndicator,
+    TradeCal,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCheck {
+    Available,
+    CredentialsMissing,
+    InvalidCredentials,
+    PermissionDenied,
+    QuotaExhausted,
+    ConnectionFailed,
+    CoverageInsufficient,
+}
+
+#[derive(Clone, Copy)]
+enum OutputKind {
+    Log,
+    Status,
+    Source,
+    Silent,
+}
+
+#[derive(Default)]
+struct ParsedOutput {
+    status: Option<Status>,
+    source: Option<SourceDiagnostic>,
 }
 
 fn safe_line(raw: &str) -> String {
@@ -151,10 +223,10 @@ fn safe_line(raw: &str) -> String {
 fn read_output(
     pipe: impl Read,
     stream: &'static str,
-    parse_status: bool,
+    kind: OutputKind,
     emit: &(impl Fn(Progress) + Sync),
-) -> Option<Status> {
-    let mut status = None;
+) -> ParsedOutput {
+    let mut output = ParsedOutput::default();
     for (index, result) in BufReader::new(pipe).split(b'\n').enumerate() {
         let Ok(line) = result else { break };
         let decoded = String::from_utf8_lossy(&line);
@@ -162,9 +234,18 @@ fn read_output(
         if line.is_empty() {
             continue;
         }
-        if parse_status {
+        if matches!(kind, OutputKind::Silent) {
+            continue;
+        }
+        if matches!(kind, OutputKind::Source) {
+            if let Ok(diagnostic) = serde_json::from_str(line) {
+                output.source = Some(diagnostic);
+            }
+            continue;
+        }
+        if matches!(kind, OutputKind::Status) {
             if let Ok(parsed) = serde_json::from_str::<Status>(line) {
-                status = Some(Status {
+                output.status = Some(Status {
                     repair: parsed.repair.as_deref().map(safe_line),
                     ..parsed
                 });
@@ -178,7 +259,7 @@ fn read_output(
             });
         }
     }
-    status
+    output
 }
 
 fn equivalent_command(script: &Path, args: &[String]) -> String {
@@ -243,7 +324,11 @@ pub fn execute(
         .args(&arguments)
         .env_remove("FINBOARD_DESKTOP_TEST_ROOT")
         .env_remove("FINBOARD_DESKTOP_TEST_PROJECT")
-        .stdin(Stdio::null())
+        .stdin(if matches!(invocation, Invocation::SourceConfigure(_)) {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -260,26 +345,48 @@ pub fn execute(
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let parse_status = matches!(invocation, Invocation::Status);
-    let (exit, status) = thread::scope(|scope| {
-        let output = scope.spawn(|| read_output(stdout, "stdout", parse_status, &emit));
-        let errors = scope.spawn(|| read_output(stderr, "stderr", false, &emit));
+    let parse_source = invocation.source_diagnostic();
+    let stdout_kind = if parse_source {
+        OutputKind::Source
+    } else if parse_status {
+        OutputKind::Status
+    } else {
+        OutputKind::Log
+    };
+    let stderr_kind = if parse_source {
+        OutputKind::Silent
+    } else {
+        OutputKind::Log
+    };
+    let (exit, output) = thread::scope(|scope| {
+        let output = scope.spawn(|| read_output(stdout, "stdout", stdout_kind, &emit));
+        let errors = scope.spawn(|| read_output(stderr, "stderr", stderr_kind, &emit));
+        if let Invocation::SourceConfigure(token) = invocation {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(token.as_bytes());
+            }
+        }
         let exit = child.wait();
-        let status = output.join().ok().flatten();
+        let output = output.join().unwrap_or_default();
         let _ = errors.join();
-        (exit, status)
+        (exit, output)
     });
     let exit_code = exit
         .map_err(|_| "无法读取主机操作退出码。")?
         .code()
         .unwrap_or(-1);
-    if parse_status && exit_code == 0 && status.is_none() {
+    if parse_status && exit_code == 0 && output.status.is_none() {
         return Err("安装器没有返回可识别的状态，请重新安装同版本 MSI。".into());
+    }
+    if parse_source && output.source.is_none() {
+        return Err("无法确认 Tushare 操作结果。请检查服务是否就绪，再检查权限。".into());
     }
     Ok(OperationResult {
         exit_code,
         elapsed_seconds: started.elapsed().as_secs_f64(),
         command: equivalent_command(script, &arguments),
-        status,
+        status: output.status,
+        source: output.source,
     })
 }
 
@@ -334,6 +441,35 @@ mod tests {
             equivalent_command(Path::new("C:/option 'test'/finboard.ps1"), &attach.args())
                 .contains("'C:/option ''test''/finboard.ps1'")
         );
+    }
+
+    #[test]
+    fn source_credential_is_never_returned_as_part_of_diagnostics() {
+        let token = "tushare-fixture-not-a-real-token";
+        let invocation = Invocation::try_from(Operation::SourceConfigure {
+            token: token.into(),
+        })
+        .unwrap();
+        assert_eq!(invocation.args(), ["desktop-source-configure"]);
+        assert!(Invocation::try_from(Operation::SourceConfigure {
+            token: "first\nsecond".into(),
+        })
+        .is_err());
+
+        let report = format!(
+            "{}\n{}",
+            token,
+            r#"{"saved":false,"restart":"not_requested","capabilities":{"daily":"invalid_credentials"}}"#
+        );
+        let output = read_output(report.as_bytes(), "stdout", OutputKind::Source, &|_| {
+            panic!("source diagnostics must not return log lines")
+        });
+        let value = serde_json::to_string(&output.source.unwrap()).unwrap();
+        assert!(value.contains("invalid_credentials"));
+        assert!(!value.contains(token));
+        let _ = read_output(token.as_bytes(), "stderr", OutputKind::Silent, &|_| {
+            panic!("source diagnostics must not return stderr lines")
+        });
     }
 
     #[test]
