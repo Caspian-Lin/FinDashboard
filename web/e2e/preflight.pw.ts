@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { activeTopic, evidenceRun, jobId, mockApi, preferences, releaseId, runId, topicId } from "./fixtures";
+import { activeTopic, evidenceRun, finalExperiment, jobId, mockApi, preferences, releaseId, runId, topicId } from "./fixtures";
 
 test("published strategy run keeps preflight separate from worker submission", async ({ page }, info) => {
   test.skip(info.project.name !== "research", "Run the main configuration path against the research edition.");
@@ -43,9 +43,10 @@ test("formal OOS registration previews, registers, and confirms a one-time holdo
   let unsealed = false;
   const wire = await mockApi(page, ({ url, method, body }) => {
     if (url.pathname === `/api/research/experiments/${experimentId}`) {
-      return { json: { experiment_id: experimentId, status: unsealed ? "validated_oos" : "hypothesis", version_stamp: {},
-        hypothesis: "冻结规格的独立证据", plan: {}, thresholds: {}, robustness: {}, trials: [], created_at: evidenceRun.created_at,
-        final_test_unsealed: unsealed, oos_outcome: unsealed ? "not_supported" : "inconclusive" } };
+      return { json: { ...finalExperiment, experiment_id: experimentId, status: unsealed ? "validated_oos" : "hypothesis",
+        hypothesis: "冻结规格的独立证据", final_test_unsealed: unsealed,
+        rejection_reason: unsealed ? finalExperiment.rejection_reason : null,
+        oos_outcome: unsealed ? "not_supported" : null } };
     }
     if (url.pathname === `/api/research/topics/${topicId}/artifacts`) return { json: { items: [{
       entity_type: "validation_experiment", entity_id: experimentId, state: unsealed ? "completed" : "pending",

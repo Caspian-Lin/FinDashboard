@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { evidenceRun, jobId, mockApi, preferences, releaseId, runId, topicId } from "./fixtures";
+import { evidenceRun, failedJob, jobId, mockApi, preferences, releaseId, runId, topicId } from "./fixtures";
 
 test("select shared backfill scope, preview, confirm, and find the new release", async ({ page }, info) => {
   test.skip(info.project.name !== "research", "One realistic shared-data path is enough for both editions.");
@@ -39,6 +39,9 @@ test("select shared backfill scope, preview, confirm, and find the new release",
       }
       return { status: 202, json: receipt };
     }
+    if (url.pathname === `/api/jobs/${jobId}`) return { json: {
+      ...failedJob, kind: "data_backfill", payload: { request_id: receipt.request_id },
+    } };
     if (url.pathname === "/api/data/backfills/" + receipt.request_id) return { json: {
       ...receipt, status: "failed", release_ids: [], items: [], error_summary: "采集队列测试中断。",
     } };
@@ -72,6 +75,10 @@ test("select shared backfill scope, preview, confirm, and find the new release",
   await expect(panel.getByRole("link", { name: "查看补数任务" })).toHaveAttribute("href", `/jobs?job=${jobId}`);
   await expect(page).toHaveURL(new RegExp(`backfill=${receipt.request_id}`));
   await page.reload();
+  await expect(panel.getByText("采集队列测试中断。")).toBeVisible();
+  await panel.getByRole("link", { name: "查看补数任务" }).click();
+  await expect(page).toHaveURL(`/jobs?job=${jobId}`);
+  await page.getByRole("link", { name: "查看补数请求" }).click();
   await expect(panel.getByText("采集队列测试中断。")).toBeVisible();
   await panel.getByRole("button", { name: "重试未完成项" }).click();
   const retryDialog = page.getByRole("dialog", { name: "确认续补失败项" });
