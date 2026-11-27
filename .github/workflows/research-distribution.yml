@@ -82,6 +82,8 @@ jobs:
           python scripts/package_research_desktop.py desktop/src-tauri/resources/edition \
             --config desktop/src-tauri/tauri.offline.conf.json --starter .tmp/synthetic-starter-v1.zip \
             --app-image "$FINBOARD_IMAGE" --postgres-image "$PG_IMAGE" --version "$VERSION" --preview
+          docker image load --input desktop/src-tauri/resources/edition/images.tar
+          python -c 'from pathlib import Path; from scripts.package_research_desktop import verify_loaded_images; verify_loaded_images(Path("desktop/src-tauri/resources/edition/offline-manifest.json"))'
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'feat/research-desktop-')
         with:
@@ -277,15 +279,7 @@ jobs:
             --config desktop/src-tauri/tauri.offline.conf.json --starter dist/synthetic-starter-v1.zip \
             --app-image "$IMAGE" --postgres-image "$PG_IMAGE" --version "$VERSION"
           docker image load --input desktop/src-tauri/resources/edition/images.tar
-          python - <<'PY'
-          import json
-          import subprocess
-          from pathlib import Path
-          manifest = json.loads(Path("desktop/src-tauri/resources/edition/offline-manifest.json").read_bytes())
-          for image in manifest["images"]:
-              identity = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", image["tag"]], text=True)
-              assert identity.strip() == image["id"]
-          PY
+          python -c 'from pathlib import Path; from scripts.package_research_desktop import verify_loaded_images; verify_loaded_images(Path("desktop/src-tauri/resources/edition/offline-manifest.json"))'
       - uses: actions/upload-artifact@v4
         with:
           name: offline-desktop-assets

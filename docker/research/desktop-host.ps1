@@ -54,10 +54,19 @@ function Assert-DesktopImages($Images, [bool]$RequirePair) {
     }
     $roles = @()
     foreach ($image in $Images) {
+        if ($image.tag -isnot [string] -or $image.id -isnot [string]) {
+            throw "desktop_invalid_manifest: An offline image tag or identity is invalid."
+        }
         $tag = [regex]::Match($image.tag, '^finboard-research-desktop/(app|postgres):[a-z0-9][a-z0-9_.-]{0,100}$')
         if (!$tag.Success -or
-            $image.id -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            $image.id -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+            ($null -ne $image.compatible_ids -and $image.compatible_ids -isnot [array])) {
             throw "desktop_invalid_manifest: An offline image tag or identity is invalid."
+        }
+        foreach ($identity in $image.compatible_ids) {
+            if ($identity -isnot [string] -or $identity -cnotmatch '^sha256:[0-9a-f]{64}$') {
+                throw "desktop_invalid_manifest: A compatible offline image identity is invalid."
+            }
         }
         $roles += $tag.Groups[1].Value
     }
@@ -245,7 +254,7 @@ function Get-DesktopOwnedResources($State) {
     return $resources
 }
 
-function Get-DesktopImage($Image) {
+function Get-DesktopImage($Image, [switch]$RetainUnverifiedTag) {
     $result = Invoke-DesktopDocker @("image", "inspect", "--format", "{{.Id}} {{.Os}} {{.Architecture}}", $Image.tag)
     if ($result.exitCode -ne 0) {
         if ($result.stderr -match '(?im)^Error(?: response from daemon)?:\s*No such image(?:\s|:)') {
@@ -253,7 +262,13 @@ function Get-DesktopImage($Image) {
         }
         throw "desktop_docker_unavailable: Docker could not check the offline image. Check the Linux engine and retry."
     }
-    if ($result.stdout -cne "$($Image.id) linux amd64") {
+    $allowedIds = @($Image.id) + @($Image.compatible_ids)
+    $identity = [regex]::Match($result.stdout, '^(sha256:[0-9a-f]{64}) linux amd64$')
+    if (!$identity.Success -or $identity.Groups[1].Value -cnotin $allowedIds) {
+        if ($RetainUnverifiedTag) {
+            Write-Host "Retaining Desktop image tag $($Image.tag) because its current identity cannot be confirmed."
+            return $false
+        }
         throw "desktop_image_conflict: A local Desktop image has a different identity. Verify the installed package and Docker tags."
     }
     return $true
@@ -453,7 +468,7 @@ function Remove-DesktopInstallation($State, $Resources) {
         throw "desktop_cleanup_pending: Some Desktop containers or networks remain. Close their users in Docker Desktop and retry."
     }
     foreach ($image in $State.owned_images) {
-        if (!(Get-DesktopImage $image)) { continue }
+        if (!(Get-DesktopImage $image -RetainUnverifiedTag)) { continue }
         $consumers = Invoke-DesktopDocker @("container", "ls", "--all", "--filter", "ancestor=$($image.tag)", "--quiet")
         if ($consumers.exitCode -ne 0) {
             throw "desktop_cleanup_pending: Docker image use could not be checked. Retry the uninstall."

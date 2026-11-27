@@ -10,8 +10,10 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
+from typing import Any
 
 # 升级此 digest 后重新验证迁移及保留数据重装。
 POSTGRES_IMAGE = "postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d"
@@ -20,6 +22,8 @@ _HOST_FILES = (
     "desktop-host.ps1", "compose.yaml", "compose.desktop.yaml",
 )
 _VERSION = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_BLOB = re.compile(r"blobs/sha256/[0-9a-f]{64}\Z")
 
 
 def _docker(*args: str) -> str:
@@ -28,7 +32,7 @@ def _docker(*args: str) -> str:
 
 def _inspect(reference: str) -> str:
     identity, platform = _docker("image", "inspect", "--format", "{{.Id}} {{.Os}}/{{.Architecture}}", "--", reference).split()
-    if platform != "linux/amd64" or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity):
+    if platform != "linux/amd64" or not _DIGEST.fullmatch(identity):
         raise ValueError(f"{reference} must be a Linux amd64 content-addressed Docker image")
     return identity
 
@@ -44,6 +48,84 @@ def _write_image_archive(path: Path, tags: tuple[str, ...]) -> None:
         shutil.copyfileobj(process.stdout, compressed, length=1024 * 1024)
         if process.wait() != 0:
             raise RuntimeError("Docker failed to save the offline images")
+
+
+def _archive_documents(path: Path) -> dict[str, bytes]:
+    documents: dict[str, bytes] = {}
+    total = 0
+    with tarfile.open(path, "r|gz") as archive:
+        for member in archive:
+            if member.name not in {"manifest.json", "index.json"} and not _BLOB.fullmatch(member.name):
+                continue
+            if not member.isfile() or member.size > 1024 * 1024:
+                continue
+            total += member.size
+            if member.name in documents or total > 32 * 1024 * 1024:
+                raise ValueError("unexpected Docker archive metadata")
+            stream = archive.extractfile(member)
+            assert stream is not None
+            with stream:
+                documents[member.name] = stream.read()
+    return documents
+
+
+def _target_ids(desc: dict[str, Any], documents: dict[str, bytes], config_id: str) -> set[str]:
+    digest = desc["digest"]
+    if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
+        raise ValueError("invalid OCI descriptor digest")
+    blob = documents.get(f"blobs/sha256/{digest[7:]}")
+    if blob is None:
+        raise ValueError("missing OCI descriptor for the saved platform")
+    if hashlib.sha256(blob).hexdigest() != digest[7:]:
+        raise ValueError("OCI descriptor checksum mismatch")
+    record = json.loads(blob)
+    if "config" in record:
+        if record["config"]["digest"] != config_id:
+            raise ValueError("OCI target points to a different image config")
+        return {digest}
+    matched: set[str] = set()
+    for child in record.get("manifests", []):
+        platform = child.get("platform")
+        if not platform or (platform.get("os"), platform.get("architecture")) == ("linux", "amd64"):
+            matched.update(_target_ids(child, documents, config_id))
+    return matched | {digest} if matched else set()
+
+
+def archive_image_ids(path: Path, tags: tuple[str, ...]) -> dict[str, set[str]]:
+    """Return the config and OCI target digests proven by each exact saved tag."""
+    documents = _archive_documents(path)
+    docker_manifest = json.loads(documents["manifest.json"])
+    oci_manifest = json.loads(documents["index.json"])["manifests"]
+    identities: dict[str, set[str]] = {}
+    for tag in tags:
+        rows = [row for row in docker_manifest if tag in row["RepoTags"]]
+        targets = [
+            desc for desc in oci_manifest
+            if desc.get("annotations", {}).get("io.containerd.image.name", "").removeprefix("docker.io/") == tag
+        ]
+        if len(rows) != 1 or len(targets) != 1:
+            raise ValueError(f"expected one Docker manifest and one OCI descriptor for {tag}")
+        config_blob = rows[0]["Config"]
+        raw_config = documents[config_blob]
+        config_checksum = hashlib.sha256(raw_config).hexdigest()
+        config = json.loads(raw_config)
+        if config_blob != f"blobs/sha256/{config_checksum}" or (
+            config.get("os"), config.get("architecture")
+        ) != ("linux", "amd64"):
+            raise ValueError(f"invalid saved image config for {tag}")
+        config_id = f"sha256:{config_checksum}"
+        targets_for_config = _target_ids(targets[0], documents, config_id)
+        if not targets_for_config:
+            raise ValueError(f"no OCI target for the saved Linux amd64 config of {tag}")
+        identities[tag] = {config_id, *targets_for_config}
+    return identities
+
+
+def verify_loaded_images(manifest_path: Path) -> None:
+    manifest = json.loads(manifest_path.read_bytes())
+    for image in manifest["images"]:
+        if _inspect(image["tag"]) not in {image["id"], *image.get("compatible_ids", [])}:
+            raise ValueError(f"unexpected loaded image identity for {image['tag']}")
 
 
 def package(
@@ -92,10 +174,16 @@ def package(
                     _docker("image", "rm", tag)
         with archive.open("rb") as image_file:
             checksum = hashlib.file_digest(image_file, "sha256").hexdigest()
+        archived_ids = archive_image_ids(archive, tags)
+        images = []
+        for tag, image_id in zip(tags, identities, strict=True):
+            if image_id not in archived_ids[tag]:
+                raise ValueError(f"saved image {tag} does not contain the source identity")
+            images.append({"tag": tag, "id": image_id, "compatible_ids": sorted(archived_ids[tag] - {image_id})})
         manifest = {
             "schema_version": 1,
             "archive_sha256": checksum,
-            "images": [{"tag": tag, "id": image_id} for tag, image_id in zip(tags, identities, strict=True)],
+            "images": images,
         }
         if preview:
             manifest["channel"] = "preview"

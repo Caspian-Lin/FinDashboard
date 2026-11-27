@@ -197,7 +197,7 @@ try {
         schema_version = 1
         archive_sha256 = (Get-FileHash -LiteralPath $archivePath).Hash.ToLowerInvariant()
         images = @(
-            @{tag = "finboard-research-desktop/app:test"; id = "sha256:" + ("a" * 64)},
+            @{tag = "finboard-research-desktop/app:test"; id = "sha256:" + ("a" * 64); compatible_ids = @("sha256:" + ("d" * 64))},
             @{tag = "finboard-research-desktop/postgres:test"; id = "sha256:" + ("b" * 64)}
         )
     }
@@ -248,7 +248,9 @@ try {
     $fixture.portBusy = $false
     $fixture.images[$manifest.images[0].tag] = "sha256:" + ("c" * 64)
     Require-Failure { Run-Desktop "install" } "desktop_image_conflict"
-    $fixture.images[$manifest.images[0].tag] = $manifest.images[0].id
+    $fixture.images[$manifest.images[0].tag] = $manifest.images[0].compatible_ids[0]
+    Run-Desktop "install"
+    Require ($fixture.loads -eq 1) "The same archived image on another Docker storage engine should be reused."
 
     $receipt = Run-Desktop "import" | ConvertFrom-Json
     Require ($receipt.release_id -ceq "synthetic-starter-v1" -and $fixture.operator[-1] -ceq "synthetic-bundle") "The included starter was not imported."
@@ -285,6 +287,10 @@ try {
     Run-Desktop "install"
     $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
     Require ($state.instance_id -ceq $savedOwner -and $state.port -eq 18198) "Reinstall failed to restore the retained identity."
+    $legacy = @{tag = "finboard-research-desktop/app:old-preview"; id = "sha256:" + ("e" * 64)}
+    $state.owned_images = @($state.owned_images) + @($legacy)
+    Write-File $stateFile ($state | ConvertTo-Json -Depth 8 -Compress)
+    $fixture.images[$legacy.tag] = "sha256:" + ("f" * 64)
     $fixture.failVolume = $true
     Require-Failure { Run-Desktop "uninstall" @{"--mode" = "purge"; "--confirm" = "DELETE-THIS-INSTANCE"} } "desktop_cleanup_pending"
     Require ((Test-Path -LiteralPath $stateFile) -and $fixture.volume.ContainsKey("$($fixtureProject)_research")) "An interrupted purge lost its retry state."
@@ -296,6 +302,7 @@ try {
     Run-Desktop "uninstall" @{"--mode" = "purge"; "--confirm" = "DELETE-THIS-INSTANCE"}
     Require (!(Test-Path -LiteralPath $stateFile) -and !$fixture.volume.ContainsKey("$($fixtureProject)_research") -and
         $fixture.volume.ContainsKey("$($secondProject)_research")) "Purge did not obey instance ownership."
+    Require ($fixture.images.ContainsKey($legacy.tag)) "An old tag with unverified identity was removed."
     Write-Host "Desktop host faults, offline installation and ownership checks passed."
 } finally {
     $cwd = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.tmp"))
