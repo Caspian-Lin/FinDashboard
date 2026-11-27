@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -16,7 +16,8 @@ import structlog
 from finboard_backtest.portfolio.contracts import MAX_WEIGHT_EPSILON
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.checkpoint_resume import (
-    iter_completed_decision_prefix,
+    DecisionCheckpoint,
+    iter_decision_checkpoints,
 )
 from finboard_backtest.research_run.contracts import (
     REPLAYABLE_SOURCE_STATUSES,
@@ -54,7 +55,7 @@ from finboard_backtest.research_run.failure_context import (
     build_failure_summary,
 )
 from finboard_backtest.research_run.stage_timing import collect_stage_timings
-from finboard_backtest.research_run.store import ResearchRunStore
+from finboard_backtest.research_run.store import CheckpointChecksumStore, ResearchRunStore
 from finboard_data.cache import ParquetReadJobStats, collect_parquet_read_stats
 
 logger = structlog.get_logger(__name__)
@@ -260,14 +261,21 @@ class ResearchRunCoordinator:
             # 读回失败一律走既有全量重算路径 —— 幂等去重保证正确性,
             # 「宁重算不漂移」)。
             resume_started = time.monotonic()
-            resume_prefix = await self._load_resume_prefix(manifest.run_id)
+            confirms_checkpoint = getattr(adapter, "is_accepted_checkpoint", None)
+            checksum_store = self._store if isinstance(self._store, CheckpointChecksumStore) else None
+            reuse_sections = callable(confirms_checkpoint) and checksum_store is not None
+            resume_prefix = await self._load_resume_prefix(
+                manifest.run_id, reuse_sections=reuse_sections
+            )
             resume_seconds = time.monotonic() - resume_started if resume_prefix else None
-            if resume_prefix:
-                self._offer_resume(manifest.run_id, adapter, resume_prefix)
-                # #470 前半场:种子引用即刻移交 —— 适配器接受后自行持有
-                # (消费期破坏性释放),拒绝时无人持有;runner 侧局部变量不再
-                # 把整个前缀钉到 run 结束。
-                resume_prefix = []
+            checkpoints: deque[DecisionCheckpoint] = deque()
+            if resume_prefix and self._offer_resume(
+                manifest.run_id, adapter, [item.decision for item in resume_prefix]
+            ) and reuse_sections:
+                checkpoints.extend(resume_prefix)
+            # 仅在线性复查期间保留相同种子的身份引用,逐期弹出。
+            resume_prefix = []
+            reused_checkpoints = 0
             position_quantities: dict[tuple[str, ResearchPositionSide], Decimal] = (
                 defaultdict(Decimal)
             )
@@ -321,13 +329,38 @@ class ResearchRunCoordinator:
                             position_quantities=position_quantities,
                             seen_fill_ids=seen_fill_ids,
                         )
-                        await self._persist_decision(
-                            manifest.run_id,
-                            len(decisions),
-                            decision,
-                            progress=progress,
-                            failure_ctx=failure_ctx,
-                        )
+                        checkpoint = checkpoints.popleft() if checkpoints else None
+                        if checkpoint is not None and (
+                            checkpoint.decision is not raw_decision
+                            or not callable(confirms_checkpoint)
+                            or not confirms_checkpoint(raw_decision)
+                        ):
+                            # 外层登记成功仍可能在管线校验时拒绝。重算从原路径落库。
+                            checkpoints.clear()
+                            checkpoint = None
+                        if (
+                            checkpoint is not None
+                            and checkpoint.stages is not None
+                            and checksum_store is not None
+                            and _checkpoint_matches(
+                                manifest.run_id, len(decisions), decision, checkpoint,
+                                failure_ctx=failure_ctx,
+                            )
+                            and await checksum_store.checkpoint_checksums_match(
+                                manifest.run_id,
+                                {row.artifact_id: row.checksum for row in checkpoint.stages.values()},
+                            )
+                        ):
+                            reused_checkpoints += 1
+                            await _report_decision_progress(progress, len(decisions), decision)
+                        else:
+                            await self._persist_decision(
+                                manifest.run_id,
+                                len(decisions),
+                                decision,
+                                progress=progress,
+                                failure_ctx=failure_ctx,
+                            )
                         await self._store.checkpoint()
                         # issue #473(#463 下半场续):持久化完成后决策列表改存
                         # 账本级记录 —— 消费面(build_report / _validate_report /
@@ -341,8 +374,15 @@ class ResearchRunCoordinator:
                             decision.business_date, time.monotonic() - execute_started
                         )
             finally:
+                checkpoints.clear()
                 if isinstance(decision_iterator, AsyncGenerator):
                     await decision_iterator.aclose()
+                if reused_checkpoints:
+                    logger.info(
+                        "research_run.resume_checkpoints_reused",
+                        run_id=manifest.run_id,
+                        completed_decisions=reused_checkpoints,
+                    )
 
             failure_ctx.stage = "report"
             report_started = time.monotonic()
@@ -400,6 +440,7 @@ class ResearchRunCoordinator:
                 timing["decision_load_stages"] = stage_totals
             if resume_seconds is not None:
                 timing["resume_prefix_readback_seconds"] = round(resume_seconds, 3)
+                timing["resume_checkpoints_reused"] = reused_checkpoints
             await self._store.save_result(
                 manifest.run_id,
                 report=report,
@@ -685,10 +726,12 @@ class ResearchRunCoordinator:
             return None
         return marker if isinstance(marker, dict) else None
 
-    async def _load_resume_prefix(self, run_id: str) -> list[DecisionBundle]:
+    async def _load_resume_prefix(
+        self, run_id: str, *, reuse_sections: bool
+    ) -> list[DecisionCheckpoint]:
         """读回已完整落库的决策前缀(issue #314 入口;流式,#470 前半场)。
 
-        前缀判定与重建见 ``checkpoint_resume.iter_completed_decision_prefix``:
+        前缀判定与重建见 ``checkpoint_resume.iter_decision_checkpoints``:
         从 0 开始的最长连续决策,artifact 按 sequence 流式读回(store 服务端
         游标 + 分块),逐决策「凑齐 13 stage → 复验 → 重建 → 释放载荷」——
         前缀 payload 不再全量物化(272 期前缀实测曾把 ≈8GB Python 对象钉进
@@ -697,10 +740,10 @@ class ResearchRunCoordinator:
         ``list_artifacts`` 失败语义一致)。
         """
 
-        prefix: list[DecisionBundle] = []
+        prefix: list[DecisionCheckpoint] = []
         try:
             rows = self._store.iter_artifacts(run_id)
-            bundles = iter_completed_decision_prefix(run_id, rows)
+            bundles = iter_decision_checkpoints(run_id, rows, reuse_sections=reuse_sections)
             try:
                 async for bundle in bundles:
                     prefix.append(bundle)
@@ -731,7 +774,7 @@ class ResearchRunCoordinator:
         run_id: str,
         adapter: ResearchStrategyAdapter,
         prefix: list[DecisionBundle],
-    ) -> None:
+    ) -> bool:
         """把已完成决策前缀提议给适配器(可选协议,issue #304 getattr 先例)。
 
         实现了 ``resume_from`` 的适配器接受后对前缀零重算(原样产出);
@@ -747,7 +790,7 @@ class ResearchRunCoordinator:
                 completed_decisions=len(prefix),
                 message="适配器不支持断点续算,已完成决策将全量重算(幂等去重兜底)",
             )
-            return
+            return False
         try:
             accepted = bool(hook(prefix))
         except Exception:
@@ -757,7 +800,7 @@ class ResearchRunCoordinator:
                 completed_decisions=len(prefix),
                 exc_info=True,
             )
-            return
+            return False
         if accepted:
             logger.info(
                 "research_run.resume_accepted",
@@ -771,6 +814,7 @@ class ResearchRunCoordinator:
                 completed_decisions=len(prefix),
                 message="适配器拒绝断点续算种子,已完成决策将全量重算",
             )
+        return accepted
 
     async def _persist_decision(
         self,
@@ -800,26 +844,16 @@ class ResearchRunCoordinator:
         #    ``json.dumps``(``payload`` 置空占位,需要 dict 的存储实现按需
         #    物化)。checksum / 落库字节逐字节与历史一致(#472 回归测试)。
         stage_payloads = _decision_stage_payloads(decision)
-        fragments = decision.canonical_fragments or {}
         parent: tuple[str, ...] = ()
         artifacts: list[ResearchArtifact] = []
-        stage_phases: list[tuple[int, str]] = []
         for offset, stage in enumerate(_DECISION_STAGES):
             if failure_ctx is not None:
                 failure_ctx.stage = stage.value
-            payload_text = canonical_json_text(
-                {
-                    "business_date": decision.business_date,
-                    "decision_at": decision.decision_at,
-                    **stage_payloads[stage],
-                },
-                fragments=fragments,
-            )
+            payload_text = _decision_stage_text(decision, stage_payloads[stage])
             payload_checksum = stable_checksum_text(payload_text)
-            stable_suffix = f"{decision_index:08d}:{stage.value}"
-            trace_id = f"RRT-{stable_checksum(stable_suffix)[:24]}"
+            artifact_id, trace_id = _decision_artifact_identity(run_id, decision_index, stage)
             artifact = ResearchArtifact(
-                artifact_id=f"{run_id}:A:{stable_suffix}",
+                artifact_id=artifact_id,
                 run_id=run_id,
                 decision_id=decision.decision_id,
                 sequence=decision_index * len(_DECISION_STAGES) + offset,
@@ -831,22 +865,9 @@ class ResearchRunCoordinator:
                 checksum=payload_checksum,
             )
             artifacts.append(artifact)
-            # 单位 = 已完成的 (decision x stage) 工件数;total 随当前已发现的
-            # 决策递增(见 DECISION_STAGE_COUNT 注释)。phase 携带决策级
-            # 上下文(issue #308):序号 1-based + business_date。批量落库后
-            # 逐 stage 上报序列保持不变(仅整体后移到落库之后)。
-            stage_phases.append(
-                (
-                    decision_index * DECISION_STAGE_COUNT + offset + 1,
-                    _decision_phase(stage.value, decision_index, decision.business_date),
-                )
-            )
             parent = (trace_id,)
         await self._store.append_artifacts(artifacts)
-        if progress is not None:
-            total = (decision_index + 1) * DECISION_STAGE_COUNT
-            for done, phase in stage_phases:
-                await _report_progress(progress, done, total, phase)
+        await _report_decision_progress(progress, decision_index, decision)
 
     async def _persist_report(
         self,
@@ -1170,6 +1191,71 @@ class ResearchRunCoordinator:
         if record is None:
             raise ResearchRunConflictError(f"研究运行不存在: {run_id}")
         return record
+
+
+def _decision_artifact_identity(
+    run_id: str, decision_index: int, stage: ResearchRunStage
+) -> tuple[str, str]:
+    suffix = f"{decision_index:08d}:{stage.value}"
+    return f"{run_id}:A:{suffix}", f"RRT-{stable_checksum(suffix)[:24]}"
+
+
+def _decision_stage_text(decision: DecisionBundle, payload: dict[str, object]) -> str:
+    return canonical_json_text(
+        {
+            "business_date": decision.business_date,
+            "decision_at": decision.decision_at,
+            **payload,
+        },
+        fragments=decision.canonical_fragments,
+    )
+
+
+def _checkpoint_matches(
+    run_id: str,
+    decision_index: int,
+    decision: DecisionBundle,
+    checkpoint: DecisionCheckpoint,
+    *,
+    failure_ctx: FailureContext,
+) -> bool:
+    """核对已复验的源行和当前决策产物,任一差异沿用幂等写入的判定。"""
+
+    if checkpoint.stages is None or decision.canonical_fragments:
+        return False
+    payloads = _decision_stage_payloads(decision)
+    parent: tuple[str, ...] = ()
+    for offset, stage in enumerate(_DECISION_STAGES):
+        failure_ctx.stage = stage.value
+        artifact_id, trace_id = _decision_artifact_identity(run_id, decision_index, stage)
+        saved = checkpoint.stages[stage]
+        if (
+            saved.artifact_id != artifact_id
+            or saved.decision_id != decision.decision_id
+            or saved.sequence != decision_index * DECISION_STAGE_COUNT + offset
+            or saved.trace_id != trace_id
+            or saved.parent_trace_ids != parent
+        ):
+            return False
+        if (
+            stage not in (ResearchRunStage.UNIVERSE, ResearchRunStage.FEATURES)
+            and stable_checksum_text(_decision_stage_text(decision, payloads[stage])) != saved.checksum
+        ):
+            return False
+        parent = (trace_id,)
+    return True
+
+
+async def _report_decision_progress(
+    progress: ProgressHook | None, decision_index: int, decision: DecisionBundle
+) -> None:
+    if progress is None:
+        return
+    total = (decision_index + 1) * DECISION_STAGE_COUNT
+    for offset, stage in enumerate(_DECISION_STAGES):
+        done = decision_index * DECISION_STAGE_COUNT + offset + 1
+        phase = _decision_phase(stage.value, decision_index, decision.business_date)
+        await _report_progress(progress, done, total, phase)
 
 
 def _decision_stage_payloads(

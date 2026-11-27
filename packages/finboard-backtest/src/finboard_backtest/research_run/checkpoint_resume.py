@@ -24,11 +24,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, field
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import aclosing
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from decimal import Decimal
-from typing import cast
+from typing import NamedTuple, cast
 
 import structlog
 
@@ -81,6 +82,22 @@ DECISION_ARTIFACT_STAGES: frozenset[ResearchRunStage] = frozenset(
 )
 
 _DECISION_ARTIFACT_STAGE_COUNT = len(DECISION_ARTIFACT_STAGES)
+
+
+class CheckpointStage(NamedTuple):
+    artifact_id: str
+    decision_id: str | None
+    sequence: int
+    trace_id: str
+    parent_trace_ids: tuple[str, ...]
+    checksum: str
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionCheckpoint:
+    decision: DecisionBundle
+    # 只有候选池与特征恢复后能逐字节往返时才提供。保留轻量证据,释放原载荷。
+    stages: dict[ResearchRunStage, CheckpointStage] | None = None
 
 
 def decision_artifact_index(run_id: str, artifact_id: str) -> int | None:
@@ -161,6 +178,17 @@ async def iter_completed_decision_prefix(
     run_id: str,
     artifacts: AsyncIterator[ResearchArtifact],
 ) -> AsyncIterator[DecisionBundle]:
+    async with aclosing(iter_decision_checkpoints(run_id, artifacts)) as checkpoints:
+        async for checkpoint in checkpoints:
+            yield checkpoint.decision
+
+
+async def iter_decision_checkpoints(
+    run_id: str,
+    artifacts: AsyncIterator[ResearchArtifact],
+    *,
+    reuse_sections: bool = False,
+) -> AsyncGenerator[DecisionCheckpoint, None]:
     """``completed_decision_prefix`` 的流式形态(#470 前半场)。
 
     输入须按 ``sequence`` 升序(store 实现保证):决策级 artifact 的
@@ -202,7 +230,8 @@ async def iter_completed_decision_prefix(
             continue
         try:
             _verify_stage_checksums(run_id, index, current)
-            bundle = rebuild_decision(run_id, index, current)
+            layout = _SectionLayout() if reuse_sections else None
+            bundle = rebuild_decision(run_id, index, current, _layout=layout)
         except Exception as exc:
             logger.warning(
                 "research_run.resume_readback_failed",
@@ -212,9 +241,22 @@ async def iter_completed_decision_prefix(
                 message="决策 artifact 读回/重建失败,断点续算前缀在该决策处截断",
             )
             return
-        yield bundle
-        index += 1
+        stages = None
+        if layout is not None and layout.matches(bundle, current):
+            stages = {
+                stage: CheckpointStage(
+                    row.artifact_id,
+                    row.decision_id,
+                    row.sequence,
+                    row.trace_id,
+                    row.parent_trace_ids,
+                    row.checksum,
+                )
+                for stage, row in current.items()
+            }
         current = {}
+        yield DecisionCheckpoint(bundle, stages)
+        index += 1
     if current:
         _truncate_incomplete(index)
 
@@ -323,6 +365,8 @@ def rebuild_decision(
     run_id: str,
     decision_index: int,
     by_stage: dict[ResearchRunStage, ResearchArtifact],
+    *,
+    _layout: _SectionLayout | None = None,
 ) -> DecisionBundle:
     """按 runner ``_persist_decision`` 的载荷布局重建一个决策。"""
 
@@ -361,13 +405,13 @@ def rebuild_decision(
             f"{label} decision_at",
         ),
         candidates=tuple(
-            _rebuild_candidate(item, f"{label} candidates[{position}]")
+            _rebuild_candidate(item, f"{label} candidates[{position}]", _layout)
             for position, item in enumerate(
                 _require_list(_field(universe, "candidates", f"{label} universe"), label)
             )
         ),
         features=tuple(
-            _rebuild_feature(item, f"{label} features[{position}]", feature_metadata)
+            _rebuild_feature(item, f"{label} features[{position}]", feature_metadata, _layout)
             for position, item in enumerate(
                 _require_list(_field(features, "features", f"{label} features"), label)
             )
@@ -462,8 +506,48 @@ def _require_list(value: object, label: str) -> list[JsonValue]:
     return cast(list[JsonValue], value)
 
 
-def _rebuild_candidate(value: object, label: str) -> UniverseCandidate:
+_CANDIDATE_FIELDS = frozenset({"symbol", "included", "reasons", "asset_class", "market"})
+_FEATURE_FIELDS = frozenset({"symbol", "feature_id", "value", "source_artifact_ids", "available_at"})
+_SECTION_SCHEMAS_MATCH = (
+    {item.name for item in fields(UniverseCandidate)} == _CANDIDATE_FIELDS
+    and {item.name for item in fields(FeatureValue)} == _FEATURE_FIELDS
+)
+
+
+@dataclass(slots=True)
+class _SectionLayout:
+    exact: bool = _SECTION_SCHEMAS_MATCH
+
+    def matches(
+        self,
+        decision: DecisionBundle,
+        stages: dict[ResearchRunStage, ResearchArtifact],
+    ) -> bool:
+        if not self.exact:
+            return False
+        business_date = decision.business_date.isoformat()
+        decision_at = decision.decision_at.isoformat()
+        for stage, key in (
+            (ResearchRunStage.UNIVERSE, "candidates"),
+            (ResearchRunStage.FEATURES, "features"),
+        ):
+            payload = stages[stage].payload
+            if (
+                set(payload) != {"business_date", "decision_at", key}
+                or payload["business_date"] != business_date
+                or payload["decision_at"] != decision_at
+            ):
+                return False
+        return True
+
+
+def _rebuild_candidate(
+    value: object, label: str, layout: _SectionLayout | None = None
+) -> UniverseCandidate:
     item = _mapping(value, label)
+    if layout is not None and len(item) != len(_CANDIDATE_FIELDS):
+        # 下方逐个读取所有已知键,因此同长时也排除了额外键。
+        layout.exact = False
     return UniverseCandidate(
         symbol=_as_str(_field(item, "symbol", label), f"{label}.symbol"),
         included=_as_bool(_field(item, "included", label), f"{label}.included"),
@@ -482,7 +566,12 @@ class _FeatureMetadata:
     timestamps: dict[str, datetime] = field(default_factory=dict)
 
 
-def _rebuild_feature(value: object, label: str, metadata: _FeatureMetadata) -> FeatureValue:
+def _rebuild_feature(
+    value: object,
+    label: str,
+    metadata: _FeatureMetadata,
+    layout: _SectionLayout | None = None,
+) -> FeatureValue:
     item = _mapping(value, label)
     raw_value = _field(item, "value", label)
     symbol = _as_str(_field(item, "symbol", label), f"{label}.symbol")
@@ -497,6 +586,13 @@ def _rebuild_feature(value: object, label: str, metadata: _FeatureMetadata) -> F
         # 保留原时区偏移。同一瞬间的不同 ISO 表示可能有不同的 canonical 字节。
         available_at = _as_datetime(timestamp_text, f"{label}.available_at")
         metadata.timestamps[timestamp_text] = available_at
+        if layout is not None and available_at.isoformat() != timestamp_text:
+            layout.exact = False
+    if layout is not None and (
+        len(item) != len(_FEATURE_FIELDS)
+        or (raw_value is not None and type(raw_value) is not float)
+    ):
+        layout.exact = False
     return FeatureValue(
         symbol=metadata.names.setdefault(symbol, symbol),
         feature_id=metadata.names.setdefault(feature_id, feature_id),

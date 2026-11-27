@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 from finboard_backtest.research_run.contracts import (
     ArtifactDigest,
@@ -85,6 +85,15 @@ class ResearchRunStore(Protocol):
     async def list_artifact_digests(self, run_id: str) -> list[ArtifactDigest]: ...
 
     async def checkpoint(self) -> None: ...
+
+
+@runtime_checkable
+class CheckpointChecksumStore(Protocol):
+    """可选的断点摘要复查,保持旧 store 仍走正常幂等写入。"""
+
+    async def checkpoint_checksums_match(
+        self, run_id: str, checksums: Mapping[str, str]
+    ) -> bool: ...
 
 
 class InMemoryResearchRunStore:
@@ -229,6 +238,16 @@ class InMemoryResearchRunStore:
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]:
         values = self._artifacts.get(run_id, {}).values()
         return sorted(values, key=lambda item: item.sequence)
+
+    async def checkpoint_checksums_match(
+        self, run_id: str, checksums: Mapping[str, str]
+    ) -> bool:
+        async with self._lock:
+            artifacts = self._artifacts.get(run_id, {})
+            return all(
+                artifact_id in artifacts and artifacts[artifact_id].checksum == checksum
+                for artifact_id, checksum in checksums.items()
+            )
 
     async def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
         for item in await self.list_artifacts(run_id):

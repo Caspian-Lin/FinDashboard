@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeVar
@@ -60,6 +60,7 @@ from finboard_backtest.research_run.contracts import (
     JsonValue,
     ResearchRunInterruptedError,
 )
+from finboard_backtest.research_run.store import CheckpointChecksumStore
 
 if TYPE_CHECKING:
     from finboard_backtest.research_run.store import ResearchRunStore
@@ -257,6 +258,16 @@ class SessionPerOperationResearchRunStore:
             return await store.list_artifacts(run_id)
 
         return await self._with_store("list_artifacts", op)
+
+    async def checkpoint_checksums_match(
+        self, run_id: str, checksums: Mapping[str, str]
+    ) -> bool:
+        async def op(store: ResearchRunStore) -> bool:
+            return isinstance(store, CheckpointChecksumStore) and (
+                await store.checkpoint_checksums_match(run_id, checksums)
+            )
+
+        return await self._with_store("checkpoint_checksums_match", op)
 
     def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
         """流式遍历 artifact(#470 前半场);会话生命周期覆盖整个迭代。

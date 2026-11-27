@@ -3007,6 +3007,7 @@ class SignalEnginePipelineAdapter:
         # issue #314:断点续算种子(coordinator 从 artifact 读回的已完成决策
         # 前缀,resume_from 接受后非空;decisions() 首次迭代时惰性消费)。
         self._resume_bundles: tuple[DecisionBundle, ...] | None = None
+        self._accepted_checkpoint: DecisionBundle | None = None
 
     @property
     def execution_mode(self) -> ResearchExecutionMode:
@@ -3028,6 +3029,11 @@ class SignalEnginePipelineAdapter:
             return False
         self._resume_bundles = tuple(completed)
         return True
+
+    def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
+        """只确认组合管线接受的普通因子种子,在该期 yield 期间有效。"""
+
+        return self._accepted_checkpoint is decision
 
     async def _resume_all_completed(self, resume: tuple[DecisionBundle, ...]) -> bool:
         """全部决策均已落库时允许跳过整段加载(issue #314)。
@@ -3304,6 +3310,7 @@ class SignalEnginePipelineAdapter:
         resume_all: deque[DecisionBundle] | None = None
         pipeline: PortfolioPipelineAdapter | None = None
         pipeline_iter: AsyncIterator[DecisionBundle] | None = None
+        accepted_checkpoints = 0
         try:
             if resume is not None:
                 if await self._resume_all_completed(resume):
@@ -3334,6 +3341,8 @@ class SignalEnginePipelineAdapter:
                         self._resume_bundles = None
                         await self._reset_input_stream()
                         pipeline = await self._load()
+                    elif self._stub_prefix_periods == len(resume):
+                        accepted_checkpoints = len(resume)
                 # #470 前半场:种子已移交快速路径本地变量或组合管线(后者
                 # 消费期破坏性释放);signal_engine 侧两处引用(实例属性 +
                 # 本地变量)即刻放空,不再把整个前缀钉到 run 结束。
@@ -3356,7 +3365,13 @@ class SignalEnginePipelineAdapter:
                     pipeline = await self._load()
                 pipeline_iter = pipeline.decisions(manifest)
                 async for decision in pipeline_iter:
-                    yield decision
+                    if accepted_checkpoints:
+                        self._accepted_checkpoint = decision
+                        accepted_checkpoints -= 1
+                    try:
+                        yield decision
+                    finally:
+                        self._accepted_checkpoint = None
                     # issue #473:同上 —— 落库后即弃 candidates/features 重引用,
                     # 列表只留账本级记录;factor_screen 投影在输入拉取时已
                     # 捕获,与本列表无关。

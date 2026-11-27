@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -416,6 +416,17 @@ class TestIssue314CheckpointResumeIntegration:
         checkpoint = await store.list_artifacts(manifest.run_id)
         assert len(checkpoint) == prefix * _STAGE_COUNT
 
+        persisted_decision_ids: list[str | None] = []
+        append_artifacts = SqlAlchemyResearchRunStore.append_artifacts
+
+        async def record_append(
+            store: SqlAlchemyResearchRunStore, artifacts: Sequence[ResearchArtifact]
+        ) -> list[bool]:
+            persisted_decision_ids.append(artifacts[0].decision_id)
+            return await append_artifacts(store, artifacts)
+
+        monkeypatch.setattr(SqlAlchemyResearchRunStore, "append_artifacts", record_append)
+
         def factory(run_manifest: ResearchRunManifest) -> ResearchStrategyAdapter:
             return SignalEnginePipelineAdapter(
                 manifest=run_manifest, process_workers=2, **adapter_kwargs()
@@ -428,6 +439,10 @@ class TestIssue314CheckpointResumeIntegration:
         assert recovered.status is ResearchRunStatus.COMPLETED, recovered.error_summary
         assert recovered.result_checksum == control.result_checksum
         assert recovered.timing is not None
+        assert recovered.timing["resume_checkpoints_reused"] == prefix
+        assert persisted_decision_ids == [
+            f"{manifest.run_id}:D:{index:08d}" for index in range(prefix, len(selected))
+        ]
         timing = cast(dict[str, Any], recovered.timing["decision_load_stages"])
         assert timing["initial_covariance"]["calls"] == len(selected) - prefix
         assert timing["decision_load_without_covariance"]["calls"] == len(selected) - prefix

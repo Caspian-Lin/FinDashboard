@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import batched
@@ -453,6 +453,15 @@ class ResearchRunRepository:
             created.append(key in inserted)
             inserted.discard(key)
         return created
+
+    async def checkpoint_checksums_match(
+        self, run_id: str, checksums: Mapping[str, str]
+    ) -> bool:
+        for artifact_ids in batched(checksums, 500):
+            stored = await self._artifact_checksums((run_id, key) for key in artifact_ids)
+            if any(stored.get((run_id, key)) != checksums[key] for key in artifact_ids):
+                return False
+        return True
 
     async def _artifact_checksums(
         self, keys: Iterable[tuple[str, str]]

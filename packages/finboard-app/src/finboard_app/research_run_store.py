@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from typing import cast
 
 from finboard_backtest.research_run import (
@@ -174,6 +174,11 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
             )
             for row in rows
         ]
+
+    async def checkpoint_checksums_match(
+        self, run_id: str, checksums: Mapping[str, str]
+    ) -> bool:
+        return await self._repository.checkpoint_checksums_match(run_id, checksums)
 
     def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
         """流式遍历 artifact(#470 前半场;行序 = sequence 升序)。
