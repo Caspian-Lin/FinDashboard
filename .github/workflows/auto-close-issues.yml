@@ -59,19 +59,19 @@ jobs:
         id: extract
         run: |
           set -euo pipefail
-          # 1) 匹配 Closes/Fixes/Resolves #N,容忍中间的空格 / 冒号
-          # 2) 只保留 #N 中的数字部分
-          # 3) 去重排序,转成空格分隔
-          ISSUES=$(
+          # grep 返回 1 表示无匹配。保留读取错误的退出状态。
+          matches=$(
             grep -ioE \
               '(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]:]+#[0-9]+' \
-              /tmp/linked-text.txt \
-              | grep -oE '#[0-9]+' \
-              | tr -d '#' \
-              | sort -un \
-              | tr '\n' ' ' \
-              | xargs
-          )
+              /tmp/linked-text.txt
+          ) || {
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+          }
+
+          ISSUES=$(printf '%s\n' "$matches" | sed 's/.*#//' | sort -un | paste -sd ' ' -)
           echo "Found linked issues: ${ISSUES:-<none>}"
           echo "issues=$ISSUES" >> "$GITHUB_OUTPUT"
 
