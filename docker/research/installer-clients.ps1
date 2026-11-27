@@ -222,10 +222,16 @@ function Invoke-ClientChange([scriptblock]$Action) {
 }
 
 function Complete-ClientRotation([string]$Path, $Credential) {
-    if (!$Credential.pending_revoke_id) { return }
-    [void](Invoke-Operator "client-revoke" (@{client_id = $Credential.pending_revoke_id} | ConvertTo-Json -Compress))
-    $Credential.PSObject.Properties.Remove("pending_revoke_id")
-    Write-File $Path ($Credential | ConvertTo-Json -Compress)
+    if ($Credential.pending_revoke_id) {
+        [void](Invoke-Operator "client-revoke" (@{client_id = $Credential.pending_revoke_id} | ConvertTo-Json -Compress))
+        $Credential.PSObject.Properties.Remove("pending_revoke_id")
+        Write-File $Path ($Credential | ConvertTo-Json -Compress)
+    }
+    if ($Credential.pending_remove_profile) {
+        Remove-DesktopDshPatch $Credential.pending_remove_profile
+        $Credential.PSObject.Properties.Remove("pending_remove_profile")
+        Write-File $Path ($Credential | ConvertTo-Json -Compress)
+    }
 }
 
 function Configure-Client {
@@ -265,6 +271,7 @@ function Set-ClientCredential {
     }
     $profile = if ($DesktopAction -and $Client -ceq "dsh") { $Options["--profile"] }
     $oldProfile = if ($old) { $old.profile }
+    $movedProfile = $profile -and $oldProfile -and $profile -ine $oldProfile
     if (!$valid) {
         $registered = Register-ClientCredential $Client $preset
         $id = $registered.client_id
@@ -279,6 +286,9 @@ function Set-ClientCredential {
             if ($old) {
                 $credential | Add-Member -NotePropertyName pending_revoke_id -NotePropertyValue $old.client_id
             }
+            if ($movedProfile) {
+                $credential | Add-Member -NotePropertyName pending_remove_profile -NotePropertyValue $oldProfile
+            }
             Write-File $path ($credential | ConvertTo-Json -Compress)
         } catch {
             $failure = $_
@@ -290,12 +300,13 @@ function Set-ClientCredential {
             throw $failure
         }
         Complete-ClientRotation $path $credential
-    } elseif ($profile -and $profile -cne $oldProfile) {
+    } elseif ($profile -and $profile -ine $oldProfile) {
+        if ($movedProfile) {
+            $old | Add-Member -NotePropertyName pending_remove_profile -NotePropertyValue $oldProfile
+        }
         $old | Add-Member -NotePropertyName profile -NotePropertyValue $profile -Force
         Write-File $path ($old | ConvertTo-Json -Compress)
-    }
-    if ($profile -and $oldProfile -and $profile -cne $oldProfile) {
-        Remove-DesktopDshPatch $oldProfile
+        Complete-ClientRotation $path $old
     }
     Write-Host "FinDashboard is ready at $Endpoint. Reopen $Client to use the $preset credential."
 }
