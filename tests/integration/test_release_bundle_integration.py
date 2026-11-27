@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from time import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -30,6 +32,7 @@ from finboard_persistence.models import (
     ResearchDatasetReleaseInstrumentModel,
     TradeCalModel,
 )
+from finboard_persistence.research_audit_repo import ResearchAuditRepository
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -126,6 +129,19 @@ async def test_bundle_recovers_if_interrupted_after_file_activation(
     assert await ResearchDatasetReleaseRepository(db_session).get(release.release_id) is None
     assert not list(target.glob(".bundle-import-*"))
 
+    artifact = target / release.release_id / release.instruments[0].artifact_path
+    expected = artifact.read_bytes()
+    for damaged in (None, b"bad parquet"):
+        artifact.unlink(missing_ok=True)
+        if damaged is not None:
+            artifact.write_bytes(damaged)
+        preview = await preview_registered_bundle(db_session, archive, root=target)
+        assert preview["release_conflicts"] == [release.release_id]
+        with pytest.raises(ReleaseBundleError, match="bundle_release_conflict"):
+            await import_registered_bundle(sessions, archive, root=target)
+        assert await ResearchDatasetReleaseRepository(db_session).get(release.release_id) is None
+    artifact.write_bytes(expected)
+
     result = await import_registered_bundle(sessions, archive, root=target)
     assert result.releases[0].release_checksum == release.release_checksum
     registered = await ResearchDatasetReleaseRepository(db_session).require_usable(release.release_id)
@@ -152,6 +168,7 @@ async def test_web_preview_then_explicit_import_runs_data_worker(
     monkeypatch.setenv("FINBOARD_DATA_RELEASE_ROOT", str(target))
     monkeypatch.setenv("FINBOARD_DATA_BUNDLE_ROOT", str(tmp_path / "managed-archives"))
     api = FastAPI()
+    api.state.session_maker = session_factory(_engine)
     api.include_router(router)
 
     async def database_session() -> AsyncSession:
@@ -159,6 +176,22 @@ async def test_web_preview_then_explicit_import_runs_data_worker(
 
     api.dependency_overrides[get_db_session] = database_session
     async with AsyncClient(transport=ASGITransport(app=api), base_url="http://localhost") as client:
+        pending_root = tmp_path / "managed-archives" / "pending"
+        pending_root.mkdir(parents=True)
+        expired = pending_root / ("RB-" + "1" * 32 + ".zip")
+        expired.write_bytes(b"expired")
+        past = time() - 48 * 60 * 60
+        os.utime(expired, (past, past))
+        with monkeypatch.context() as quota:
+            quota.setattr(bundle_service, "_PREVIEW_BUDGET_BYTES", 4)
+            over_budget = await client.post(
+                "/api/data/bundles/preview",
+                content=archive.read_bytes(),
+                headers={"Content-Type": "application/zip"},
+            )
+        assert over_budget.status_code == 507
+        assert over_budget.json()["detail"] == "bundle_preview_capacity"
+        assert not list(pending_root.iterdir())
         response = await client.post(
             "/api/data/bundles/preview",
             content=archive.read_bytes(),
@@ -168,7 +201,16 @@ async def test_web_preview_then_explicit_import_runs_data_worker(
         preview = response.json()
         assert preview["release_conflicts"] == []
         assert preview["releases"][0]["release_id"] == release.release_id
+        assert (pending_root / f"{preview['bundle_id']}.zip").is_file()
         assert await ResearchDatasetReleaseRepository(db_session).get(release.release_id) is None
+
+        blocked = await client.post(
+            "/api/data/bundles/imports",
+            json={"bundle_id": preview["bundle_id"], "checksum": "0" * 64},
+        )
+        assert blocked.status_code == 422
+        assert blocked.json()["detail"] == "bundle_preview_changed"
+        assert (pending_root / f"{preview['bundle_id']}.zip").is_file()
 
         response = await client.post(
             "/api/data/bundles/imports",
@@ -178,6 +220,7 @@ async def test_web_preview_then_explicit_import_runs_data_worker(
         body = response.json()
         assert body["kind"] == BUNDLE_JOB_KIND
         assert body["status"] == "queued"
+        assert not list(pending_root.iterdir())
 
     reported = []
 
@@ -191,3 +234,7 @@ async def test_web_preview_then_explicit_import_runs_data_worker(
     assert result.status == "succeeded"
     assert reported[-1] == (2, 2, "bundle_complete")
     assert await ResearchDatasetReleaseRepository(db_session).get(release.release_id) is not None
+    recorded = await ResearchAuditRepository(db_session).list_events(entity_id=preview["bundle_id"])
+    assert {(row.operation, row.outcome) for row in recorded} >= {
+        ("bundle.preview", "succeeded"), ("bundle.import", "rejected"), ("bundle.import", "succeeded"),
+    }

@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import os
 import re
+import shutil
+import time
 import zipfile
 from collections.abc import Callable, Iterable, Sequence
 from datetime import date
@@ -19,14 +21,15 @@ from sqlalchemy.dialects.postgresql import insert
 
 from finboard_app.research_audit import ResearchAuditEvent, ResearchAuditRecorder
 from finboard_data.release_bundle import (
+    MAX_BUNDLE_BYTES,
     BundleCalendarDay,
     ReleaseBundle,
     ReleaseBundleError,
     export_release_bundle,
     inspect_release_bundle,
     unpack_release_bundle,
+    verify_release_directory,
 )
-from finboard_data.releases import load_dataset_release
 from finboard_persistence import ResearchDatasetReleaseRepository
 from finboard_persistence.models import (
     InstrumentModel,
@@ -41,6 +44,8 @@ if TYPE_CHECKING:
     from finboard_data.releases import ResearchDatasetRelease
 
 _ID = re.compile(r"RB-[a-f0-9]{32}")
+_PREVIEW_TTL_SECONDS = 24 * 60 * 60
+_PREVIEW_BUDGET_BYTES = 2 * MAX_BUNDLE_BYTES
 
 
 def release_root() -> Path:
@@ -51,14 +56,40 @@ def new_bundle_id() -> str:
     return f"RB-{uuid4().hex}"
 
 
-def managed_bundle_path(bundle_id: str) -> Path:
+def managed_bundle_path(bundle_id: str, *, pending: bool = False) -> Path:
     if not _ID.fullmatch(bundle_id):
         raise ReleaseBundleError("bundle_invalid_file_id")
     root = Path(os.getenv("FINBOARD_DATA_BUNDLE_ROOT", str(release_root().parent / "data_bundles"))).resolve()
+    if pending:
+        root = root / "pending"
+        if root.resolve() != root:
+            raise ReleaseBundleError("bundle_unsafe_path")
     file = root / f"{bundle_id}.zip"
     if file.is_symlink():
         raise ReleaseBundleError("bundle_unsafe_file")
     return file
+
+
+async def lock_bundle_previews(session: AsyncSession) -> None:
+    locked = await session.scalar(text("SELECT pg_try_advisory_xact_lock(559, 1)"))
+    if not locked:
+        raise ReleaseBundleError("bundle_preview_busy")
+
+
+def available_preview_bytes(directory: Path) -> int:
+    """持有预览锁时回收废弃文件, 计算独立暂存预算。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - _PREVIEW_TTL_SECONDS
+    used = 0
+    for path in directory.glob("RB-*.zip"):
+        if not _ID.fullmatch(path.stem) or path.is_symlink() or not path.is_file():
+            continue
+        entry = path.stat()
+        if entry.st_mtime < cutoff:
+            path.unlink()
+        else:
+            used += entry.st_size
+    return max(0, min(_PREVIEW_BUDGET_BYTES - used, shutil.disk_usage(directory).free))
 
 
 def bundle_file_checksum(path: Path) -> str:
@@ -165,8 +196,8 @@ def _existing_conflicts(root: Path, releases: Iterable[ResearchDatasetRelease]) 
             result.append(release.release_id)
         elif final.exists():
             try:
-                load_dataset_release(final, expected_checksum=release.release_checksum)
-            except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                verify_release_directory(root, release)
+            except (OSError, ReleaseBundleError):
                 result.append(release.release_id)
     return result
 

@@ -85,6 +85,7 @@ class ReleaseBundle:
                 {
                     "release_id": release.release_id,
                     "release_checksum": release.release_checksum,
+                    "version": release.version,
                     "dataset_kind": release.dataset_kind.value,
                     "dataset_name": release.dataset_name,
                     "source": release.source,
@@ -154,6 +155,34 @@ def _release_from_wire(data: bytes, release_id: str, checksum: str) -> ResearchD
     if hashlib.sha256(_json(raw)).hexdigest() != checksum:
         raise ReleaseBundleError("bundle_release_checksum_mismatch")
     return release
+
+
+def _directory_manifest(release_root: Path) -> bytes:
+    path = release_root / RELEASE_MANIFEST_FILENAME
+    if path.resolve() != path:
+        raise ReleaseBundleError("bundle_unsafe_path")
+    with path.open("rb") as source:
+        data = source.read(_MAX_MANIFEST_BYTES + 1)
+    if len(data) > _MAX_MANIFEST_BYTES:
+        raise ReleaseBundleError("bundle_metadata_too_large")
+    return data
+
+
+def verify_release_directory(root: Path, expected: ResearchDatasetRelease) -> None:
+    """既存目录只有清单和所有工件均通过原摘要校验才能复用。"""
+    directory = root.resolve() / _valid_component(expected.release_id)
+    if directory.resolve() != directory:
+        raise ReleaseBundleError("bundle_unsafe_path")
+    release = _release_from_wire(
+        _directory_manifest(directory), expected.release_id, _checksum(expected.release_checksum),
+    )
+    for item in release.instruments:
+        path = directory / _relative_name(item.artifact_path)
+        if path.resolve() != path or not path.is_file():
+            raise ReleaseBundleError(f"bundle_file_missing_or_unsafe:{item.code}")
+        with path.open("rb") as source:
+            if hashlib.file_digest(source, "sha256").hexdigest() != item.artifact_checksum:
+                raise ReleaseBundleError(f"bundle_file_checksum_mismatch:{item.code}")
 
 
 def _calendar_from_wire(data: object) -> tuple[BundleCalendarDay, ...]:
@@ -339,13 +368,9 @@ def export_release_bundle(
                 release_id = _valid_component(registered.release_id)
                 claim = _checksum(registered.release_checksum)
                 release_root = root / release_id
-                manifest_path = release_root / RELEASE_MANIFEST_FILENAME
-                if not manifest_path.resolve().is_relative_to(root):
+                if release_root.resolve() != release_root:
                     raise ReleaseBundleError("bundle_unsafe_path")
-                with manifest_path.open("rb") as manifest_file:
-                    manifest = manifest_file.read(_MAX_MANIFEST_BYTES + 1)
-                if len(manifest) > _MAX_MANIFEST_BYTES:
-                    raise ReleaseBundleError("bundle_metadata_too_large")
+                manifest = _directory_manifest(release_root)
                 release = _release_from_wire(manifest, release_id, claim)
                 key = f"{release_id}/{RELEASE_MANIFEST_FILENAME}"
                 if key in files:

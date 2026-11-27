@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
 
+from finboard_app.research_audit import ResearchAuditEvent, ResearchAuditRecorder
 from finboard_data.releases import verify_dataset_release
 from finboard_persistence import ResearchDatasetReleaseRepository, TradeCalRepository
 from finboard_persistence.models import InstrumentModel
@@ -23,6 +24,7 @@ from finboard_persistence.models import InstrumentModel
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from finboard_app.research_operation import ResearchOperationContext
     from finboard_data.releases import ResearchDatasetRelease
 
 STARTER_ID = "synthetic-starter-v1"
@@ -97,6 +99,7 @@ def _read_bundle(bundle: Path, staging: Path) -> tuple[ResearchDatasetRelease, s
 
 async def import_starter_bundle(
     bundle: Path, *, root: Path, sessions: async_sessionmaker[AsyncSession],
+    audit: ResearchOperationContext | None = None,
 ) -> ResearchDatasetRelease:
     """先验证整包, 随后发布目录与 PostgreSQL 索引。可重试未登记的完整目录。"""
     await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
@@ -126,6 +129,12 @@ async def import_starter_bundle(
                     for item in release.instruments
                 ],
             )
+            if audit is not None:
+                await ResearchAuditRecorder(session_maker=sessions).record(session, ResearchAuditEvent(
+                    operation="bundle.import", outcome="succeeded", context=audit,
+                    entity_type="research_release", entity_id=release.release_id,
+                    params_summary={"release_count": 1, "format": "legacy_starter"},
+                ))
             if not final.exists():
                 (staging / STARTER_ID).rename(final)
         return release

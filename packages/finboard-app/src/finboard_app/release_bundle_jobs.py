@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from finboard_app.background_jobs import enqueue_job_core
 from finboard_app.release_bundle import (
+    available_preview_bytes,
     bundle_file_checksum,
     export_registered_bundle,
     import_registered_bundle,
+    lock_bundle_previews,
     managed_bundle_path,
     new_bundle_id,
     release_root,
@@ -58,7 +60,14 @@ async def submit_bundle_import(
     context: ResearchOperationContext,
 ) -> BackgroundJobModel:
     path = managed_bundle_path(bundle_id)
-    if not path.is_file():
+    pending = managed_bundle_path(bundle_id, pending=True)
+    await lock_bundle_previews(session)
+    await asyncio.to_thread(available_preview_bytes, pending.parent)
+    if pending.is_file():
+        verified = await asyncio.to_thread(bundle_file_checksum, pending)
+        if verified != checksum:
+            raise ReleaseBundleError("bundle_preview_changed")
+    elif not path.is_file():
         raise ReleaseBundleError("bundle_file_not_found")
     row, _ = await enqueue_job_core(
         session,
@@ -69,13 +78,17 @@ async def submit_bundle_import(
         requested_by=context.actor,
         context=context,
     )
+    if pending.is_file():
+        await asyncio.to_thread(pending.rename, path)
     return row
 
 
 async def bundle_receipt(bundle_id: str) -> dict[str, Any]:
     path = managed_bundle_path(bundle_id)
     if not path.is_file():
-        raise ReleaseBundleError("bundle_file_not_found")
+        path = managed_bundle_path(bundle_id, pending=True)
+        if not path.is_file():
+            raise ReleaseBundleError("bundle_file_not_found")
     preview = await asyncio.to_thread(inspect_release_bundle, path)
     checksum = await asyncio.to_thread(bundle_file_checksum, path)
     return {"bundle_id": bundle_id, "checksum": checksum, **preview.summary()}

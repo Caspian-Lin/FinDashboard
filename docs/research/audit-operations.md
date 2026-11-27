@@ -79,8 +79,9 @@
 | `research_code.submit` | MCP `finboard_research_code_submit` | mcp | 与 artifact 行同事务；`draft_created` |
 | `research_code.promote` | MCP `finboard_research_code_promote` | mcp | 晋级门失败 → `rejected` + `promotion_gate_failed`；成功 `promoted` |
 | `run.worker.finished` | `ResearchRunExecutor` 终态收口 | worker | `actor=worker:research_run`、`actor_type=worker`；`correlation.run_id/job_id/result_checksum`，进程 id 在 `correlation.worker_process_id`；非 succeeded 即 `outcome=failed` |
-| `bundle.import` | 冻结发布包登记（#559） | worker | 成功与发布登记、逐标的索引同事务；拒绝与失败单独记录具名原因。 |
-| `bundle.export` | 冻结文件导出（#559） | worker / mcp | 记录文件标识与发布件数；任务关联 `job_id`。 |
+| `bundle.preview` | Web 冻结发布包上传预览（#559） | web | 记录文件标识、体积及拒绝或失败原因。 |
+| `bundle.import` | 冻结发布包登记（#559） | web / worker / system | Web 记录提交拒绝；worker 或 CLI 成功与发布登记、逐标的索引同事务。失败单独记录具名原因。 |
+| `bundle.export` | 冻结文件导出（#559） | worker / mcp / system | 记录文件标识或摘要与发布件数。后台任务关联 `job_id`。 |
 | `client.<event_type>` | `POST /api/research/audit/client-events` | mcp | `trust=client_declared`，永不覆盖服务端事实 |
 
 `operation` 之外不放自由文本操作名；新增写路径必须在此表登记，否则读取方无法解释。

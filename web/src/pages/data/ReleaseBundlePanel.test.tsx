@@ -27,6 +27,7 @@ class PreviewRequest extends EventTarget {
   complete(conflicts: string[] = []) {
     this.status = 200;
     this.response = {
+      format: "finboard-release-bundle-v1",
       bundle_id: "RB-123",
       checksum: "a".repeat(64),
       unpacked_bytes: 1024 * 1024,
@@ -34,7 +35,7 @@ class PreviewRequest extends EventTarget {
       release_conflicts: conflicts,
       calendar_conflict: false,
       releases: [{
-        release_id: "bars-demo-v1", dataset_name: "bars", source: "fixture",
+        release_id: "bars-demo-v1", dataset_name: "bars", version: "202401", source: "fixture",
         adjustment: "qfq", start_date: "2024-01-02", end_date: "2024-01-31",
         symbol_count: 51,
       }],
@@ -78,6 +79,8 @@ describe("importing a frozen bundle", () => {
     expect(requests[0].file?.name).toBe("example.zip");
     requests[0].complete();
     expect(await screen.findByText("bars-demo-v1")).toBeInTheDocument();
+    expect(screen.getByText("finboard-release-bundle-v1")).toBeInTheDocument();
+    expect(screen.getByText("bars · 202401")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm import" }));

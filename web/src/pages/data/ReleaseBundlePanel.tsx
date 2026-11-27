@@ -11,6 +11,7 @@ import { useT } from "@/i18n";
 interface BundleRelease {
   release_id: string;
   dataset_name: string;
+  version: string;
   source: string;
   adjustment: string;
   start_date: string;
@@ -19,6 +20,7 @@ interface BundleRelease {
 }
 
 interface BundlePreview {
+  format: string;
   bundle_id: string;
   checksum: string;
   archive_bytes: number;
@@ -54,6 +56,7 @@ function uploadForPreview(file: File, onProgress: (percent: number) => void): Pr
 
 function prettySize(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / 1024 ** 2).toFixed(2)} MiB`;
 }
 
@@ -174,7 +177,7 @@ export function ReleaseBundlePanel({
         <div className="space-y-3">
           <h3 className="text-sm font-semibold">{tl({ zh: "导出发布", en: "Export releases" })}</h3>
           <Label htmlFor="bundle-export-dataset">{tl({ zh: "数据集", en: "Dataset" })}</Label>
-          <select id="bundle-export-dataset" value={dataset} onChange={(event) => setDataset(event.target.value)} className="block min-h-9 w-full max-w-md rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <select id="bundle-export-dataset" value={dataset} onChange={(event) => setDataset(event.target.value)} className="block min-h-11 w-full max-w-md rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-9">
             <option value="">{tl({ zh: "选择数据集", en: "Select a dataset" })}</option>
             {options.map((entry) => <option key={entry.key} value={entry.key}>{lang === "zh" ? entry.title : entry.title_en}</option>)}
           </select>
@@ -206,23 +209,23 @@ export function ReleaseBundlePanel({
           <p className="text-sm text-muted-foreground">
             {tl({ zh: "导出前请核对原数据源的使用与再分发条款。", en: "Check the source terms for use and redistribution before exporting." })}
           </p>
-          <Button size="sm" onClick={() => submitExport.mutate(chosen.map((item) => item.release_id))} disabled={chosen.length === 0 || submitExport.isPending || busyExport}>
+          <Button size="sm" className="h-11 sm:h-8" onClick={() => submitExport.mutate(chosen.map((item) => item.release_id))} disabled={chosen.length === 0 || submitExport.isPending || busyExport}>
             {tl({ zh: "提交导出", en: "Export bundle" })}
           </Button>
           {submitExport.isError && <p role="alert" className="text-sm text-destructive">{tl({ zh: "导出提交失败，请重试。", en: "Export submission failed. Try again." })}</p>}
           {exportId && <BundleActivity job={exportJob.data} jobId={exportId} />}
-          {verifiedExport && <Button asChild size="sm" variant="outline"><a href={`/api/data/bundles/${encodeURIComponent(verifiedExport)}/download`} download>{tl({ zh: "下载发布包", en: "Download bundle" })}</a></Button>}
+          {verifiedExport && <Button asChild size="sm" className="h-11 sm:h-8" variant="outline"><a href={`/api/data/bundles/${encodeURIComponent(verifiedExport)}/download`} download>{tl({ zh: "下载发布包", en: "Download bundle" })}</a></Button>}
         </div>
         <div className="space-y-3">
           <h3 className="text-sm font-semibold">{tl({ zh: "导入发布", en: "Import releases" })}</h3>
           <Label htmlFor="bundle-import-file">{tl({ zh: "本机 ZIP 发布包", en: "Local ZIP bundle" })}</Label>
-          <Input id="bundle-import-file" type="file" accept=".zip,application/zip" disabled={inspect.isPending || busyImport} onChange={(event) => {
+          <Input id="bundle-import-file" type="file" className="h-11 sm:h-9" accept=".zip,application/zip" disabled={inspect.isPending || busyImport} onChange={(event) => {
             setFile(event.target.files?.[0]);
             setPreview(undefined);
             setImportId(undefined);
             inspect.reset();
           }} />
-          <Button size="sm" variant="outline" disabled={!file || inspect.isPending || busyImport} onClick={() => file && inspect.mutate(file)}>
+          <Button size="sm" className="h-11 sm:h-8" variant="outline" disabled={!file || inspect.isPending || busyImport} onClick={() => file && inspect.mutate(file)}>
             {tl({ zh: "上传并预览", en: "Upload and preview" })}
           </Button>
           {inspect.isPending && (
@@ -238,17 +241,22 @@ export function ReleaseBundlePanel({
           )}
           {preview && (
             <div className="space-y-2">
-              <p className="text-sm">{tl({ zh: "解包体积", en: "Unpacked size" })} {prettySize(preview.unpacked_bytes)}</p>
+              <dl className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+                <div><dt className="text-muted-foreground">{tl({ zh: "包格式", en: "Bundle format" })}</dt><dd className="break-all">{preview.format}</dd></div>
+                <div><dt className="text-muted-foreground">{tl({ zh: "文件体积", en: "Archive size" })}</dt><dd>{prettySize(preview.archive_bytes)}</dd></div>
+                <div><dt className="text-muted-foreground">{tl({ zh: "解包体积", en: "Unpacked size" })}</dt><dd>{prettySize(preview.unpacked_bytes)}</dd></div>
+              </dl>
               <ul className="divide-y divide-border border-y">
                 {preview.releases.map((item) => (
                   <li key={item.release_id} className="py-2 text-sm">
                     <div className="break-all font-medium">{item.release_id}</div>
+                    <div className="break-words text-muted-foreground">{item.dataset_name} · {item.version}</div>
                     <div className="text-muted-foreground">{item.source} · {item.adjustment} · {item.start_date} – {item.end_date} · {item.symbol_count} {tl({ zh: "标的", en: "instruments" })}</div>
                   </li>
                 ))}
               </ul>
               {hadConflict && <p role="alert" className="break-words text-sm text-destructive">{tl({ zh: "发布身份或交易日历存在冲突。", en: "Release identity or trading calendar conflicts." })} {preview.release_conflicts.join(", ")}</p>}
-              <Button size="sm" onClick={() => submitImport.mutate(preview)} disabled={Boolean(hadConflict) || imported || busyImport || submitImport.isPending}>
+              <Button size="sm" className="h-11 sm:h-8" onClick={() => submitImport.mutate(preview)} disabled={Boolean(hadConflict) || imported || busyImport || submitImport.isPending}>
                 {tl({ zh: "确认导入", en: "Confirm import" })}
               </Button>
             </div>

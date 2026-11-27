@@ -15,6 +15,8 @@ from finboard_api.deps import get_db_session
 from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import BaseSchema
 from finboard_app.release_bundle import (
+    available_preview_bytes,
+    lock_bundle_previews,
     managed_bundle_path,
     new_bundle_id,
     preview_registered_bundle,
@@ -25,6 +27,7 @@ from finboard_app.release_bundle_jobs import (
     submit_bundle_export,
     submit_bundle_import,
 )
+from finboard_app.research_audit import ResearchAuditEvent, ResearchAuditRecorder
 from finboard_app.research_operation import ResearchOperationContext
 from finboard_data.release_bundle import MAX_BUNDLE_BYTES, ReleaseBundleError
 
@@ -48,6 +51,10 @@ def _error(exc: ReleaseBundleError) -> HTTPException:
         return HTTPException(status_code=404, detail=message)
     if message == "bundle_quota_exceeded":
         return HTTPException(status_code=413, detail=message)
+    if message == "bundle_preview_busy":
+        return HTTPException(status_code=409, detail=message)
+    if message == "bundle_preview_capacity":
+        return HTTPException(status_code=507, detail=message)
     return HTTPException(status_code=422, detail=message)
 
 
@@ -60,27 +67,51 @@ async def preview_upload(
     if mime not in {"application/zip", "application/octet-stream"}:
         raise HTTPException(status_code=415, detail="bundle_archive_required")
     bundle_id = new_bundle_id()
-    path = anyio.Path(managed_bundle_path(bundle_id))
-    await path.parent.mkdir(parents=True, exist_ok=True)
+    local_path = managed_bundle_path(bundle_id, pending=True)
+    path = anyio.Path(local_path)
     checksum = hashlib.sha256()
     count = 0
     retained = False
+    context = ResearchOperationContext.for_web()
+    recorder = ResearchAuditRecorder(session_maker=request.app.state.session_maker)
     try:
+        await lock_bundle_previews(session)
+        budget = await anyio.to_thread.run_sync(available_preview_bytes, local_path.parent)
+        if not budget:
+            raise ReleaseBundleError("bundle_preview_capacity")
         async with await path.open("xb") as output:
             async for chunk in request.stream():
                 count += len(chunk)
                 if count > MAX_BUNDLE_BYTES:
                     raise ReleaseBundleError("bundle_quota_exceeded")
+                if count > budget:
+                    raise ReleaseBundleError("bundle_preview_capacity")
                 checksum.update(chunk)
                 await output.write(chunk)
         preview = await preview_registered_bundle(
-            session, managed_bundle_path(bundle_id), root=release_root(),
+            session, local_path, root=release_root(),
         )
+        await recorder.record(session, ResearchAuditEvent(
+            operation="bundle.preview", outcome="succeeded", context=context,
+            entity_type="release_bundle", entity_id=bundle_id,
+            params_summary={"archive_bytes": count},
+        ))
+        await session.commit()
         retained = True
         return {**preview, "bundle_id": bundle_id, "checksum": checksum.hexdigest()}
     except ReleaseBundleError as exc:
+        await session.rollback()
+        await recorder.record_detached(ResearchAuditEvent(
+            operation="bundle.preview", outcome="rejected", context=context,
+            entity_type="release_bundle", entity_id=bundle_id, result_code=str(exc).split(":", 1)[0],
+        ))
         raise _error(exc) from exc
     except OSError as exc:
+        await session.rollback()
+        await recorder.record_detached(ResearchAuditEvent(
+            operation="bundle.preview", outcome="failed", context=context,
+            entity_type="release_bundle", entity_id=bundle_id, result_code="bundle_storage_unavailable",
+        ))
         raise HTTPException(status_code=507, detail="bundle_storage_unavailable") from exc
     finally:
         if not retained:
@@ -91,17 +122,33 @@ async def preview_upload(
 @router.post("/imports", status_code=202, response_model=JobOut)
 async def import_archive(
     body: BundleImportIn,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> JobOut:
+    context = ResearchOperationContext.for_web()
+    recorder = ResearchAuditRecorder(session_maker=request.app.state.session_maker)
     try:
         job = await submit_bundle_import(
             session,
             bundle_id=body.bundle_id,
             checksum=body.checksum,
-            context=ResearchOperationContext.for_web(),
+            context=context,
         )
     except ReleaseBundleError as exc:
+        await session.rollback()
+        await recorder.record_detached(ResearchAuditEvent(
+            operation="bundle.import", outcome="rejected", context=context,
+            entity_type="release_bundle", entity_id=body.bundle_id,
+            result_code=str(exc).split(":", 1)[0],
+        ))
         raise _error(exc) from exc
+    except OSError as exc:
+        await session.rollback()
+        await recorder.record_detached(ResearchAuditEvent(
+            operation="bundle.import", outcome="failed", context=context,
+            entity_type="release_bundle", entity_id=body.bundle_id, result_code="bundle_storage_unavailable",
+        ))
+        raise HTTPException(status_code=507, detail="bundle_storage_unavailable") from exc
     await session.commit()
     return JobOut.model_validate(job)
 
