@@ -145,6 +145,10 @@ def smoke(base: str, bundle: Path, *, restart: bool) -> dict[str, Any]:
     started = time.perf_counter()
     compose("up", "-d", "--wait", "--wait-timeout", "120")
     assert request(base, "/api/research-edition/health")["edition"] == "research"
+    expected_doc_revision = os.getenv("FINBOARD_EXPECT_DOC_REVISION")
+    if expected_doc_revision:
+        document = request(base, "/api/research/docs/README.md")
+        assert document["source_revision"] == expected_doc_revision
     assert request(base, "/mcp", expected=401)["error"] == "unauthorized"
     ready = time.perf_counter() - started
     request(base, "/api/orders", expected=404)

@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
+from scripts.build_research_doc_index import write_index
 
 
 def _fake_request(settings: Any = None) -> Any:
@@ -143,3 +144,23 @@ async def test_history_revision_must_match_served_bytes_and_published_ref(
     states.update({"content": content, "ref": ""})
     detail = await module.read_research_doc(name, _fake_request(settings))
     assert detail.source_revision is None
+
+
+@pytest.mark.asyncio
+async def test_packaged_history_is_bound_to_the_served_document(tmp_path: Path) -> None:
+    from finboard_api.routes import research_docs as module
+
+    root = tmp_path / "docs" / "research"
+    index = root.parent / "source-index.json"
+    name = "candidate-evidence.md"
+    revision = "a" * 40
+    _write_doc(root, name, "# Frozen candidate\n")
+    write_index(root, index, revision)
+    settings = SimpleNamespace(research_docs_dir=str(root), research_docs_source_index=str(index))
+
+    detail = await module.read_research_doc(name, _fake_request(settings))
+    assert detail.source_revision == revision
+    _write_doc(root, name, "# Locally edited content\n")
+    edited = await module.read_research_doc(name, _fake_request(settings))
+    assert edited.source_revision is None
+    assert "Locally edited content" in edited.content

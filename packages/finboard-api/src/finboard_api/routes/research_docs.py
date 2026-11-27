@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 import subprocess
 from datetime import UTC, datetime
@@ -105,6 +107,25 @@ def _published_revision(root: Path, rel_path: str, content: str) -> str | None:
     return revision
 
 
+def _packaged_revision(root: Path, index: str, rel_path: str, content: bytes) -> str | None:
+    """Reuse a build-provided revision only for the exact packaged document bytes."""
+    path = Path(index).resolve()
+    if path.parent != root.resolve().parent or root.name != "research":
+        return None
+    try:
+        data = json.loads(path.read_bytes())
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema") != "finboard-research-docs-v1":
+        return None
+    revision, files = data.get("revision"), data.get("files")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    if not isinstance(files, dict) or files.get(rel_path) != hashlib.sha256(content).hexdigest():
+        return None
+    return revision
+
+
 def _classify(rel_path: str) -> Literal["overview", "roadmap", "findings", "round", "other"]:
     if rel_path == "README.md":
         return "overview"
@@ -180,12 +201,16 @@ async def list_research_docs(request: Request) -> ResearchDocListOut:
 @router.get("/{rel_path:path}", response_model=ResearchDocDetail)
 async def read_research_doc(rel_path: str, request: Request) -> ResearchDocDetail:
     root = _docs_root(request)
+    settings = getattr(request.app.state, "settings", None)
+    source_index = getattr(settings, "research_docs_source_index", None)
     path = await asyncio.to_thread(_safe_doc_path, root, rel_path)
 
     def _read() -> ResearchDocDetail:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         stat = path.stat()
         rel = path.relative_to(root.resolve()).as_posix()
+        revision = _packaged_revision(root, source_index, rel, raw) if source_index else None
         return ResearchDocDetail(
             path=rel,
             kind=_classify(rel),
@@ -193,7 +218,7 @@ async def read_research_doc(rel_path: str, request: Request) -> ResearchDocDetai
             size_bytes=stat.st_size,
             updated_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
             content=text,
-            source_revision=_published_revision(root, rel, text),
+            source_revision=revision or _published_revision(root, rel, text),
         )
 
     return await asyncio.to_thread(_read)
