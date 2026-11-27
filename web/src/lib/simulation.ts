@@ -56,6 +56,8 @@ export interface SimulationOrder {
   avg_fill_price?: number;
   status: string;
   time_in_force: string;
+  reject_reason?: string;
+  reject_message?: string;
   created_at: string;
 }
 
@@ -88,6 +90,15 @@ export interface SimulationLedgerEntry {
   cash_delta: number;
   cash_after: number;
   description: string;
+}
+
+export interface SimulationAuditEntry {
+  audit_id: string;
+  sequence: number;
+  actor: string;
+  action: string;
+  target: string | null;
+  created_at: string;
 }
 
 export interface SimulationDecision {
@@ -206,6 +217,8 @@ function normalizeOrder(row: WireRecord): SimulationOrder {
     avg_fill_price: asNumber(row.average_fill_price ?? row.avg_fill_price) ?? undefined,
     status: asString(row.status, "unknown"),
     time_in_force: asString(row.time_in_force),
+    reject_reason: asString(row.reject_reason) || undefined,
+    reject_message: asString(row.reject_message) || undefined,
     created_at: asString(row.created_at),
   };
 }
@@ -360,12 +373,18 @@ export const simulationApi = {
       equity: asNumber(row.equity) ?? 0,
       clock_at: asString(row.clock_at),
     })),
-  listDecisions: (sessionId: string, limit?: number) =>
-    fetchJSON<SimulationDecision[]>(
-      `/simulation/sessions/${sessionId}/decisions${limit ? `?limit=${limit}` : ""}`,
-    ),
+  listDecisions: (sessionId: string, limit?: number, newestFirst?: boolean) => {
+    const query = new URLSearchParams();
+    if (limit) query.set("limit", String(limit));
+    if (newestFirst) query.set("newest_first", "true");
+    return fetchJSON<SimulationDecision[]>(
+      `/simulation/sessions/${encodeURIComponent(sessionId)}/decisions${query.size ? `?${query}` : ""}`,
+    );
+  },
 
   /* Queries */
+  audit: (sessionId: string, limit = 100) =>
+    fetchJSON<SimulationAuditEntry[]>(`/simulation/sessions/${encodeURIComponent(sessionId)}/audit?limit=${limit}`),
   orders: (sessionId: string, params?: { status?: string[]; symbol?: string; limit?: number }) => {
     const q = new URLSearchParams();
     if (params?.status) params.status.forEach((s) => q.append("status", s));

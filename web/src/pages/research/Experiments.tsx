@@ -56,6 +56,7 @@ import {
   experimentApi,
   type ExperimentStatus,
   type ValidationExperiment,
+  type ValidationExperimentDetail,
 } from "@/lib/research";
 import { fetchJSON } from "@/lib/api";
 import { cn, formatDateTime, timeAgo } from "@/lib/utils";
@@ -264,6 +265,40 @@ function experimentStatusLabel(status: string, lang: "zh" | "en"): string {
   if (status === "validated_oos") return lang === "zh" ? "OOS 流程完成" : "OOS completed";
   if (status === "in_sample") return lang === "zh" ? "样本内搜索" : "In sample";
   return labels[status]?.[lang] ?? status;
+}
+
+function ExperimentOutcome({ detail }: { detail: ValidationExperimentDetail }) {
+  const { lang, tl } = useT();
+  const failureReasons = [...new Set(detail.trials.map((trial) => trial.failure_reason).filter(Boolean))];
+  const holdout = detail.final_test_unsealed
+    ? tl({ zh: "已揭盲 · 最终窗口已使用", en: "Unsealed · final window consumed" })
+    : detail.final_test_unsealed === false
+      ? tl({ zh: "尚未揭盲", en: "Still sealed" })
+      : tl({ zh: "历史记录未标示", en: "State unrecorded" });
+  return (
+    <section className="space-y-3 rounded-md border bg-muted/20 p-3" aria-label={tl({ zh: "正式 OOS 结论", en: "Formal OOS outcome" })}>
+      <div className="flex flex-wrap justify-between gap-2">
+        <h3 className="font-medium">{oosLabel(detail.oos_outcome, lang)}</h3>
+        <StatusBadge status={detail.status}>{experimentStatusLabel(detail.status, lang)}</StatusBadge>
+      </div>
+      <dl className="grid gap-2 text-sm sm:grid-cols-2">
+        <div><dt className="text-muted-foreground">{tl({ zh: "最终测试窗口", en: "Final test window" })}</dt><dd>{holdout}</dd></div>
+        <div><dt className="text-muted-foreground">{tl({ zh: "计划基准", en: "Planned benchmark" })}</dt><dd>{strField(detail.plan, "benchmark_symbol")}</dd></div>
+      </dl>
+      {detail.rejection_reason && <p className="break-words text-sm text-destructive">{detail.rejection_reason}</p>}
+      {!detail.rejection_reason && failureReasons.length > 0 && (
+        <ul className="list-disc space-y-1 pl-4 text-sm text-warning">
+          {failureReasons.slice(0, 3).map((reason) => <li key={reason}>{reason}</li>)}
+        </ul>
+      )}
+      {(!detail.oos_outcome || detail.oos_outcome === "inconclusive") && (
+        <p className="text-sm text-muted-foreground">{tl({
+          zh: "核对试验记录和执行证据，确认缺失的验证阶段。",
+          en: "Check trial records and execution evidence for any missing validation stages.",
+        })}</p>
+      )}
+    </section>
+  );
 }
 
 function daysBetween(start: string, end: string): number {
@@ -1035,15 +1070,7 @@ export default function Experiments() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <CardTitle className="flex items-center gap-2 text-base">
-                      <span className="font-mono text-sm">
-                        {selectedId}
-                      </span>
-                      {detail && (
-                        <> <StatusBadge status={detail.status}>
-                          {experimentStatusLabel(detail.status, lang)}
-                        </StatusBadge>
-                        <Badge variant="outline">{oosLabel(detail.oos_outcome, lang)}</Badge> </>
-                      )}
+                      <span className="break-all font-mono text-sm">{selectedId}</span>
                     </CardTitle>
                     {detail && (
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -1092,6 +1119,7 @@ export default function Experiments() {
                 ) : detail ? (
                   <ScrollArea className="max-h-[560px] pr-3">
                     <div className="space-y-5">
+                      <ExperimentOutcome detail={detail} />
                       <div>
                         <p className="text-xs font-medium text-muted-foreground">
                           {tl({ zh: "假设", en: "Hypothesis" })}

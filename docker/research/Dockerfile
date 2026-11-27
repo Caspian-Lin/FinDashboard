@@ -17,7 +17,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.12-slim-bookworm
 ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     FINBOARD_RESEARCH_WEB_ROOT=/opt/finboard/web FINBOARD_RESEARCH_SANDBOX_ENABLED=false \
-    FINBOARD_RESEARCH_DOCS_DIR=/opt/finboard/docs/research
+    FINBOARD_RESEARCH_DOCS_DIR=/opt/finboard/docs/research \
+    FINBOARD_RESEARCH_DOCS_SOURCE_INDEX=/opt/finboard/docs/source-index.json
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 finboard \
@@ -27,6 +28,12 @@ COPY --from=web /src/web/dist /opt/finboard/web
 COPY alembic.ini /opt/finboard/
 COPY migrations/ /opt/finboard/migrations/
 COPY docs/research/ /opt/finboard/docs/research/
+ARG FINBOARD_SOURCE_REVISION=""
+RUN --mount=type=bind,source=scripts/build_research_doc_index.py,target=/tmp/build_research_doc_index.py \
+    if [ -n "$FINBOARD_SOURCE_REVISION" ]; then \
+      python /tmp/build_research_doc_index.py \
+        /opt/finboard/docs/research /opt/finboard/docs/source-index.json "$FINBOARD_SOURCE_REVISION"; \
+    fi
 COPY docker/research/entrypoint.py /opt/finboard/
 WORKDIR /state
 USER finboard

@@ -240,6 +240,7 @@ class Settings(BaseSettings):
     # (见 finboard_api.routes.research_docs;canonical 仍是仓库文件)。
     # #520:内置 OpenCode 托管已退役,本字段不再与任何 Agent 运行时耦合。
     research_docs_dir: str = "docs/research"
+    research_docs_source_index: str | None = None
     @model_validator(mode="before")
     @classmethod
     def _drop_empty_str_fields(cls, data: Any) -> Any:

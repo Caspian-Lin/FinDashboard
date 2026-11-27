@@ -29,12 +29,17 @@ jobs:
       FINBOARD_PORT: 18176
     steps:
       - uses: actions/checkout@v4
+      - id: source
+        run: |
+          revision=$(git rev-parse --verify HEAD)
+          printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - name: Build linux/amd64 runtime
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/research/Dockerfile
+          build-args: FINBOARD_SOURCE_REVISION=${{ steps.source.outputs.revision }}
           platforms: linux/amd64
           tags: finboard-research:local
           load: true
@@ -48,6 +53,8 @@ jobs:
             --user "$(id -u):$(id -g)" -v "$PWD:/src" finboard-research:local \
             /src/scripts/build_research_starter.py /src/.tmp/synthetic-starter-v1.zip
       - name: Migrate an empty database and run the offline starter study
+        env:
+          FINBOARD_EXPECT_DOC_REVISION: ${{ steps.source.outputs.revision }}
         run: |
           set -euo pipefail
           PG_IMAGE=$(python -c 'from scripts.package_research_desktop import POSTGRES_IMAGE; print(POSTGRES_IMAGE)')
@@ -239,6 +246,10 @@ jobs:
       image: ${{ steps.desktop-image.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
+      - id: source
+        run: |
+          revision=$(git rev-parse --verify HEAD)
+          printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: research-edition-evidence
@@ -259,6 +270,7 @@ jobs:
         with:
           context: .
           file: docker/research/Dockerfile
+          build-args: FINBOARD_SOURCE_REVISION=${{ steps.source.outputs.revision }}
           platforms: linux/amd64
           tags: ${{ steps.image.outputs.ref }}:${{ github.ref_name }}
           push: true

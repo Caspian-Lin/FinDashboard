@@ -416,6 +416,8 @@ export interface ValidationExperiment {
   version_stamp: string | Record<string, unknown>;
   status: ExperimentStatus;
   oos_outcome?: "supported" | "not_supported" | "inconclusive" | null;
+  final_test_unsealed?: boolean;
+  rejection_reason?: string | null;
   plan: Record<string, unknown>;
   thresholds: Record<string, unknown>;
   robustness: Record<string, unknown>;
@@ -1040,6 +1042,7 @@ export interface ResearchDocSummary {
 
 export interface ResearchDocDetail extends ResearchDocSummary {
   content: string;
+  source_revision?: string | null;
 }
 
 export const researchDocsApi = {

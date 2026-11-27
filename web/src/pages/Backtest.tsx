@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { Bookmark, ChevronDown } from "lucide-react";
 import {
   LineChart,
@@ -53,6 +53,7 @@ import {
   isJobRunning,
 } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
+import { formatPercent } from "@/lib/utils";
 import { useT, type LocalizedText } from "@/i18n";
 
 const MARKETS: { value: string; label: LocalizedText }[] = [
@@ -675,6 +676,17 @@ export default function Backtest() {
   // 结果区:指标卡 / 候选池审计 / 权益曲线 / 成交明细(主列首位,配置卡之前)
   const resultsSection = m ? (
     <>
+            <section className="space-y-3 rounded-lg border bg-card p-4" aria-label={tl({ zh: "探索回测结果", en: "Exploratory backtest results" })}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold">{tl({ zh: "探索回测结果", en: "Exploratory backtest results" })}</h2>
+                <Link className="text-sm text-primary underline" to="/research/experiments">{tl({ zh: "查看正式 OOS 实验", en: "Review formal OOS experiments" })}</Link>
+              </div>
+              <dl className="grid gap-2 text-sm sm:grid-cols-3">
+                <div><dt className="text-muted-foreground">{tl({ zh: "基准收益", en: "Benchmark return" })}</dt><dd>{formatPercent(m.benchmark_return)}</dd></div>
+                <div><dt className="text-muted-foreground">{tl({ zh: "相对基准", en: "Benchmark comparison" })}</dt><dd>{m.benchmark_return == null ? tl({ zh: "基准证据缺失", en: "Benchmark evidence missing" }) : formatPercent(m.excess_return)}</dd></div>
+                <div><dt className="text-muted-foreground">{tl({ zh: "已计佣金 / 印花税", en: "Commission / stamp tax paid" })}</dt><dd className="tabular-nums">{m.commission_paid ?? "—"} / {m.stamp_tax_paid ?? "—"}</dd></div>
+              </dl>
+            </section>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <MetricCard label={tl({ zh: "总收益", en: "Total return" })} value={`${(m.total_return * 100).toFixed(2)}%`} positive={m.total_return >= 0} />
               <MetricCard label={tl({ zh: "年化", en: "Annualized" })} value={`${(m.annualized_return * 100).toFixed(2)}%`} positive={m.annualized_return >= 0} />

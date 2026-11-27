@@ -64,7 +64,7 @@ export interface ReportMetrics {
   sharpe_ratio: number | null;
   max_drawdown: number | null;
   win_rate: number | null;
-  total_trades: number;
+  total_trades: number | null;
 }
 
 export interface ExtraMetric {
@@ -171,11 +171,11 @@ export function getMetric(
   const keys = typeof key === "string" ? [key] : key;
   for (const k of keys) {
     const direct = result[k];
-    if (typeof direct === "number") return direct;
+    if (typeof direct === "number" && Number.isFinite(direct)) return direct;
     const metrics = result["metrics"];
     if (metrics && typeof metrics === "object") {
       const nested = (metrics as Record<string, unknown>)[k];
-      if (typeof nested === "number") return nested;
+      if (typeof nested === "number" && Number.isFinite(nested)) return nested;
     }
   }
   return defaultVal;
@@ -536,6 +536,7 @@ export interface ReportContentProps {
   sourceLabel: string;
   sourceId: string;
   meta?: ReactNode;
+  summary?: ReactNode;
   extra?: ReactNode;
   /** 报告导出下载基础路径(#157;仅 run/backtest 报告提供,模拟盘无导出)。 */
   exportBasePath?: string;
@@ -549,6 +550,7 @@ export function ReportContent({
   sourceLabel,
   sourceId,
   meta,
+  summary,
   extra,
   exportBasePath,
 }: ReportContentProps) {
@@ -574,11 +576,11 @@ export function ReportContent({
     <div className="space-y-4">
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 space-y-1.5">
               <CardTitle className="flex items-center gap-2 text-base">
                 <FileText className="h-4 w-4 text-primary" />
-                <span className="font-mono text-sm">{sourceId}</span>
+                <span className="break-all font-mono text-sm">{sourceId}</span>
               </CardTitle>
               {meta}
             </div>
@@ -618,6 +620,7 @@ export function ReportContent({
         </CardHeader>
       </Card>
 
+      {summary}
       <div>
         <h3 className="mb-2 text-sm font-semibold text-foreground">
           {tl({ zh: "绩效指标", en: "Performance metrics" })}
@@ -685,6 +688,96 @@ export function ReportContent({
   );
 }
 
+function field(record: unknown, key: string): unknown {
+  return record && typeof record === "object" && !Array.isArray(record)
+    ? (record as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function amount(value: unknown): string {
+  if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return "—";
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? formatCurrency(numeric) : "—";
+}
+
+interface RunResultSummaryProps {
+  detail: Pick<ResearchRunSummary, "status" | "manifest" | "result" | "error_summary"> & {
+    error_code?: string | null;
+  };
+}
+
+export function RunResultSummary({ detail }: RunResultSummaryProps) {
+  const { tl } = useT();
+  const result = detail.result ?? undefined;
+  const benchmark = result?.benchmark_symbol ?? field(detail.manifest?.benchmark_config, "symbol");
+  const benchmarkReturn = getMetric(result, "benchmark_return", null);
+  const excessReturn = getMetric(result, "excess_return", null);
+  const returnValue = getMetric(result, ["strategy_return", "total_return"], null);
+  const window = field(detail.manifest?.parameters, "research_window");
+  const specPlan = field(detail.manifest?.strategy_spec, "validation_plan");
+  const start = field(window, "decision_start") ?? field(specPlan, "test_start");
+  const end = field(window, "decision_end") ?? field(specPlan, "test_end");
+  const feePolicy = field(detail.manifest?.parameters, "fee_policy_version");
+  const hasFailure = detail.error_code || detail.error_summary;
+  const hasPartial = detail.status === "completed" && (
+    returnValue === null || benchmarkReturn === null || excessReturn === null
+  );
+  return (
+    <Card role="region" aria-label={tl({ zh: "结果概览", en: "Result overview" })}>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-base">{tl({ zh: "结果概览", en: "Result overview" })}</CardTitle>
+          <StatusBadge status={detail.status} />
+        </div>
+        <p className="text-sm text-muted-foreground">
+          {tl({
+            zh: "运行提供冻结输入下的绩效证据。假设是否获支持请查正式 OOS 实验。",
+            en: "This run reports performance under frozen inputs. See the formal OOS experiment for hypothesis support.",
+          })}
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {hasFailure && (
+          <div className="rounded-md border border-destructive/30 p-3 text-sm">
+            <p className="font-medium text-destructive">{tl({ zh: "运行受阻", en: "Run blocked" })}</p>
+            {detail.error_code && <p className="break-all font-mono text-xs">{detail.error_code}</p>}
+            {detail.error_summary && <p className="break-words">{detail.error_summary}</p>}
+          </div>
+        )}
+        {hasPartial && (
+          <p className="text-sm text-warning">
+            {tl({ zh: "已完成的运行缺少部分结果证据。缺失值显示为 —。", en: "The completed run has partial result evidence. Missing values appear as —." })}
+          </p>
+        )}
+        <dl className="grid min-w-0 gap-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
+          <div><dt className="text-muted-foreground">{tl({ zh: "策略收益", en: "Strategy return" })}</dt><dd className="font-medium tabular-nums">{formatPercent(returnValue)}</dd></div>
+          <div><dt className="text-muted-foreground">{tl({ zh: "基准收益", en: "Benchmark return" })}</dt><dd className="break-all font-medium tabular-nums">{typeof benchmark === "string" ? benchmark : "—"} · {formatPercent(benchmarkReturn)}</dd></div>
+          <div><dt className="text-muted-foreground">{tl({ zh: "相对基准", en: "Benchmark comparison" })}</dt><dd className="font-medium tabular-nums">
+            {benchmarkReturn !== null && excessReturn !== null
+              ? formatPercent(excessReturn)
+              : tl({ zh: "缺少基准证据，暂不可比", en: "Benchmark evidence missing" })}
+          </dd></div>
+          <div><dt className="text-muted-foreground">{tl({ zh: "决策窗口", en: "Decision window" })}</dt><dd className="font-medium tabular-nums">{typeof start === "string" && typeof end === "string" ? `${start} – ${end}` : "—"}</dd></div>
+          <div><dt className="text-muted-foreground">{tl({ zh: "费用口径", en: "Fee policy" })}</dt><dd className="break-all font-medium">
+            {feePolicy === "explicit_overrides_v1"
+              ? tl({ zh: "显式费用覆盖", en: "Explicit fee overrides" })
+              : typeof feePolicy === "string" ? feePolicy : tl({ zh: "历史资产规则优先", en: "Legacy asset rules take precedence" })}
+          </dd></div>
+          <div><dt className="text-muted-foreground">{tl({ zh: "佣金 / 税 / 滑点", en: "Commission / tax / slippage" })}</dt>
+            <dd className="font-medium tabular-nums">{amount(result?.commission_paid)} / {amount(result?.tax_paid)} / {amount(result?.slippage_paid)}</dd>
+          </div>
+        </dl>
+        <p className="text-xs text-muted-foreground">
+          {tl({
+            zh: "比较其他运行前，核对冻结发布、窗口、基准及费用口径。",
+            en: "Check the frozen release, window, benchmark, and fee policy before comparing runs.",
+          })}
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 /**
  * 按研究运行 ID 渲染完整绩效报告;数据由组件内部自取
  * (与 Reports 聚合页共用同一 query key,缓存互通)。
@@ -715,13 +808,13 @@ export function RunReportView({ runId }: { runId: string }) {
   );
 
   const metrics: ReportMetrics = {
-    total_return: getMetric(result, ["total_return", "strategy_return"]),
-    annual_return: getMetric(result, ["annual_return", "annualized_return"]),
-    sharpe_ratio: getMetric(result, "sharpe_ratio"),
-    max_drawdown: getMetric(result, "max_drawdown"),
+    total_return: getMetric(result, ["total_return", "strategy_return"], null),
+    annual_return: getMetric(result, ["annual_return", "annualized_return"], null),
+    sharpe_ratio: getMetric(result, "sharpe_ratio", null),
+    max_drawdown: getMetric(result, "max_drawdown", null),
     // 研究运行报告没有胜率字段,缺数据显示「—」而非误导读成 0.00%。
     win_rate: getMetric(result, "win_rate", null),
-    total_trades: getMetric(result, ["total_trades", "fill_count"]),
+    total_trades: getMetric(result, ["total_trades", "fill_count"], null),
   };
   const equityCurve = getEquityCurve(result);
   const extras: ExtraMetric[] = EXTRA_METRIC_DEFS.filter((d) =>
@@ -740,6 +833,7 @@ export function RunReportView({ runId }: { runId: string }) {
       sourceHref={`/research/runs?run=${encodeURIComponent(detail.run_id)}`}
       sourceLabel={tl({ zh: "研究运行", en: "research run" })}
       sourceId={detail.run_id}
+      summary={<RunResultSummary detail={detail} />}
       exportBasePath={`/api/research/runs/${encodeURIComponent(detail.run_id)}/report/export`}
       meta={
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
