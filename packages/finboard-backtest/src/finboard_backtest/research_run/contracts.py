@@ -137,6 +137,9 @@ class ResearchActorType(StrEnum):
     # MCP 通道创建的 run/replay 归属 actor_type=agent,与 requested_by=agent:mcp
     # 对齐;llm 仍被 fail-closed 拒绝(红线不变),REST 默认 human 不变。
     AGENT = "agent"
+    # issue #518:后台 worker 终态/揭盲审计的身份(不进 manifest 冻结输入;
+    # manifest 校验只拒绝 llm,worker 不会提交研究运行)。
+    WORKER = "worker"
 
 
 class ResearchOrderStatus(StrEnum):

@@ -42,6 +42,7 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from finboard_backtest.background_jobs.audit import WorkerAuditEvent, WorkerAuditSink
 from finboard_backtest.background_jobs.contracts import (
     ExecutorError,
     JobExecutor,
@@ -82,9 +83,39 @@ class ValidationExperimentExecutor:
         *,
         session_maker: async_sessionmaker[AsyncSession],
         runner_factory: TrialRunnerFactory,
+        audit: WorkerAuditSink | None = None,
     ) -> None:
         self._session_maker = session_maker
         self._runner_factory = runner_factory
+        # issue #518:揭盲(一次性门)审计收口,由装配根注入 app 侧实现。
+        self._audit = audit
+
+    async def _record_unseal(
+        self,
+        *,
+        experiment_id: str,
+        job_id: str | None,
+        outcome: str,
+        result_code: str,
+        error_summary: str | None = None,
+    ) -> None:
+        if self._audit is None:
+            return
+        correlation = {"experiment_id": experiment_id}
+        if job_id:
+            correlation["job_id"] = job_id
+        await self._audit.record(
+            WorkerAuditEvent(
+                operation="experiment.unseal",
+                outcome=outcome,
+                worker_id="validation_experiment",
+                correlation=correlation,
+                entity_type="validation_experiment",
+                entity_id=experiment_id,
+                result_code=result_code,
+                error_summary=error_summary,
+            )
+        )
 
     async def execute(
         self,
@@ -130,6 +161,18 @@ class ValidationExperimentExecutor:
                 summary=f"验证实验不存在: {experiment_id}",
                 retryable=False,
                 context={"experiment_id": experiment_id},
+            )
+        if experiment.final_test_unsealed:
+            # issue #518:揭盲不可重做的拒绝独立留痕(outcome=rejected)。
+            await self._record_unseal(
+                experiment_id=experiment_id,
+                job_id=validation_job_id.get(),
+                outcome="rejected",
+                result_code="already_unsealed",
+                error_summary=(
+                    "实验已揭盲(final_test_unsealed=true),重复执行被拒绝"
+                    "(揭盲不可重做,不产生第二次最终测试集评估)"
+                ),
             )
         _precheck_runnable(experiment)
         trial_runner = await self._runner_factory(session, experiment)
@@ -184,6 +227,13 @@ class ValidationExperimentExecutor:
         async def persist_unseal(experiment: ResearchExperiment) -> None:
             await exp_repo.save(experiment)
             await session.commit()
+            # issue #518:揭盲成功与持久化同点留痕(独立会话,失败不影响实验)。
+            await self._record_unseal(
+                experiment_id=experiment_id,
+                job_id=validation_job_id.get(),
+                outcome="succeeded",
+                result_code="unsealed",
+            )
 
         verdict = await runner.unseal_final_test(before_execute=persist_unseal)
         await exp_repo.save(runner.experiment)

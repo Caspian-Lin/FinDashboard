@@ -127,6 +127,16 @@ class DatasetPublishExecutor:
         from finboard_persistence.models import InstrumentModel
 
         source = _RELEASE_KIND_TO_SOURCE[release_kind]
+        publish_source = job.payload.get("publish_source")
+        if publish_source is not None:
+            if release_kind != "multi_asset_mixed" or publish_source != "tushare":
+                raise ExecutorError(
+                    code="invalid_payload",
+                    summary="publish_source 仅支持 multi_asset_mixed 的 tushare 单源发布",
+                    retryable=False,
+                    context={"job_id": job.job_id},
+                )
+            source = "tushare"
 
         await progress(0, None, "dataset_publish:validating")
         async with self._session_maker() as session:
@@ -326,6 +336,8 @@ class DatasetPublishExecutor:
                         (
                             "A股单源发布严格要求所有 Bar 来源为 tushare"
                             if release_kind == "a_share_tushare"
+                            else "多资产单源发布严格要求所有 Bar 来源为 tushare"
+                            if publish_source == "tushare"
                             else "多资产发布允许按标的混合来源,实际来源写入质量报告"
                         ),
                         *(

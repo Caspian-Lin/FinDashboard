@@ -1,0 +1,9 @@
+{
+  "name": "finboard-research-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tauri build --bundles msi --target x86_64-pc-windows-msvc --config src-tauri/tauri.offline.conf.json"
+  },
+  "devDependencies": { "@tauri-apps/cli": "2.12.6" }
+}

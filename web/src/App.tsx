@@ -4,6 +4,8 @@ import { AppShell } from "@/components/layout/AppShell";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { Skeleton } from "@/components/ui/skeleton";
 import { legacyResearchDataTarget } from "@/lib/data-links";
+import { RESEARCH_EDITION } from "@/lib/edition";
+import { LegacyWorkbenchRedirect } from "@/pages/research/LegacyWorkbenchRedirect";
 
 const ResearchTopics = React.lazy(() => import("@/pages/research/ResearchTopics"));
 const StrategyExplanationPage = React.lazy(() => import("@/pages/research/StrategyExplanationPage"));
@@ -19,7 +21,7 @@ const Experiments = React.lazy(() => import("@/pages/research/Experiments"));
 const ResearchRuns = React.lazy(() => import("@/pages/research/ResearchRuns"));
 const PortfolioRisk = React.lazy(() => import("@/pages/research/PortfolioRisk"));
 const Simulation = React.lazy(() => import("@/pages/research/Simulation"));
-const ResearchWorkbench = React.lazy(() => import("@/pages/research/ResearchWorkbench"));
+const AgentConnect = React.lazy(() => import("@/pages/research/AgentConnect"));
 const ResearchDocs = React.lazy(() => import("@/pages/research/ResearchDocs"));
 const Reports = React.lazy(() => import("@/pages/research/Reports"));
 
@@ -81,23 +83,31 @@ export default function App() {
             <Route path="/research/experiments" element={<Experiments />} />
             <Route path="/research/runs" element={<ResearchRuns />} />
             <Route path="/research/portfolio" element={<PortfolioRisk />} />
-            <Route path="/research/simulation" element={<Simulation />} />
-            <Route path="/research/workbench" element={<ResearchWorkbench />} />
+            {!RESEARCH_EDITION && <Route path="/research/simulation" element={<Simulation />} />}
+            <Route path="/research/agent-connect" element={<AgentConnect />} />
+            {/* 旧内置工作台永久跳转到外部 Agent 接入页,保全 ?topic= 等参数 */}
+            <Route path="/research/workbench" element={<LegacyWorkbenchRedirect />} />
             <Route path="/research/docs" element={<ResearchDocs />} />
             <Route path="/research/reports" element={<Reports />} />
 
             {/* Live Trading */}
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/positions" element={<Positions />} />
-            <Route path="/orders" element={<Orders />} />
-            <Route path="/fills" element={<Fills />} />
-            <Route path="/control" element={<Control />} />
+            {RESEARCH_EDITION ? (
+              <Route path="/" element={<Navigate to="/research/agent-connect" replace />} />
+            ) : (
+              <>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/positions" element={<Positions />} />
+                <Route path="/orders" element={<Orders />} />
+                <Route path="/fills" element={<Fills />} />
+                <Route path="/control" element={<Control />} />
+                <Route path="/settings" element={<Settings />} />
+              </>
+            )}
 
             {/* Tools */}
             <Route path="/backtest" element={<Backtest />} />
             {/* 策略预设已并入回测页的预设库面板 */}
             <Route path="/strategies" element={<Navigate to="/backtest" replace />} />
-            <Route path="/settings" element={<Settings />} />
             <Route path="/jobs" element={<Jobs />} />
 
             {/* 404 */}

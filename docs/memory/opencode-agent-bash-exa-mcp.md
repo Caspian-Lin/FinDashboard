@@ -1,5 +1,9 @@
 # OpenCode finboard-researcher:bash 放行 + exa 搜索 MCP(#182)
 
+> **历史记录(#520 已退役)**:内置 OpenCode 容器托管已删除;文中容器镜像、挂载与
+> 重启语义不再适用。`.opencode/` 现仅作为外部 OpenCode 的项目级客户端配置保留,
+> 其他 Harness 自管配置。现行接入见 `docs/agent-integration.md`。
+
 ## 主题
 2026-08-16 按用户要求给 `finboard-researcher` 放行 `bash`(只读轮询用途)并接入
 exa 搜索 MCP,配套把容器项目配置挂载补成 `:ro`。issue #182。

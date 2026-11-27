@@ -442,7 +442,15 @@ class ResearchRunCoordinator:
                 error_summary=build_failure_summary(exc, failure_ctx, manifest),
             )
 
-    async def cancel(self, run_id: str) -> ResearchRunRecord:
+    async def cancel(self, run_id: str, *, commit: bool = True) -> ResearchRunRecord:
+        """Cancel a queued/running/interrupted/failed run.
+
+        ``commit=False`` is used by topic-initiated cancel (#515): the state
+        transition must stay in the caller's transaction so the #518 audit event
+        can be committed atomically with it. Existing REST/MCP cancel keeps the
+        default commit behaviour.
+        """
+
         record = await self._require_run(run_id)
         if record.status is ResearchRunStatus.CANCELLED:
             return record
@@ -458,7 +466,7 @@ class ResearchRunCoordinator:
             ),
             target=ResearchRunStatus.CANCELLED,
         )
-        await self._store.checkpoint()
+        await self._store.checkpoint(commit=commit)
         return cancelled
 
     async def mark_stale_running_as_interrupted(

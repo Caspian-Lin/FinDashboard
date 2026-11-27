@@ -18,6 +18,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -2366,15 +2367,147 @@ class McpAuditEventModel(Base, IdMixin):
     )
 
 
+class McpClientModel(Base, IdMixin):
+    """MCP 按客户端凭据(issue #517)。
+
+    服务端签发的可撤销 Bearer 凭据。只存 ``sha256(token)`` 十六进制摘要,
+    不存明文;``token_prefix`` 仅用于人工辨认(secret 前 16 字符),不能用于
+    认证。``revoked_at`` / ``expires_at`` 非空即拒绝;``last_used_at`` 供运营
+    审计,已吊销的凭据不再更新。
+
+    ``scopes`` 是 JSON 数组,取值 ``research.read`` / ``research.write`` /
+    ``research.run`` / ``data.write`` / ``audit.read``。``FINBOARD_MCP_AUTH_TOKEN``
+    旧共享 token 不落库(启动时合成 ``MC-legacy``,下一版本移除)。
+    """
+
+    __tablename__ = "mcp_clients"
+
+    client_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(16))
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ResearchAuditEventModel(Base, IdMixin):
+    """研究操作审计事件(issue #518,只追加)。
+
+    研究域统一操作账本:Web(REST)/ MCP / worker 三处写操作在同一条契约上留痕
+    (操作者、来源、课题/轮次、实体与关联 ID、服务端结果、脱敏参数摘要)。
+
+    * ``trust='server_observed'`` —— 服务端观察到的事实。成功路径与业务写入
+      **同一事务**插入(审计失败即业务回滚);拒绝/失败路径用独立会话补记。
+    * ``trust='client_declared'`` —— 外部 Harness 经
+      ``POST /api/research/audit/client-events`` 上报,``client_event_id`` 复用
+      ``idempotency_key`` 列去重,永不覆盖 ``server_observed`` 行。
+
+    无外键、无级联;不触碰实盘 ``audit_logs``。
+    """
+
+    __tablename__ = "research_audit_events"
+
+    audit_id: Mapped[str] = mapped_column(String(32))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    actor: Mapped[str] = mapped_column(String(128))
+    actor_type: Mapped[str] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(16))
+    client_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    topic_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entry_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    operation: Mapped[str] = mapped_column(String(64))
+    entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(16))
+    result_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    correlation: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    params_summary: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    params_digest: Mapped[str] = mapped_column(String(64))
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    trust: Mapped[str] = mapped_column(
+        String(16), default="server_observed", server_default="server_observed"
+    )
+    __table_args__ = (
+        Index("ix_research_audit_events_audit_id", "audit_id", unique=True),
+        Index(
+            "ix_research_audit_events_occurred",
+            sql_text("occurred_at DESC"),
+        ),
+        Index(
+            "ix_research_audit_events_topic_occurred",
+            "topic_id",
+            sql_text("occurred_at DESC"),
+        ),
+        Index(
+            "ix_research_audit_events_client_occurred",
+            "client_id",
+            sql_text("occurred_at DESC"),
+        ),
+        Index("ix_research_audit_events_entity", "entity_type", "entity_id"),
+        Index("ix_research_audit_events_outcome", "outcome"),
+        Index(
+            "uq_research_audit_client_event",
+            "client_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sql_text(
+                "trust = 'client_declared' AND idempotency_key IS NOT NULL"
+            ),
+        ),
+        CheckConstraint(
+            "outcome IN ('succeeded', 'failed', 'rejected', 'denied')",
+            name="ck_research_audit_events_outcome",
+        ),
+        CheckConstraint(
+            "trust IN ('server_observed', 'client_declared')",
+            name="ck_research_audit_events_trust",
+        ),
+    )
+
+
 class ResearchTopicModel(Base, IdMixin):
-    """Research metadata only; never owns or deletes evidence (#500)."""
+    """Research metadata only; never owns or deletes evidence (#500/#514)."""
 
     __tablename__ = "research_topics"
     topic_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSON)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    # The column is authoritative on read; payload.status is kept in sync so old
+    # JSON consumers and the pre-#514 contract still see the current value.
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_by: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'active', 'paused', 'closed')", name="ck_research_topics_status"
+        ),
+        Index(
+            "uq_research_topics_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sql_text("idempotency_key IS NOT NULL"),
+        ),
+        Index("ix_research_topics_status_updated", "status", sql_text("updated_at DESC")),
+    )
 
 
 class ResearchTopicEntryModel(Base, IdMixin):
@@ -2387,6 +2520,98 @@ class ResearchTopicEntryModel(Base, IdMixin):
     created_by: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (UniqueConstraint("topic_id", "idempotency_key", name="uq_research_topic_entry_key"),)
+
+
+class ResearchTopicLinkModel(Base, IdMixin):
+    """Immutable topic -> research artifact link (#515).
+
+    A row is an exact reference from a topic/goal version to an existing artifact
+    (currently ``research_run``; #516 reuses the same table for its kinds). It is
+    append-only and deliberately carries **no state/error columns**: live run and
+    job state is derived by joining ``research_runs`` / ``background_jobs`` at
+    read time. That is what makes worker restarts, lease reassignments and
+    duplicate completion events idempotent -- there is no link row to rewrite.
+
+    ``operation_id`` (partial unique) is the lost-receipt idempotency key; a
+    replay returns the original ``RR-``/``BJ-``, while reuse across topics is a
+    conflict. No foreign keys, following the #500 topic tables: deleting a run
+    does not cascade-delete history and vice versa.
+    """
+
+    __tablename__ = "research_topic_links"
+
+    topic_id: Mapped[str] = mapped_column(String(32))
+    goal_version: Mapped[str] = mapped_column(String(64))
+    entry_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entity_type: Mapped[str] = mapped_column(String(32))
+    entity_id: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    operation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "topic_id",
+            "entity_type",
+            "entity_id",
+            name="uq_research_topic_links_topic_entity",
+        ),
+        Index(
+            "uq_research_topic_links_operation",
+            "operation_id",
+            unique=True,
+            postgresql_where=sql_text("operation_id IS NOT NULL"),
+        ),
+        Index("ix_research_topic_links_entity", "entity_type", "entity_id"),
+        Index(
+            "ix_research_topic_links_topic_created",
+            "topic_id",
+            sql_text("created_at DESC"),
+        ),
+    )
+
+
+class ResearchTopicActionReceiptModel(Base, IdMixin):
+    """Topic action receipt -- lost-receipt idempotency for #516 actions.
+
+    A link is unique on ``(topic, entity_type, entity_id)``, so a second action on
+    the *same* artifact (e.g. ``validation_experiment.add_trial`` twice) cannot be
+    anchored on the link's ``operation_id``. This append-only receipt table is the
+    per-request anchor instead: ``UNIQUE(topic_id, operation_id)`` means a replayed
+    ``operation_id`` returns the original result instead of executing again.
+
+    The row is written in the same transaction as the artifact/job, the link and
+    the audit event, so a crash cannot leave a receipt without its artifact (or
+    vice versa). ``result_summary`` stores only the small response projection
+    (ids/status/created flags), never artifact bodies or code.
+    """
+
+    __tablename__ = "research_topic_action_receipts"
+
+    topic_id: Mapped[str] = mapped_column(String(32), index=True)
+    operation_id: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(48))
+    entity_type: Mapped[str] = mapped_column(String(32))
+    entity_id: Mapped[str] = mapped_column(String(64), index=True)
+    job_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    result_code: Mapped[str] = mapped_column(String(64))
+    result_summary: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "topic_id",
+            "operation_id",
+            name="uq_research_topic_action_receipts_topic_operation",
+        ),
+        Index("ix_research_topic_action_receipts_entity", "entity_type", "entity_id"),
+    )
 
 
 class ResearchMemoryModel(Base, IdMixin):

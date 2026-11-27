@@ -9,7 +9,7 @@ import {
   GitBranch,
   Scale,
   PlayCircle,
-  MonitorSmartphone,
+  Plug,
   FileText,
   ArrowRight,
   Activity,
@@ -38,7 +38,7 @@ const workflowSteps: { to: string; label: LocalizedText; icon: LucideIcon; desc:
   { to: "/research/runs", label: { zh: "研究运行", en: "Research Runs" }, icon: GitBranch, desc: { zh: "冻结输入、血缘追踪与运行重放", en: "Frozen inputs, lineage tracking, and run replay" } },
   { to: "/research/portfolio", label: { zh: "组合与风险", en: "Portfolio & Risk" }, icon: Scale, desc: { zh: "目标权重分配、离散交易与资金可行性", en: "Target weight allocation, discrete trades, and capital feasibility" } },
   { to: "/research/simulation", label: { zh: "模拟盘", en: "Simulation" }, icon: PlayCircle, desc: { zh: "纸面撮合、目标仓位决策与绩效报告", en: "Paper matching, target position decisions, and performance reports" } },
-  { to: "/research/workbench", label: { zh: "研究工作台", en: "Research Workbench" }, icon: MonitorSmartphone, desc: { zh: "OpenCode Web 研究交互(AI 能力由 OpenCode 承担)", en: "OpenCode Web research interaction (AI capabilities handled by OpenCode)" } },
+  { to: "/research/agent-connect", label: { zh: "Agent 接入", en: "Agent Connect" }, icon: Plug, desc: { zh: "外部 Harness 经 MCP 接入研究域、凭据与课题交接", en: "Connect an external Harness over MCP: credentials and topic handoff" } },
   { to: "/research/reports", label: { zh: "研究报告", en: "Research Reports" }, icon: FileText, desc: { zh: "聚合展示运行结果、绩效归因与风险", en: "Aggregated run results, performance attribution, and risk" } },
 ];
 

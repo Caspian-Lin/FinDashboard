@@ -1,0 +1,4 @@
+# 自动化复测用。关闭研究版到外部数据源的网络出口。
+networks:
+  default:
+    internal: true

@@ -55,7 +55,7 @@ PROMPT = """这是#504纯fixture研究操作评测,禁止访问真实研究库�
 先topic_read确认本课题goal.version/criteria,据此判定并原样归档goal_version;ROADMAP历史目标另列,不得替换课题目标。
 你只报告本会话工具回执;job_wait超时后续等不是进程中断恢复。独立会话次数、中断点、token/费用只由外层评测器记录,不要自行宣称多次起始/中断评测已覆盖。轮次是工作记录,不是canonical发布。
 全程用中文。只读本轮提供的规范文件,不能读取其他评测会话、日志或结果。
-规范位于当前项目的docs/research与.agents/skills/finboard-opencode-research,按当前目录读取。
+规范位于当前项目的docs/research与.agents/skills/finboard-research,按当前目录读取。
 不改目标、不开模拟/影子/实盘、不替换注册表策略,所有数字都是fixture而非投资结论。
 """
 
@@ -205,8 +205,8 @@ def evaluate(*, retry: bool = False, interruption: bool = False, batch: str = "s
     # 独立临时项目仅含当前规范,无已有评测日志。模型仍复用容器全局auth。
     isolated_dir = "/tmp/finboard-fixture-504"
     approved = [ROOT / "docs/research/ROADMAP.md", ROOT / "docs/research/FINDINGS.md",
-        ROOT / "docs/research/verification-playbook.md", ROOT / ".agents/skills/finboard-opencode-research/SKILL.md",
-        *sorted((ROOT / ".agents/skills/finboard-opencode-research/references").glob("*.md"))]
+        ROOT / "docs/research/verification-playbook.md", ROOT / ".agents/skills/finboard-research/SKILL.md",
+        *sorted((ROOT / ".agents/skills/finboard-research/references").glob("*.md"))]
     files = {str(path.relative_to(ROOT)).replace("\\", "/"): path.read_text(encoding="utf-8") for path in approved}
     authority = (ROOT / ".opencode/agent/finboard-researcher.md").read_text(encoding="utf-8")
     body = authority.split("---", 2)[2].replace("/workspace/", isolated_dir + "/")

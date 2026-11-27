@@ -26,10 +26,12 @@ from finboard_mcp.envelope import (
     ok,
     pending_approval,
 )
+from finboard_mcp.identity import McpClientIdentity
 from finboard_mcp.server import build_mcp_server
 
 __all__ = [
     "ErrorKind",
+    "McpClientIdentity",
     "ToolEnvelope",
     "ToolError",
     "build_mcp_server",
