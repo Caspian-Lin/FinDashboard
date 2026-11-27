@@ -263,6 +263,7 @@ export const zh = {
     credential: "审计凭据（audit.read）",
     openAudit: "查询审计",
     lockAudit: "清除凭据",
+    filters: "筛选",
     coverage: "审计覆盖",
     server_observed: "服务端记录",
     client_declared: "客户端声明",

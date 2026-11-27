@@ -9,9 +9,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/page-header";
+import { PageContainer } from "@/components/ui/page-container";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import { useT } from "@/i18n";
-import { formatDateTime } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 
 interface AuditEvent {
   audit_id: string;
@@ -117,6 +118,7 @@ export default function ResearchAudit() {
   const { t } = useT();
   const [searchParams, setSearchParams] = useSearchParams();
   const [draft, setDraft] = React.useState("");
+  const [showFilters, setShowFilters] = React.useState(false);
   const [credential, setCredential] = React.useState<{ token: string; session: number }>({ token: "", session: 0 });
   const [paging, setPaging] = React.useState<{ filter: string; stack: (string | null)[] }>({ filter: "", stack: [null] });
   const filter = searchParams.toString();
@@ -163,40 +165,50 @@ export default function ResearchAudit() {
   };
   const loadError = coverage.error ?? events.error;
   const denied = loadError instanceof AuditError && [401, 403].includes(loadError.status);
+  const authorized = coverage.isSuccess && !denied;
+  const activeRefs = idFields.map(([key]) => searchParams.get(key)).filter(Boolean);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
+    <PageContainer>
       <PageHeader title={t("taskCenter.audit")} description={t("taskCenter.auditDescription")} />
       <TaskCenterNav />
-      <form
-        className="flex flex-wrap items-end gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!draft.trim()) return;
-          setCredential({ token: draft.trim(), session: session + 1 });
-          setDraft("");
-          setPaging({ filter, stack: [null] });
-        }}
-      >
-        <div className="space-y-1.5">
-          <Label htmlFor="audit-token">{t("taskCenter.credential")}</Label>
-          <Input id="audit-token" type="password" autoComplete="off" value={draft} onChange={(event) => setDraft(event.target.value)} />
-        </div>
-        <Button type="submit" disabled={!draft.trim()}>{t("taskCenter.openAudit")}</Button>
-        {token && <Button type="button" variant="outline" onClick={() => setCredential({ token: "", session: session + 1 })}>{t("taskCenter.lockAudit")}</Button>}
-      </form>
-
       <div className="flex flex-wrap items-end gap-3">
+        {!authorized && (
+          <form
+            className="flex flex-wrap items-end gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!draft.trim()) return;
+              setCredential({ token: draft.trim(), session: session + 1 });
+              setDraft("");
+              setPaging({ filter, stack: [null] });
+            }}
+          >
+            <div className="space-y-1.5">
+              <Label htmlFor="audit-token">{t("taskCenter.credential")}</Label>
+              <Input id="audit-token" type="password" autoComplete="off" className="h-11 sm:h-9" value={draft} onChange={(event) => setDraft(event.target.value)} />
+            </div>
+            <Button type="submit" className="h-11 sm:h-9" disabled={!draft.trim()}>{t("taskCenter.openAudit")}</Button>
+          </form>
+        )}
+        {token && <Button type="button" className="h-11 sm:h-9" variant="outline" onClick={() => setCredential({ token: "", session: session + 1 })}>{t("taskCenter.lockAudit")}</Button>}
+        <Button type="button" variant="outline" className="h-11 sm:hidden" aria-controls="audit-filters" aria-expanded={showFilters} onClick={() => setShowFilters(!showFilters)}>
+          {t("taskCenter.filters")}
+        </Button>
+        {!showFilters && activeRefs.length > 0 && <p className="w-full break-words font-mono text-xs text-muted-foreground sm:hidden">{activeRefs.join(" · ")}</p>}
+      </div>
+
+      <div id="audit-filters" className={cn("flex-wrap items-end gap-3 sm:flex", showFilters ? "flex" : "hidden")}>
         {idFields.map(([key, , label]) => (
           <div className="space-y-1.5" key={key}>
             <Label htmlFor={`audit-${key}`}>{t(`taskCenter.${label}`)}</Label>
-            <Input id={`audit-${key}`} className="w-40" value={searchParams.get(key) ?? ""} onChange={(event) => setFilter(key, event.target.value)} />
+            <Input id={`audit-${key}`} className="h-11 w-40 sm:h-9" value={searchParams.get(key) ?? ""} onChange={(event) => setFilter(key, event.target.value)} />
           </div>
         ))}
         {Object.entries(filterOptions).map(([key, options]) => (
           <div className="space-y-1.5" key={key}>
             <Label htmlFor={`audit-${key}`}>{t(`taskCenter.${key}`)}</Label>
-            <select id={`audit-${key}`} className="flex h-9 rounded-md border border-input bg-background px-3 text-sm" value={searchParams.get(key) ?? ""} onChange={(event) => setFilter(key, event.target.value)}>
+            <select id={`audit-${key}`} className="flex h-11 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-9" value={searchParams.get(key) ?? ""} onChange={(event) => setFilter(key, event.target.value)}>
               <option value="">{t("taskCenter.all")}</option>
               {options.map((option) => <option value={option} key={option}>{t(`taskCenter.${option}`)}</option>)}
             </select>
@@ -205,7 +217,7 @@ export default function ResearchAudit() {
         {["from", "through"].map((key) => (
           <div className="space-y-1.5" key={key}>
             <Label htmlFor={`audit-${key}`}>{t(`taskCenter.${key}`)}</Label>
-            <Input id={`audit-${key}`} type="date" value={searchParams.get(key) ?? ""} onChange={(event) => setFilter(key, event.target.value)} />
+            <Input id={`audit-${key}`} type="date" className="h-11 sm:h-9" value={searchParams.get(key) ?? ""} onChange={(event) => setFilter(key, event.target.value)} />
           </div>
         ))}
       </div>
@@ -239,6 +251,6 @@ export default function ResearchAudit() {
           </nav>
         </>
       )}
-    </div>
+    </PageContainer>
   );
 }

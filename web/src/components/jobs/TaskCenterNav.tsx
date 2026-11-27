@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 export function TaskCenterNav() {
   const { t } = useT();
   return (
-    <nav className="flex flex-wrap gap-4 border-b border-border text-sm" aria-label={t("taskCenter.nav")}>
+    <nav className="flex flex-wrap gap-2 text-sm" aria-label={t("taskCenter.nav")}>
       {[
         ["/jobs", "taskCenter.tasks"],
         ["/research/audit", "taskCenter.audit"],
@@ -15,8 +15,8 @@ export function TaskCenterNav() {
           key={to}
           to={to}
           className={({ isActive }) =>
-            cn("border-b-2 border-transparent pb-2 text-muted-foreground hover:text-foreground",
-              isActive && "border-primary font-medium text-foreground")
+            cn("inline-flex min-h-11 items-center rounded-sm px-3 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-9",
+              isActive && "bg-accent font-medium text-foreground")
           }
         >
           {t(label)}

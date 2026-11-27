@@ -30,6 +30,7 @@ import { dayBound } from "@/lib/task-center";
 import { workspaceApi } from "@/lib/research-workspace";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
+import { PageContainer } from "@/components/ui/page-container";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -207,7 +208,7 @@ export default function Jobs() {
   const bulkTargetCount = bulkData?.total ?? 0;
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-6">
+    <PageContainer>
       <PageHeader
         title={t("jobs.title")}
         description={t("jobs.description")}
@@ -300,7 +301,7 @@ export default function Jobs() {
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="jobs-topic">{t("taskCenter.topic")}</Label>
-          <Input id="jobs-topic" list="job-topic-options" value={topic} onChange={(e) => setFilter("topic", e.target.value)} className="w-48" />
+          <Input id="jobs-topic" list="job-topic-options" value={topic} onChange={(e) => setFilter("topic", e.target.value)} className="h-11 w-48 sm:h-9" />
           <datalist id="job-topic-options">
             {queryTopics.data?.items.map((item) => <option key={item.topic_id} value={item.topic_id}>{item.title}</option>)}
           </datalist>
@@ -308,7 +309,7 @@ export default function Jobs() {
         <div className="space-y-1.5">
           <Label htmlFor="jobs-source">{t("taskCenter.requestSource")}</Label>
           <Select value={source} onValueChange={(value) => setFilter("source", value)}>
-            <SelectTrigger id="jobs-source" className="w-40"><SelectValue /></SelectTrigger>
+            <SelectTrigger id="jobs-source" className="h-11 w-40 sm:h-9"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={ALL}>{t("taskCenter.allSources")}</SelectItem>
               {["web", "mcp", "worker", "other"].map((key) => <SelectItem key={key} value={key}>{t(`taskCenter.${key}`)}</SelectItem>)}
@@ -317,11 +318,11 @@ export default function Jobs() {
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="jobs-from">{t("taskCenter.from")}</Label>
-          <Input type="date" id="jobs-from" value={from} onChange={(e) => setFilter("from", e.target.value)} />
+          <Input type="date" id="jobs-from" className="h-11 sm:h-9" value={from} onChange={(e) => setFilter("from", e.target.value)} />
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="jobs-through">{t("taskCenter.through")}</Label>
-          <Input type="date" id="jobs-through" min={from || undefined} value={through} onChange={(e) => setFilter("through", e.target.value)} />
+          <Input type="date" id="jobs-through" className="h-11 sm:h-9" min={from || undefined} value={through} onChange={(e) => setFilter("through", e.target.value)} />
         </div>
         <div className="text-sm text-muted-foreground">
           {t("jobs.totalCount", { count: total })}{activeCount > 0 ? t("jobs.activeCount", { count: activeCount }) : ""}
@@ -435,7 +436,7 @@ export default function Jobs() {
           </nav>
         </>
       )}
-    </div>
+    </PageContainer>
   );
 }
 

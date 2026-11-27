@@ -265,6 +265,7 @@ export const en: Dict = {
     credential: "Audit credential (audit.read)",
     openAudit: "Read audit",
     lockAudit: "Clear credential",
+    filters: "Filters",
     coverage: "Audit coverage",
     server_observed: "Server observed",
     client_declared: "Client declared",
