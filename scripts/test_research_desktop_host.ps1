@@ -40,6 +40,9 @@ function Require-Failure([scriptblock]$Operation, [string]$Code) {
 }
 
 function Write-File([string]$Path, [string]$Value) {
+    if ($fixture.failWritePath -and $Path -ceq $fixture.failWritePath) {
+        throw "fixture_profile_write_failed: simulated DSH file write failure"
+    }
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Path))
     [IO.File]::WriteAllText($Path, $Value, $Utf8)
 }
@@ -345,6 +348,24 @@ try {
     Require ($profileText.Contains($otherDsh) -and $profileText.Contains("# BEGIN FINDASHBOARD $fixtureProject")) "DSH setup overwrote an unrelated setting."
     Install-Dsh
     Require ([IO.File]::ReadAllText($profilePath) -ceq $profileText) "DSH setup must be repeatable."
+    $replacementPatch = Join-Path $env:DSH_HOME "profiles/desk-new/cordis.patch.yml"
+    Write-File $replacementPatch $otherDsh
+    $dshCredential = Join-Path $instanceRoot "dsh.json"
+    $Client = "dsh"
+    $Options = @{"--profile" = "desk-new"; "--preset" = "readonly"}
+    Write-File $dshCredential (@{ client_id = "MC-fixture"; sealed = "fixture"; preset = "readonly"; profile = "desk-test" } | ConvertTo-Json)
+    $fixture.failWritePath = $profilePath
+    Require-Failure { Set-ClientCredential } "fixture_profile_write_failed"
+    $pending = [IO.File]::ReadAllText($dshCredential) | ConvertFrom-Json
+    Require ($pending.profile -ceq "desk-new" -and $pending.pending_remove_profile -ceq "desk-test") "A failed DSH profile cleanup must retain its old profile identity."
+    Require ((Get-DesktopHarnessStatus "dsh" $false).repair_required) "The desktop status must mark a pending DSH cleanup."
+    Require ([IO.File]::ReadAllText($profilePath) -ceq $profileText) "A failed cleanup must keep the existing DSH profile untouched."
+    $fixture.failWritePath = $null
+    Set-ClientCredential
+    $state = [IO.File]::ReadAllText($dshCredential) | ConvertFrom-Json
+    Require (!$state.pending_remove_profile) "Retry must finish the saved DSH cleanup."
+    Require ([IO.File]::ReadAllText($profilePath).TrimEnd() -ceq $otherDsh) "Retry must preserve DSH settings outside this installation."
+    [IO.File]::Delete($dshCredential)
     $workspace = Run-Desktop "client-workspace" @{"--client" = "dsh"; "--mode" = "location"} | ConvertFrom-Json
     Require ($workspace.workspace -ceq (Join-Path $instanceRoot "workspace")) "DSH workspace must be owned by the current instance."
     Run-Desktop "attach" @{"--client" = "dsh"; "--preset" = "readonly"; "--profile" = "desk-test"}

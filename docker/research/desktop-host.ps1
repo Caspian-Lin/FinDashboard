@@ -503,6 +503,7 @@ function Get-DesktopHarnessStatus([string]$Name, [bool]$Running) {
             $entry.preset = $credential.preset
             $entry.scopes = @(Get-DesktopClientScopes $credential.preset)
             $entry.pending_revocation = [bool]$credential.pending_revoke_id
+            $entry.repair_required = [bool]$credential.pending_remove_profile
             if ($Name -ceq "dsh" -and $credential.profile -cmatch '^[a-zA-Z0-9_-]{1,64}$') {
                 $entry.profile = $credential.profile
             }
