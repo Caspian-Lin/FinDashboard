@@ -514,7 +514,7 @@ function Get-DesktopHarnessStatus([string]$Name, [bool]$Running) {
 
 function Get-DesktopGenericPath([string]$Name) {
     if ($Name -cnotmatch '^[a-z0-9][a-z0-9_-]{0,31}$') {
-        throw "desktop_invalid_arguments: Use 1–32 lowercase letters, digits, hyphens or underscores for the client name."
+        throw "desktop_invalid_arguments: Use 1 to 32 lowercase letters, digits, hyphens or underscores for the client name."
     }
     $path = Join-Path $Root "generic-clients/client-$Name.json"
     Assert-DesktopPath $path
