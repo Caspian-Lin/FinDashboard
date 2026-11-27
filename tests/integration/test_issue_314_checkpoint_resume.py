@@ -352,8 +352,10 @@ async def _drain_worker(worker: BackgroundWorker) -> None:
 
 
 class TestIssue314CheckpointResumeIntegration:
+    @pytest.mark.parametrize("checkpoint_digest_miss", [False, True])
     async def test_frozen_prefetch_and_resume_match_serial_artifacts(
-        self, engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        checkpoint_digest_miss: bool,
     ) -> None:
         """真实 Parquet + worker + PostgreSQL,中断跨批续跑后逐 stage 对照。"""
         from finboard_data import trading_calendar
@@ -419,7 +421,18 @@ class TestIssue314CheckpointResumeIntegration:
         persisted_decision_ids: list[str | None] = []
         readback_progress: list[tuple[int, int | None, str]] = []
         append_artifacts = SqlAlchemyResearchRunStore.append_artifacts
+        match_checksums = SessionPerOperationResearchRunStore.checkpoint_checksums_match
         update_progress = BackgroundJobRepository.update_progress
+        missed = False
+
+        async def record_checksum_match(
+            store: SessionPerOperationResearchRunStore, run_id: str, checksums: dict[str, str],
+        ) -> bool:
+            nonlocal missed
+            if checkpoint_digest_miss and not missed:
+                missed = True
+                return False
+            return await match_checksums(store, run_id, checksums)
 
         async def record_append(
             store: SqlAlchemyResearchRunStore, artifacts: Sequence[ResearchArtifact]
@@ -436,6 +449,9 @@ class TestIssue314CheckpointResumeIntegration:
             return await update_progress(repo, job_id, **kwargs)
 
         monkeypatch.setattr(SqlAlchemyResearchRunStore, "append_artifacts", record_append)
+        monkeypatch.setattr(
+            SessionPerOperationResearchRunStore, "checkpoint_checksums_match", record_checksum_match,
+        )
         monkeypatch.setattr(BackgroundJobRepository, "update_progress", record_progress)
 
         def factory(run_manifest: ResearchRunManifest) -> ResearchStrategyAdapter:
@@ -450,9 +466,10 @@ class TestIssue314CheckpointResumeIntegration:
         assert recovered.status is ResearchRunStatus.COMPLETED, recovered.error_summary
         assert recovered.result_checksum == control.result_checksum
         assert recovered.timing is not None
-        assert recovered.timing["resume_checkpoints_reused"] == prefix
+        assert recovered.timing["resume_checkpoints_reused"] == prefix - int(checkpoint_digest_miss)
         assert readback_progress[0] == (0, None, "research_run:resume_readback 1")
-        assert persisted_decision_ids == [
+        fallback_writes = [f"{manifest.run_id}:D:00000000"] if checkpoint_digest_miss else []
+        assert persisted_decision_ids == fallback_writes + [
             f"{manifest.run_id}:D:{index:08d}" for index in range(prefix, len(selected))
         ]
         timing = cast(dict[str, Any], recovered.timing["decision_load_stages"])

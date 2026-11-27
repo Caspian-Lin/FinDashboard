@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any, BinaryIO
 
 import pytest
@@ -22,6 +23,7 @@ import pytest
 from finboard_backtest.research_run import (
     DecisionSequenceAdapter,
     InMemoryResearchRunStore,
+    ResearchArtifact,
     ResearchRunStage,
     completed_decision_prefix,
     iter_completed_decision_prefix,
@@ -93,8 +95,9 @@ async def test_streaming_prefix_equals_list_version(
     assert streamed == listed
 
 
+@pytest.mark.parametrize("defer_features", [False, True])
 async def test_checkpoint_spool_replays_exact_decisions_with_one_current_bundle(
-    manifest_factory, decision_factory,
+    manifest_factory, decision_factory, defer_features: bool,
 ) -> None:
     store, run_id = await _completed_run(manifest_factory, decision_factory)
     expected = await _streamed_prefix(store, run_id)
@@ -105,15 +108,43 @@ async def test_checkpoint_spool_replays_exact_decisions_with_one_current_bundle(
     assert [seed.business_date for seed in spool.seeds] == [row.business_date for row in expected]
     assert spool.current is None
     file = spool._file
+    feature_file = spool._feature_file
     assert file is not None
-    for decision, original in zip(spool.replay(), expected, strict=True):
+    assert feature_file is not None
+    for decision, original in zip(spool.replay(defer_features=defer_features), expected, strict=True):
         assert spool.current is not None
         assert spool.current.decision is decision
         assert spool.current.stages is not None
+        if defer_features:
+            assert original.features
+            assert not decision.features
+            decision = spool.restore_current_features(decision)
         assert to_json_value(decision) == to_json_value(original)
     assert spool.current is None
     assert len(spool) == 0
     assert file.closed
+    assert feature_file.closed
+
+
+async def test_compact_features_truncate_on_changed_payload(
+    manifest_factory, decision_factory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, run_id = await _completed_run(manifest_factory, decision_factory)
+    iter_artifacts = store.iter_artifacts
+
+    async def corrupt_second_features(key: str) -> AsyncIterator[ResearchArtifact]:
+        async for row in iter_artifacts(key):
+            if row.stage is ResearchRunStage.FEATURES and ":00000001:" in row.artifact_id:
+                row = replace(row, payload={**row.payload, "features": []})
+            yield row
+
+    monkeypatch.setattr(store, "iter_artifacts", corrupt_second_features)
+    with_spool = ResumeCheckpointSpool()
+    await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=True, spool=with_spool,
+    )
+    assert len(with_spool) == 1
+    with_spool.close()
 
 
 async def test_checkpoint_spool_failure_discards_partial_readback(

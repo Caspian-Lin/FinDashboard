@@ -322,6 +322,7 @@ class PortfolioPipelineAdapter:
         # issue #314:断点续算种子(resume_from 接受后非空)。decisions() 先
         # 原样产出前缀(零重算),再从其后继续组合构建,账本状态由种子接续。
         self._resume_bundles: tuple[DecisionBundle, ...] | ResumeCheckpointSpool | None = None
+        self._defer_resume_features = False
         self._resume_state: _PipelineState | None = None
 
     async def aprefetch_inputs(self, count: int) -> None:
@@ -392,6 +393,7 @@ class PortfolioPipelineAdapter:
 
     def resume_from(
         self, completed: Sequence[DecisionBundle] | ResumeCheckpointSpool,
+        *, defer_features: bool = False,
     ) -> bool:
         """断点续算种子(issue #314):接受已落库的决策前缀,跳过其重算。
 
@@ -442,6 +444,7 @@ class PortfolioPipelineAdapter:
         self._resume_bundles = (
             completed if isinstance(completed, ResumeCheckpointSpool) else tuple(completed)
         )
+        self._defer_resume_features = defer_features
         self._resume_state = seeded
         return True
 
@@ -562,7 +565,7 @@ class PortfolioPipelineAdapter:
             seeds = self._resume_bundles
             if seeds is not None:
                 self._resume_bundles = None
-                pending = replay_resume_bundles(seeds)
+                pending = replay_resume_bundles(seeds, defer_features=self._defer_resume_features)
                 del seeds
                 for decision in pending:
                     yield decision

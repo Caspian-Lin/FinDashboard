@@ -3049,6 +3049,10 @@ class SignalEnginePipelineAdapter:
         self._resume_bundles = source
         return True
 
+    def can_defer_resume_features(self) -> bool:
+        """只为可能进入普通 stub 回放的前缀拆分临时特征截面。"""
+        return not self._cross_section_series_capture
+
     def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
         """只确认组合管线接受的普通因子种子,在该期 yield 期间有效。"""
 
@@ -3360,7 +3364,9 @@ class SignalEnginePipelineAdapter:
                     # 不构建)。种子被拒时输入流已被预取消费,全量重算经流重建
                     # 从第 0 期重拉(fail-closed,代价 = 预计算重建,罕见路径)。
                     await pipeline.aprefetch_inputs(len(resume))
-                    if not pipeline.resume_from(resume):
+                    if not pipeline.resume_from(
+                        resume, defer_features=self._stub_prefix_periods == len(resume),
+                    ):
                         # 种子被拒(数量/时序与冻结输入不一致):整段回退全量
                         # 重算(#314 fail-closed 兜底,宁重算不漂移)。
                         self._resume_bundles = None

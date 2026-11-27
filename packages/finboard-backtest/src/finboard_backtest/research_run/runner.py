@@ -270,7 +270,10 @@ class ResearchRunCoordinator:
             checksum_store = self._store if isinstance(self._store, CheckpointChecksumStore) else None
             reuse_sections = callable(confirms_checkpoint) and checksum_store is not None
             if callable(getattr(adapter, "resume_from_checkpoint_spool", None)):
-                resume_spool = ResumeCheckpointSpool()
+                can_defer_features = getattr(adapter, "can_defer_resume_features", None)
+                resume_spool = ResumeCheckpointSpool(
+                    compact_features=bool(callable(can_defer_features) and can_defer_features()),
+                )
             resume_prefix = await self._load_resume_prefix(
                 manifest.run_id, reuse_sections=reuse_sections,
                 progress=resume_progress if reuse_sections else None,
@@ -372,6 +375,14 @@ class ResearchRunCoordinator:
                             reused_checkpoints += 1
                             await _report_decision_progress(progress, len(decisions), decision)
                         else:
+                            if resume_spool is not None:
+                                # 普通前缀的账本校验不消费 features。若二次复查失败,
+                                # 幂等写回必须先恢复该期原始输入截面。
+                                restored = resume_spool.restore_current_features(raw_decision)
+                                if restored is not raw_decision:
+                                    decision = self._with_decision_id(
+                                        manifest.run_id, len(decisions), restored,
+                                    )
                             await self._persist_decision(
                                 manifest.run_id,
                                 len(decisions),
@@ -776,7 +787,12 @@ class ResearchRunCoordinator:
         next_progress_at = time.monotonic()
         try:
             rows = self._store.iter_artifacts(run_id)
-            bundles = iter_decision_checkpoints(run_id, rows, reuse_sections=reuse_sections)
+            bundles = iter_decision_checkpoints(
+                run_id, rows, reuse_sections=reuse_sections,
+                capture_feature_payload=(
+                    reuse_sections and spool is not None and spool.compact_features
+                ),
+            )
             try:
                 async for bundle in bundles:
                     append(bundle)
