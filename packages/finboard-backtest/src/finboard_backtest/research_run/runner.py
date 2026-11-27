@@ -238,6 +238,9 @@ class ResearchRunCoordinator:
         # issue #285:分段耗时(decision_load / 逐决策 execute / report),
         # 只观测,不改变 artifact/checkpoint/进度上报语义。
         run_started = time.monotonic()
+        resume_progress = progress if record.status in {
+            ResearchRunStatus.INTERRUPTED, ResearchRunStatus.FAILED,
+        } else None
         try:
             adapter.validate_manifest(manifest)
             try:
@@ -265,7 +268,8 @@ class ResearchRunCoordinator:
             checksum_store = self._store if isinstance(self._store, CheckpointChecksumStore) else None
             reuse_sections = callable(confirms_checkpoint) and checksum_store is not None
             resume_prefix = await self._load_resume_prefix(
-                manifest.run_id, reuse_sections=reuse_sections
+                manifest.run_id, reuse_sections=reuse_sections,
+                progress=resume_progress if reuse_sections else None,
             )
             resume_seconds = time.monotonic() - resume_started if resume_prefix else None
             checkpoints: deque[DecisionCheckpoint] = deque()
@@ -727,7 +731,7 @@ class ResearchRunCoordinator:
         return marker if isinstance(marker, dict) else None
 
     async def _load_resume_prefix(
-        self, run_id: str, *, reuse_sections: bool
+        self, run_id: str, *, reuse_sections: bool, progress: ProgressHook | None = None,
     ) -> list[DecisionCheckpoint]:
         """读回已完整落库的决策前缀(issue #314 入口;流式,#470 前半场)。
 
@@ -741,12 +745,22 @@ class ResearchRunCoordinator:
         """
 
         prefix: list[DecisionCheckpoint] = []
+        next_progress_at = time.monotonic()
         try:
             rows = self._store.iter_artifacts(run_id)
             bundles = iter_decision_checkpoints(run_id, rows, reuse_sections=reuse_sections)
             try:
                 async for bundle in bundles:
                     prefix.append(bundle)
+                    if progress is not None and time.monotonic() >= next_progress_at:
+                        # 让 worker 从实际完成校验的组判断活性。已落库计数由原阶段上报。
+                        # 读回游标可能占用连接池的唯一连接,上报不能等待完整的取连接超时。
+                        with contextlib.suppress(TimeoutError):
+                            async with asyncio.timeout(0.25):
+                                await _report_progress(
+                                    progress, 0, None, f"research_run:resume_readback {len(prefix)}",
+                                )
+                        next_progress_at = time.monotonic() + 5.0
             finally:
                 # 提前截断(不完整前缀)或中途异常时关闭上游流,释放服务端
                 # 游标;对已耗尽 / 无 aclose 的迭代器为尽力而为。
@@ -1340,7 +1354,7 @@ def _decision_phase(stage_value: str, decision_index: int, business_date: object
 async def _report_progress(
     progress: ProgressHook,
     done: int,
-    total: int,
+    total: int | None,
     phase: str,
 ) -> None:
     """尽力而为上报进度;上报失败不得影响运行状态机(仅可观测性,issue #188)。

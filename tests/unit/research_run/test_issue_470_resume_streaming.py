@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -88,6 +89,45 @@ async def test_streaming_prefix_equals_list_version(
     streamed = await _streamed_prefix(store, run_id)
     assert len(listed) == 3
     assert streamed == listed
+
+
+@pytest.mark.parametrize("cancel_externally", [False, True])
+async def test_resume_readback_progress_timeout_and_external_cancellation(
+    manifest_factory, decision_factory, monkeypatch: pytest.MonkeyPatch, cancel_externally: bool,
+) -> None:
+    store, run_id = await _completed_run(manifest_factory, decision_factory, count=2)
+    expected = await _streamed_prefix(store, run_id)
+    entered, progress_closed, stream_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    iter_artifacts = store.iter_artifacts
+
+    async def track_stream(key: str) -> AsyncIterator[Any]:
+        try:
+            async for artifact in iter_artifacts(key):
+                yield artifact
+        finally:
+            stream_closed.set()
+
+    async def blocked_progress(done: int, total: int | None, phase: str | None) -> None:
+        entered.set()
+        try:
+            await asyncio.Future[None]()
+        finally:
+            progress_closed.set()
+
+    monkeypatch.setattr(store, "iter_artifacts", track_stream)
+    task = asyncio.create_task(ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=True, progress=blocked_progress,
+    ))
+    if cancel_externally:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        task.cancel("external cancel")
+        with pytest.raises(asyncio.CancelledError, match="external cancel"):
+            await task
+    else:
+        prefix = await asyncio.wait_for(task, timeout=2)
+        assert [checkpoint.decision for checkpoint in prefix] == expected
+    assert progress_closed.is_set()
+    assert stream_closed.is_set()
 
 
 async def test_rebuild_features_share_metadata_with_exact_timestamp_fidelity() -> None:

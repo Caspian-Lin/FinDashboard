@@ -417,7 +417,9 @@ class TestIssue314CheckpointResumeIntegration:
         assert len(checkpoint) == prefix * _STAGE_COUNT
 
         persisted_decision_ids: list[str | None] = []
+        readback_progress: list[tuple[int, int | None, str]] = []
         append_artifacts = SqlAlchemyResearchRunStore.append_artifacts
+        update_progress = BackgroundJobRepository.update_progress
 
         async def record_append(
             store: SqlAlchemyResearchRunStore, artifacts: Sequence[ResearchArtifact]
@@ -425,7 +427,16 @@ class TestIssue314CheckpointResumeIntegration:
             persisted_decision_ids.append(artifacts[0].decision_id)
             return await append_artifacts(store, artifacts)
 
+        async def record_progress(
+            repo: BackgroundJobRepository, job_id: str, **kwargs: Any,
+        ) -> Any:
+            phase = kwargs.get("phase")
+            if phase and phase.startswith("research_run:resume_readback "):
+                readback_progress.append((kwargs["done"], kwargs["total"], phase))
+            return await update_progress(repo, job_id, **kwargs)
+
         monkeypatch.setattr(SqlAlchemyResearchRunStore, "append_artifacts", record_append)
+        monkeypatch.setattr(BackgroundJobRepository, "update_progress", record_progress)
 
         def factory(run_manifest: ResearchRunManifest) -> ResearchStrategyAdapter:
             return SignalEnginePipelineAdapter(
@@ -440,6 +451,7 @@ class TestIssue314CheckpointResumeIntegration:
         assert recovered.result_checksum == control.result_checksum
         assert recovered.timing is not None
         assert recovered.timing["resume_checkpoints_reused"] == prefix
+        assert readback_progress[0] == (0, None, "research_run:resume_readback 1")
         assert persisted_decision_ids == [
             f"{manifest.run_id}:D:{index:08d}" for index in range(prefix, len(selected))
         ]
