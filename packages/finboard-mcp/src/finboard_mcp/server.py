@@ -181,6 +181,8 @@ finboard_topic_write(operation="append") 追加轮次 + finboard_memory_remember
   跨课题复用 conflict。旧 finboard_run_queue
   独立入口不变,已存在 run 可后来关联。契约见 docs/research/
   workspace-contract.md。
+- finboard_run_queue 的 preview_only=true 预览生效输入。提交时可附
+  expected_manifest_checksum 验证输入一致。
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部

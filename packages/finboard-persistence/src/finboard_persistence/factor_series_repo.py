@@ -110,6 +110,17 @@ def series_id_for(series_key: str) -> str:
     return f"FS-{series_key[:12]}"
 
 
+@dataclass(frozen=True, slots=True)
+class FactorSeriesOption:
+    series_id: str
+    code_artifact: str
+    code_commit: str
+    release_id: str
+    dataset_release_ids: list[str]
+    window_start: date
+    window_end: date
+
+
 @dataclass(frozen=True)
 class FactorSeriesRecord:
     """``research_factor_series`` 逐列对应;dates/values 已反序列化。
@@ -420,6 +431,24 @@ class FactorSeriesRepository:
             if expected == row.series_key:
                 return self._record_from_row(row)
         return None
+
+    async def list_options_for_releases(
+        self, release_ids: Sequence[str], *, limit: int = 500,
+    ) -> list[FactorSeriesOption]:
+        """按主发布查可选序列。SQL 投影省略日期数组和逐日截面。"""
+        model = ResearchFactorSeriesModel
+        rows = (
+            await self._session.execute(
+                select(
+                    model.series_id, model.code_artifact, model.code_commit,
+                    model.release_id, model.dataset_release_ids, model.window_start, model.window_end,
+                )
+                .where(model.release_id.in_(release_ids))
+                .order_by(model.window_end.desc(), model.series_id)
+                .limit(limit)
+            )
+        ).tuples().all()
+        return [FactorSeriesOption(*row) for row in rows]
 
     async def list_for_release(
         self, release_id: str

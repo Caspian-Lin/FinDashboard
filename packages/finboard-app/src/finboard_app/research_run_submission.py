@@ -49,8 +49,19 @@ from finboard_app.research_operation import (
     ResearchPreconditionFailedError,
 )
 from finboard_app.research_run_store import SqlAlchemyResearchRunStore
-from finboard_backtest.data_scope import ScopeGateError, apply_scope_to_parameters
-from finboard_backtest.data_scope.contracts import DataScopeSpec
+from finboard_backtest.data_scope import (
+    ScopeGateError,
+    ScopeResolutionError,
+    apply_scope_to_parameters,
+    resolve_data_scope,
+)
+from finboard_backtest.data_scope.contracts import (
+    DataScopeSpec,
+    ScopeDatasets,
+    ScopeDecisionWindow,
+    ScopeFilters,
+    ScopeUniverse,
+)
 from finboard_backtest.research_code import (
     active_user_factor_names,
     active_user_strategy_commits,
@@ -111,6 +122,7 @@ from finboard_backtest.strategy_spec.universe_precheck import (
     preview_universe_pool,
     resolvable_feature_names,
 )
+from finboard_data.datasets import CatalogDataset
 from finboard_data.factor_lab import FeatureSnapshot, is_user_factor_name
 from finboard_data.releases import (
     ReleaseCapabilityError,
@@ -136,6 +148,14 @@ from finboard_persistence.models import (
 # --------------------------------------------------------------------------- #
 # 输入 DTO(字段 / 默认值 / 校验器与历史 ResearchRunQueueIn 逐项一致)
 # --------------------------------------------------------------------------- #
+
+
+class ResearchRunWindowPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: date
+    end: date
+    warmup_sessions: int = Field(default=0, ge=0, le=5000)
+    tail_sessions: int = Field(default=1, ge=0, le=250)
 
 
 class ResearchRunSubmitInput(BaseModel):
@@ -171,6 +191,8 @@ class ResearchRunSubmitInput(BaseModel):
     # ``parameters.research_window``。None = 旧入口,行为不变。
     data_scope: DataScopeSpec | None = None
     data_scope_resolution_id: str | None = Field(default=None, max_length=64)
+    # 上一次显式预检的冻结摘要。它只验证提交的一致性。该字段不参与 manifest。
+    expected_manifest_checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _validate_data_scope(self) -> ResearchRunSubmitInput:
@@ -262,6 +284,13 @@ class PreflightReport:
     run_id: str
     manifest_checksum: str
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "manifest_checksum": self.manifest_checksum,
+            "manifest": to_json_value(self.manifest),
+        }
+
 
 @dataclass(slots=True)
 class SubmitOutcome:
@@ -306,11 +335,63 @@ class ResearchRunSubmissionService:
             os.getenv("FINBOARD_DATA_RELEASE_ROOT", "data_releases")
         )
 
+    async def _resolve_preview_window(
+        self,
+        payload: ResearchRunSubmitInput,
+        spec: ResearchStrategySpec,
+        releases: list[ResearchDatasetRelease],
+        window: ResearchRunWindowPreview,
+    ) -> ResearchRunSubmitInput:
+        if payload.data_scope is not None:
+            raise ResearchInvalidInputError(
+                "预览窗口须沿用当前策略的冻结数据。",
+                code="scope_window_conflict",
+            )
+        bars = next((release for release in releases if release.dataset_kind is ReleaseDatasetKind.BARS), None)
+        if bars is None or bars.adjustment not in {"qfq", "hqfq", "none"}:
+            raise ResearchInvalidInputError("此策略的 bars 发布无法用于窗口预览。", code="scope_bars_unavailable")
+
+        universe = spec.universe
+        try:
+            kinds = tuple(dict.fromkeys(CatalogDataset(release.dataset_kind.value) for release in releases))
+            scope = DataScopeSpec(
+                universe=ScopeUniverse(
+                    markets=universe.markets,
+                    asset_classes=universe.asset_classes,
+                    explicit_symbols=universe.explicit_symbols,
+                    filters=ScopeFilters(
+                        min_listing_days=universe.min_listing_days,
+                        exclude_suspended=universe.exclude_suspended,
+                        exclude_delisted=universe.exclude_delisted,
+                    ),
+                ),
+                decision=ScopeDecisionWindow(
+                    start=window.start, end=window.end, schedule=payload.parameters.get("decision_schedule"),
+                ),
+                warmup_sessions=window.warmup_sessions,
+                tail_sessions=window.tail_sessions,
+                benchmarks=(str(payload.benchmark_config.get("symbol") or spec.validation_plan.benchmark_symbol),),
+                datasets=ScopeDatasets(required=kinds),
+                bars_adjustment=cast(Literal["qfq", "hqfq", "none"], bars.adjustment),
+                release_selection="locked",
+                locked_release_ids=tuple(payload.dataset_release_ids),
+            )
+            resolution = await resolve_data_scope(
+                self._session, scope, strategy_id=payload.strategy_id, strategy_version=payload.strategy_version,
+            )
+        except ScopeResolutionError as exc:
+            raise ResearchInvalidInputError(exc.message, code=exc.code) from exc
+        except ValueError as exc:
+            raise ResearchInvalidInputError(str(exc), code="scope_invalid") from exc
+        return payload.model_copy(update={"data_scope": scope, "data_scope_resolution_id": resolution.resolution_id})
+
     # -- 只读预检 ---------------------------------------------------------- #
     async def preflight(
         self,
         payload: ResearchRunSubmitInput,
         ctx: ResearchOperationContext | None = None,
+        *,
+        window: ResearchRunWindowPreview | None = None,
     ) -> PreflightReport:
         """跑完全部入队门控并构造 manifest,**不写任何表**。
 
@@ -364,6 +445,8 @@ class ResearchRunSubmissionService:
         # 得到合并了 ``research_window`` 的参数副本:只在构造 manifest 时使用,
         # **不**改写 ``payload.parameters``——#361 的因子序列反查把 run parameters
         # 当 series_key 输入,凭空多一个窗口键会让合法 run 报「未构建 series」。
+        if window is not None:
+            payload = await self._resolve_preview_window(payload, spec, releases, window)
         scope_parameters: dict[str, Any] | None = None
         scope_manifest: dict[str, Any] | None = None
         if payload.data_scope is not None:
@@ -861,6 +944,14 @@ class ResearchRunSubmissionService:
         try:
             report = await self.preflight(payload, ctx)
             manifest = report.manifest
+            if (
+                payload.expected_manifest_checksum is not None
+                and payload.expected_manifest_checksum != report.manifest_checksum
+            ):
+                raise ResearchConflictError(
+                    "冻结输入在预览后已变化。请重新预览",
+                    code="run_preflight_drift",
+                )
             try:
                 row, created = await ResearchRunRepository(self._session).create_or_get(
                     run_id=manifest.run_id,

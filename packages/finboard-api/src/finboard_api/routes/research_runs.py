@@ -14,16 +14,20 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import cast
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
 from finboard_api.research_run_schemas import (
+    FactorSeriesOptionOut,
     ResearchArtifactOut,
     ResearchLineageOut,
     ResearchRunOut,
+    ResearchRunPreflightIn,
+    ResearchRunPreflightOut,
     ResearchRunQueueIn,
     ResearchRunReplayIn,
 )
@@ -41,6 +45,7 @@ from finboard_backtest.research_run import (
 from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
+    FactorSeriesRepository,
     ResearchRunPersistenceConflictError,
     ResearchRunRepository,
 )
@@ -70,6 +75,43 @@ def _web_context(request: Request, actor_type: str) -> ResearchOperationContext:
         request_id=request.headers.get("x-request-id"),
         actor_type=ResearchActorType(actor_type),
     )
+
+
+@router.post("/preflight", response_model=ResearchRunPreflightOut)
+async def preview_research_run(
+    body: ResearchRunPreflightIn,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> ResearchRunPreflightOut:
+    """预览生效输入和前置门控。该步骤不登记运行或后台任务。"""
+    service = ResearchRunSubmissionService(
+        session, sandbox_enabled=_sandbox_enabled(request)
+    )
+    try:
+        report = await service.preflight(
+            body, _web_context(request, body.actor_type), window=body.preview_window,
+        )
+    except ResearchOperationError as exc:
+        raise _http_error(exc) from exc
+    return ResearchRunPreflightOut.model_validate(report.as_dict())
+
+
+@router.get("/factor-series-options", response_model=list[FactorSeriesOptionOut])
+async def research_run_factor_series_options(
+    release_id: Annotated[
+        list[Annotated[str, StringConstraints(min_length=1, max_length=128)]],
+        Query(min_length=1, max_length=30),
+    ],
+    session: AsyncSession = Depends(get_db_session),
+) -> list[FactorSeriesOptionOut]:
+    """返回冻结发布下的序列选择元数据。"""
+    choices = await FactorSeriesRepository(session).list_options_for_releases(release_id)
+    release_set = set(release_id)
+    return [
+        FactorSeriesOptionOut.model_validate(item)
+        for item in choices
+        if set(item.dataset_release_ids) <= release_set
+    ]
 
 
 @router.post("", response_model=ResearchRunOut, status_code=201)

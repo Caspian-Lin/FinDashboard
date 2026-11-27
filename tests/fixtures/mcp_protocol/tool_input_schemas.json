@@ -71,6 +71,11 @@
           "additionalProperties": true,
           "title": "Payload",
           "type": "object"
+        },
+        "preview_only": {
+          "default": false,
+          "title": "Preview Only",
+          "type": "boolean"
         }
       },
       "required": [

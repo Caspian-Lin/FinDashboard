@@ -103,6 +103,9 @@ validation_experiment_create 的 selection_config.validation_trial_runner 显式
   `finboard_report_run(view="detail", decision_id=...)` 下钻。
 
 ### finboard_run_queue(✅ #127 + #170 + #183,写)
+
+已准备好运行入参时可调用 `finboard_run_queue(payload=..., preview_only=true)` 查看生效冻结输入。预览无需登记 RR 或 BJ。正式入队时可将预览的 `manifest_checksum` 作为 `expected_manifest_checksum` 放入原 payload。冻结输入变化时重新预览。
+
 冻结输入 + 登记 queued ResearchRun(**不执行回测**,执行由离线 worker 完成)。
 issue #170 起 `multi_factor` 已发布规格可由 worker 端到端执行
 (信号引擎 + 组合流水线 → 14 stage artifacts → COMPLETED);issue #218 起

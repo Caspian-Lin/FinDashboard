@@ -13,7 +13,7 @@ wire schema 用同名子类而非别名:FastAPI/pydantic 的 components key 取�
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from finboard_app.research_run_submission import (
     ResearchRunReplayInput,
     ResearchRunSubmitInput,
+    ResearchRunWindowPreview,
 )
 
 
@@ -30,6 +31,28 @@ class ResearchRunQueueIn(ResearchRunSubmitInput):
 
 class ResearchRunReplayIn(ResearchRunReplayInput):
     """``POST /api/research/runs/{run_id}/replay`` 请求体(组件名同上)。"""
+
+
+class ResearchRunPreflightIn(ResearchRunQueueIn):
+    preview_window: ResearchRunWindowPreview | None = None
+
+
+class ResearchRunPreflightOut(BaseModel):
+    run_id: str
+    manifest_checksum: str
+    manifest: dict[str, Any]
+
+
+class FactorSeriesOptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    series_id: str
+    code_artifact: str
+    code_commit: str
+    release_id: str
+    dataset_release_ids: list[str]
+    window_start: date
+    window_end: date
 
 
 class ResearchRunOut(BaseModel):
@@ -77,9 +100,12 @@ class ResearchLineageOut(BaseModel):
 
 
 __all__ = [
+    "FactorSeriesOptionOut",
     "ResearchArtifactOut",
     "ResearchLineageOut",
     "ResearchRunOut",
+    "ResearchRunPreflightIn",
+    "ResearchRunPreflightOut",
     "ResearchRunQueueIn",
     "ResearchRunReplayIn",
 ]
