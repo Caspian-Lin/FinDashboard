@@ -3,7 +3,7 @@ import StrategyExplanation from "@/components/research/StrategyExplanation";
 import { runSchedule } from "@/lib/research-semantics";
 import { ResearchHint } from "@/components/research/ResearchHint";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
-import { RunReportView } from "@/components/research/report/RunReportView";
+import { RunReportView, RunResultSummary } from "@/components/research/report/RunReportView";
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
@@ -702,6 +702,7 @@ export default function ResearchRuns() {
                     <TabsContent value="overview">
                       <ScrollArea className="max-h-[720px] pr-3">
                         <div className="space-y-5">
+                          <RunResultSummary detail={detail} />
                           <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
                             <InfoItem label={tl({ zh: "运行 ID", en: "Run ID" })}>
                               <span className="font-mono text-xs">
@@ -882,18 +883,6 @@ export default function ResearchRuns() {
                                 {detail.result_checksum}
                               </span>
                             </div>
-                          )}
-
-                          {detail.error_code && (
-                            <Alert variant="destructive">
-                              <AlertTitle>{tl({ zh: "运行失败", en: "Run failed" })}</AlertTitle>
-                              <AlertDescription>
-                                <span className="font-mono">{detail.error_code}</span>
-                                {detail.error_summary && (
-                                  <p className="mt-1.5 whitespace-pre-wrap break-words">{detail.error_summary}</p>
-                                )}
-                              </AlertDescription>
-                            </Alert>
                           )}
 
                           {detail.manifest && <FrozenInputsCard manifest={detail.manifest} result={detail.result} />}

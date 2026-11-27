@@ -403,6 +403,11 @@ async def test_persistent_cash_simulation_full_lifecycle_and_isolation(
         simulation_session.simulation_session_id, close_decision
     )
     assert close_orders[0].reserved_quantity == Decimal("500")
+    latest = await repo.list_decisions(simulation_session.simulation_session_id, limit=1, newest_first=True)
+    assert [row.decision_id for row in latest] == [close_decision.decision_id]
+    oldest = await repo.list_decisions(simulation_session.simulation_session_id, limit=1)
+    assert len(oldest) == 1
+    assert oldest[0].decision_id != close_decision.decision_id
     assert position.frozen_quantity == Decimal("500")
 
     day4 = day3 + timedelta(days=1)

@@ -221,15 +221,15 @@ class SimulationRepository:
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def list_decisions(
-        self, session_id: str, *, limit: int = 1000
+        self, session_id: str, *, limit: int = 1000, newest_first: bool = False
     ) -> list[SimulationDecisionModel]:
+        date = SimulationDecisionModel.created_at
+        row_id = SimulationDecisionModel.id
+        ordering = (date.desc(), row_id.desc()) if newest_first else (date, row_id)
         stmt = (
             select(SimulationDecisionModel)
             .where(SimulationDecisionModel.simulation_session_id == session_id)
-            .order_by(
-                SimulationDecisionModel.created_at,
-                SimulationDecisionModel.id,
-            )
+            .order_by(*ordering)
             .limit(limit)
         )
         return list((await self.session.execute(stmt)).scalars().all())

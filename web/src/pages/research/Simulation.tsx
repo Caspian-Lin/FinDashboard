@@ -1,5 +1,6 @@
 import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useT } from "@/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -177,6 +178,59 @@ function DataTableShell({
   return <>{children}</>;
 }
 
+function SessionOverview({ session }: { session: SimulationSession }) {
+  const { tl } = useT();
+  const latest = useQuery({
+    queryKey: ["simulation", "latest-decision", session.session_id],
+    queryFn: () => simulationApi.listDecisions(session.session_id, 1, true),
+  });
+  const decision = latest.data?.[0];
+  const date = session.clock.current_at;
+  const source = session.validation_run_id ?? session.source_run_id;
+  const pending = session.status === "created"
+    ? tl({ zh: "等待启动会话", en: "Waiting for session start" })
+    : session.status === "paused"
+      ? tl({ zh: "会话已暂停", en: "Session paused" })
+      : session.status === "running" && !date
+        ? tl({ zh: "等待首个行情事件", en: "Waiting for the first market event" })
+        : null;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-base">{tl({ zh: "模拟会话概览", en: "Paper Session Overview" })}</CardTitle>
+          <StatusBadge status={session.status} />
+        </div>
+        <p className="break-all text-xs text-muted-foreground">{session.session_id}</p>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <dl className="grid gap-3 sm:grid-cols-3">
+          <div>
+            <dt className="text-muted-foreground">{tl({ zh: "行情回放进度", en: "Replay progress" })}</dt>
+            <dd>{typeof date === "string" ? formatDateTime(date) : tl({ zh: "待处理首个行情", en: "No market event processed" })}</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">{tl({ zh: "最近决策", en: "Latest decision" })}</dt>
+            <dd className="break-all">
+              {decision ? <><StatusBadge status={decision.status} /> {formatDateTime(decision.created_at)}</>
+                : latest.isLoading ? tl({ zh: "加载中", en: "Loading" })
+                  : latest.isError ? <button type="button" className="text-primary underline" onClick={() => void latest.refetch()}>{tl({ zh: "重试读取决策", en: "Retry decision lookup" })}</button>
+                    : tl({ zh: "暂无决策", en: "No decisions yet" })}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">{tl({ zh: "冻结研究来源", en: "Frozen research source" })}</dt>
+            <dd>{source
+              ? <Link className="break-all text-primary underline" to={`/research/runs?run=${encodeURIComponent(source)}`}>{source}</Link>
+              : tl({ zh: "缺少已完成研究运行", en: "Completed research run missing" })}</dd>
+          </div>
+        </dl>
+        {pending && <p className="text-warning">{pending}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SessionDetail({
   session,
   onClear,
@@ -226,6 +280,11 @@ function SessionDetail({
     queryKey: ["simulation", "ledger", session.session_id],
     queryFn: () => simulationApi.ledger(session.session_id),
   });
+  const auditQuery = useQuery({
+    queryKey: ["simulation", "audit", session.session_id],
+    queryFn: () => simulationApi.audit(session.session_id),
+    enabled: tab === "risk-audit",
+  });
   const reportQuery = useQuery({
     queryKey: ["simulation", "report", session.session_id],
     queryFn: () => simulationApi.report(session.session_id),
@@ -241,6 +300,8 @@ function SessionDetail({
       ["simulation", "fills", session.session_id],
       ["simulation", "ledger", session.session_id],
       ["simulation", "report", session.session_id],
+      ["simulation", "audit", session.session_id],
+      ["simulation", "latest-decision", session.session_id],
     ]) {
       void queryClient.invalidateQueries({ queryKey });
     }
@@ -602,11 +663,12 @@ function SessionDetail({
             <Separator />
 
             <Tabs value={tab} onValueChange={setTab}>
-              <TabsList>
+              <TabsList className="h-auto flex-wrap justify-start">
                 <TabsTrigger value="positions">{tl({ zh: "持仓", en: "Positions" })}</TabsTrigger>
                 <TabsTrigger value="orders">{tl({ zh: "订单", en: "Orders" })}</TabsTrigger>
                 <TabsTrigger value="fills">{tl({ zh: "成交", en: "Fills" })}</TabsTrigger>
                 <TabsTrigger value="ledger">{tl({ zh: "账本", en: "Ledger" })}</TabsTrigger>
+                <TabsTrigger value="risk-audit">{tl({ zh: "风险与审计", en: "Risk and Audit" })}</TabsTrigger>
                 <TabsTrigger value="report">{tl({ zh: "报告", en: "Report" })}</TabsTrigger>
               </TabsList>
 
@@ -663,6 +725,34 @@ function SessionDetail({
                   emptyDescription={tl({ zh: "该会话尚未产生任何资金账本变动。", en: "No cash ledger changes have been recorded in this session yet." })}
                 >
                   <LedgerTable rows={ledger} />
+                </DataTableShell>
+              </TabsContent>
+
+              <TabsContent value="risk-audit" className="mt-4 space-y-3">
+                <h3 className="font-medium">{tl({ zh: "模拟订单拒绝原因", en: "Simulated order rejections" })}</h3>
+                {orders.filter((order) => order.reject_reason).map((order) => (
+                  <p key={order.order_id} className="break-words text-sm text-warning">
+                    {order.symbol} · {order.reject_message ?? order.reject_reason}
+                  </p>
+                ))}
+                <h3 className="font-medium">{tl({ zh: "会话审计", en: "Session audit" })}</h3>
+                <DataTableShell
+                  isLoading={auditQuery.isLoading}
+                  isError={auditQuery.isError}
+                  error={auditQuery.error}
+                  onRetry={() => auditQuery.refetch()}
+                  isEmpty={!auditQuery.data?.length}
+                  emptyTitle={tl({ zh: "暂无审计记录", en: "No audit entries" })}
+                  emptyDescription={tl({ zh: "会话操作的审计记录将在此显示。", en: "Audit entries appear here as the session is used." })}
+                >
+                  <ol className="space-y-2">
+                    {auditQuery.data?.map((event) => (
+                      <li key={event.audit_id} className="break-words rounded border p-2 text-sm">
+                        <p className="font-medium">{event.action}</p>
+                        <p className="text-muted-foreground">{event.actor} · {formatDateTime(event.created_at)} · {event.target ?? "—"}</p>
+                      </li>
+                    ))}
+                  </ol>
                 </DataTableShell>
               </TabsContent>
 
@@ -1598,9 +1688,14 @@ export default function Simulation() {
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
     null,
   );
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
-    null,
-  );
+  const [params, setParams] = useSearchParams();
+  const selectedSessionId = params.get("session");
+  function setSelectedSessionId(id: string | null) {
+    const next = new URLSearchParams(params);
+    if (id) next.set("session", id);
+    else next.delete("session");
+    setParams(next);
+  }
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
 
@@ -1616,21 +1711,24 @@ export default function Simulation() {
     enabled: selectedAccountId !== null,
   });
 
+  const linkedSession = useQuery({
+    queryKey: ["simulation", "session", selectedSessionId],
+    queryFn: () => simulationApi.sessionDetail(selectedSessionId!),
+    enabled: !!selectedSessionId,
+  });
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const sessions = sessionsQuery.data ?? [];
 
   useEffect(() => {
-    if (selectedAccountId === null && accounts.length > 0) {
-      setSelectedAccountId(accounts[0].account_id);
-    }
-  }, [accounts, selectedAccountId]);
+    if (linkedSession.data) setSelectedAccountId(linkedSession.data.simulation_account_id);
+    else if (selectedAccountId === null && accounts.length > 0) setSelectedAccountId(accounts[0].account_id);
+  }, [accounts, linkedSession.data, selectedAccountId]);
 
   const selectedAccount = accounts.find(
     (a) => a.account_id === selectedAccountId,
   );
-  const selectedSession = sessions.find(
-    (s) => s.session_id === selectedSessionId,
-  );
+  const selectedSession = linkedSession.data ?? sessions.find((session) => session.session_id === selectedSessionId);
+  const overviewSession = selectedSession ?? sessions[0];
 
   const handleSelectAccount = (id: string) => {
     setSelectedAccountId(id);
@@ -1832,13 +1930,16 @@ export default function Simulation() {
           </MasterList>
         </div>
 
-        <div className="lg:col-span-3">
+        <div className="min-w-0 space-y-4 lg:col-span-3">
+          {overviewSession && <SessionOverview session={overviewSession} />}
           {selectedSession ? (
             <SessionDetail
               session={selectedSession}
               onClear={() => setSelectedSessionId(null)}
             />
-          ) : (
+          ) : linkedSession.isError ? (
+            <ErrorState message={tl({ zh: "无法加载链接中的模拟会话", en: "Could not load the linked simulation session" })} onRetry={() => void linkedSession.refetch()} />
+          ) : selectedSessionId && linkedSession.isLoading ? <LoadingState rows={3} /> : (
             <EmptyState
               icon={<FlaskConical className="h-8 w-8" />}
               title={tl({ zh: "请从左侧选择一个模拟会话", en: "Select a simulation session on the left" })}

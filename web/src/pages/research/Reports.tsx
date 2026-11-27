@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import { RESEARCH_EDITION } from "@/lib/edition";
 import { Activity, FileText } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import {
@@ -167,7 +168,7 @@ function SimulationReportView({
       metrics={metrics}
       equityCurve={equityCurve}
       extras={[]}
-      sourceHref="/research/simulation"
+      sourceHref={`/research/simulation?session=${encodeURIComponent(session.session_id)}`}
       sourceLabel={tl({ zh: "模拟会话", en: "simulation session" })}
       sourceId={session.session_id}
       meta={
@@ -211,11 +212,11 @@ function SimulationReportView({
 // 本页保留聚合入口定位:选择来源 + 模拟会话报告。
 export default function Reports() {
   const { tl } = useT();
-  const [source, setSource] = useState<ReportSource>("run");
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
-    null,
-  );
+  const [params, setParams] = useSearchParams();
+  const source: ReportSource = !RESEARCH_EDITION && (params.get("source") === "simulation" || params.has("session"))
+    ? "simulation" : "run";
+  const selectedRunId = source === "run" ? params.get("run") : null;
+  const selectedSessionId = source === "simulation" ? params.get("session") : null;
 
   const runsQuery = useQuery({
     queryKey: ["reports", "runs"],
@@ -224,6 +225,12 @@ export default function Reports() {
   const sessionsQuery = useQuery({
     queryKey: ["reports", "sessions"],
     queryFn: () => simulationApi.listSessions({ limit: 50 }),
+    enabled: source === "simulation",
+  });
+  const linkedSession = useQuery({
+    queryKey: ["simulation", "session", selectedSessionId],
+    queryFn: () => simulationApi.sessionDetail(selectedSessionId!),
+    enabled: !!selectedSessionId,
   });
 
   const completedRuns = useMemo(() => {
@@ -236,15 +243,18 @@ export default function Reports() {
     return all.filter((s) => SIM_REPORT_STATUSES.includes(s.status));
   }, [sessionsQuery.data]);
 
-  const handleSourceChange = (v: string) => {
-    setSource(v as ReportSource);
-    setSelectedRunId(null);
-    setSelectedSessionId(null);
-  };
+  const selectedSession = linkedSession.data && SIM_REPORT_STATUSES.includes(linkedSession.data.status)
+    ? linkedSession.data : reportableSessions.find((session) => session.session_id === selectedSessionId);
 
-  const selectedSession = reportableSessions.find(
-    (s) => s.session_id === selectedSessionId,
-  );
+  function selectReport(value: string, id?: string) {
+    const next = new URLSearchParams(params);
+    next.delete("run");
+    next.delete("session");
+    if (value === "simulation") next.set("source", "simulation");
+    else next.delete("source");
+    if (id) next.set(value === "simulation" ? "session" : "run", id);
+    setParams(next);
+  }
 
   return (
     <div>
@@ -259,11 +269,11 @@ export default function Reports() {
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap items-end gap-4">
-            <div className="space-y-1.5">
+            {!RESEARCH_EDITION && <div className="space-y-1.5">
               <p className="text-xs font-medium text-muted-foreground">
                 {tl({ zh: "来源类型", en: "Source type" })}
               </p>
-              <Select value={source} onValueChange={handleSourceChange}>
+              <Select value={source} onValueChange={selectReport}>
                 <SelectTrigger className="h-9 w-[180px]">
                   <SelectValue />
                 </SelectTrigger>
@@ -275,16 +285,16 @@ export default function Reports() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+            </div>}
 
             {source === "run" ? (
-              <div className="min-w-[260px] flex-1 space-y-1.5">
+              <div className="w-full min-w-0 flex-1 space-y-1.5 sm:min-w-[240px]">
                 <p className="text-xs font-medium text-muted-foreground">
                   {tl({ zh: "研究运行（已完成）", en: "Research runs (completed)" })}
                 </p>
                 <Select
                   value={selectedRunId ?? undefined}
-                  onValueChange={setSelectedRunId}
+                  onValueChange={(id) => selectReport("run", id)}
                 >
                   <SelectTrigger className="h-9 w-full">
                     <SelectValue placeholder={tl({ zh: "选择一个已完成的研究运行", en: "Select a completed research run" })} />
@@ -310,13 +320,13 @@ export default function Reports() {
                 </Select>
               </div>
             ) : (
-              <div className="min-w-[260px] flex-1 space-y-1.5">
+              <div className="w-full min-w-0 flex-1 space-y-1.5 sm:min-w-[240px]">
                 <p className="text-xs font-medium text-muted-foreground">
                   {tl({ zh: "模拟会话（已停止 / 已归档）", en: "Simulation sessions (stopped / archived)" })}
                 </p>
                 <Select
                   value={selectedSessionId ?? undefined}
-                  onValueChange={setSelectedSessionId}
+                  onValueChange={(id) => selectReport("simulation", id)}
                 >
                   <SelectTrigger className="h-9 w-full">
                     <SelectValue placeholder={tl({ zh: "选择一个已停止或已归档的模拟会话", en: "Select a stopped or archived simulation session" })} />
@@ -370,6 +380,10 @@ export default function Reports() {
         )
       ) : selectedSession ? (
         <SimulationReportView session={selectedSession} />
+      ) : selectedSessionId && linkedSession.isLoading ? (
+        <LoadingState rows={3} />
+      ) : selectedSessionId && linkedSession.isError ? (
+        <ErrorState message={tl({ zh: "无法加载模拟会话", en: "Failed to load simulation session" })} onRetry={() => void linkedSession.refetch()} />
       ) : (
         <EmptyState
           icon={<Activity className="h-8 w-8" />}

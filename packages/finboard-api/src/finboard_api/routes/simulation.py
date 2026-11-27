@@ -278,11 +278,12 @@ async def submit_simulation_decision(
 async def list_simulation_decisions(
     session_id: str,
     limit: int = Query(default=1000, ge=1, le=10000),
+    newest_first: bool = False,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[SimulationDecisionOut]:
     repo = SimulationRepository(session)
     await _require_session(repo, session_id)
-    rows = await repo.list_decisions(session_id, limit=limit)
+    rows = await repo.list_decisions(session_id, limit=limit, newest_first=newest_first)
     return [SimulationDecisionOut.model_validate(item) for item in rows]
 
 

@@ -17,8 +17,8 @@
 | `/research/runs` | 研究运行 | 研究运行 | 保留 `run` 和 `topic` 上下文 |
 | `/research/experiments` | 正式实验与 OOS | 正式实验与 OOS | 保留实验和课题链接 |
 | `/research/portfolio` | 组合与风险 | 组合与风险 | 保留冻结参数及资金可行性 |
-| `/research/simulation` | 模拟盘 | 显示能力提示 | 研究版保留原 URL，提供回研究入口 |
-| `/research/reports` | 研究报告 | 研究报告 | 保留 `run` 和既有导出入口 |
+| `/research/simulation` | 模拟盘 | 显示能力提示 | 完整版保留 `session`，研究版提供回研究入口 |
+| `/research/reports` | 研究报告 | 研究报告 | 支持 `run` 和 `session` 定位，保留既有导出入口 |
 | `/research/strategy-explanation` | 策略说明书 | 策略说明书 | 保留冻结策略／运行版本和来源 |
 | `/research/docs` | 研究资料 | 研究资料 | 保留正式文档路径 |
 | `/research/agent-connect` | Agent 接入 | Agent 接入 | 保留 `topic` 交接上下文 |
