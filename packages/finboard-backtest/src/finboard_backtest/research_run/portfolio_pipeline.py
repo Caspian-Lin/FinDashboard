@@ -1193,7 +1193,7 @@ def _covariance_with_target_coverage(
         return covariance
     # signal_engine 反向导入本模块:模块级互相导入会构成环,惰性导入
     # (与 _features_by_source 同处理)。
-    from finboard_backtest.research_run.signal_engine import _estimate_covariance
+    from finboard_backtest.research_run.signal_engine import _timed_covariance
 
     series = provider(sorted(needed))
     if set(series) != needed:
@@ -1204,7 +1204,7 @@ def _covariance_with_target_coverage(
             resolved=len(series),
         )
         return covariance
-    rebuilt = _estimate_covariance(series)
+    rebuilt = _timed_covariance(series, "target_covariance_rebuild")
     if rebuilt is None:
         logger.warning(
             "research_run.covariance_coverage_rebuild_failed",

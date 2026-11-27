@@ -546,9 +546,8 @@ class TestGeneratorCloseReleasesPool:
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """池生命周期(#470 收紧):预计算完成后**首个 context 产出前**池已
-        retire+aclose(决策段零子进程驻留);生成器 finally 的 aclose 幂等
-        (executor 已 None,无第二次真实关闭)。真实 spawn 池,关闭计数经由
-        包装的 aclose。"""
+        retire+aclose(决策段零子进程驻留)。真实 spawn 池,验证生成器
+        关闭后 executor 仍已释放。"""
         import finboard_backtest.research_run.signal_engine as signal_engine
 
         provider = await _build_release(tmp_path)
@@ -587,8 +586,9 @@ class TestGeneratorCloseReleasesPool:
         assert closed["count"] == 1
         assert pool_ref["pool"].broken is True
         await gen.aclose()
-        # finally 的 aclose 仍会调用一次,但 executor 已 None(幂等 no-op)。
-        assert closed["count"] == 2
+        assert closed["count"] == 1
+        with pytest.raises(RuntimeError, match="尚未 start"):
+            _ = pool_ref["pool"].executor
 
 
 # ---------------------------------------------------------------------------

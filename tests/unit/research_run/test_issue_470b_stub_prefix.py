@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +35,7 @@ from finboard_backtest.portfolio.contracts import AssetLotInfo
 from finboard_backtest.research_run import (
     InMemoryResearchRunStore,
     ResearchRunCoordinator,
+    ResearchRunStage,
     ResearchRunStatus,
 )
 from finboard_backtest.research_run import (
@@ -43,7 +45,10 @@ from finboard_backtest.research_run.checkpoint_resume import (
     completed_decision_prefix,
 )
 from finboard_backtest.research_run.contracts import (
+    DecisionBundle,
+    JsonValue,
     ResearchRunInterruptedError,
+    ResearchRunManifest,
     stable_checksum,
 )
 from finboard_backtest.research_run.frozen_loader import (
@@ -373,8 +378,9 @@ def _non_u_signal_setup(
 
 
 class TestStubPrefixResumeEndToEnd:
+    @pytest.mark.parametrize("fallback", [None, "missing_stage", "copied_decision"])
     async def test_resume_equals_fresh_and_prefix_not_rebuilt(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, fallback: str | None
     ) -> None:
         """续跑产出与一次跑完等值;前缀 2 期零 load_context / 零协方差。"""
         manifest, snapshots, provider = _non_u_signal_setup(
@@ -400,7 +406,30 @@ class TestStubPrefixResumeEndToEnd:
         )
         assert interrupted.status is ResearchRunStatus.INTERRUPTED
 
-        resumed_adapter = SignalEnginePipelineAdapter(
+        if fallback == "missing_stage":
+            checksums_match = store.checkpoint_checksums_match
+            removed = False
+
+            async def lose_stage_on_recheck(run_id: str, checksums: Mapping[str, str]) -> bool:
+                nonlocal removed
+                if not removed:
+                    artifact_id = next(key for key in checksums if key.endswith(":features"))
+                    del store._artifacts[run_id][artifact_id]
+                    removed = True
+                return await checksums_match(run_id, checksums)
+
+            monkeypatch.setattr(store, "checkpoint_checksums_match", lose_stage_on_recheck)
+
+        class CopyingAdapter(SignalEnginePipelineAdapter):
+            async def decisions(self, manifest: ResearchRunManifest) -> AsyncIterator[DecisionBundle]:
+                async for decision in super().decisions(manifest):
+                    yield replace(decision)
+
+            def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
+                return True
+
+        adapter_class = CopyingAdapter if fallback == "copied_decision" else SignalEnginePipelineAdapter
+        resumed_adapter = adapter_class(
             manifest=manifest,
             release_provider_factory=factory,
             snapshot_provider=snapshot_provider,
@@ -410,6 +439,9 @@ class TestStubPrefixResumeEndToEnd:
         stubs_before = counters.load_stub
         resumed = await coordinator.execute(manifest, resumed_adapter)
         assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
+        assert resumed.timing is not None
+        expected_reuse = {None: 2, "missing_stage": 1, "copied_decision": 0}
+        assert resumed.timing["resume_checkpoints_reused"] == expected_reuse[fallback]
         # 续跑段:stub 前缀 2 期只走 load_resume_stub,完整装载只剩 1 期
         # (load_context / 协方差各 1 次)—— 前缀零重算的直接计数证据。
         assert counters.load_stub - stubs_before == 2
@@ -489,7 +521,10 @@ class TestStubPrefixResumeEndToEnd:
         contexts_before = counters.load_context
         covariance_before = counters.covariance
         stubs_before = counters.load_stub
-        produced = [decision async for decision in adapter.decisions(manifest)]
+        produced = []
+        async for decision in adapter.decisions(manifest):
+            assert not adapter.is_accepted_checkpoint(decision)
+            produced.append(decision)
         delta_contexts = counters.load_context - contexts_before
         delta_covariance = counters.covariance - covariance_before
         delta_stubs = counters.load_stub - stubs_before
@@ -557,6 +592,8 @@ class TestStubPrefixResumeEndToEnd:
         )
         resumed = await coordinator.execute(manifest, resumed_adapter)
         assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
+        assert resumed.timing is not None
+        assert resumed.timing["resume_checkpoints_reused"] == 0
         # 门二生效:seed 含 u_ 观测 → 前缀走全量(stub 路径不启用),
         # factor_screen 照常覆盖全期次(3 期)。
         assert counters.load_stub == 0
@@ -564,6 +601,48 @@ class TestStubPrefixResumeEndToEnd:
         assert resumed.result is not None
         assert resumed.result.factor_screen is not None
         assert resumed.result.factor_screen["n_periods"] == 3
+
+    @pytest.mark.parametrize("changed", ["features_date", "orders_date", "feature_integer", "feature_iso", "feature_extra"])
+    async def test_resume_detects_checksum_consistent_payload_drift(self, changed: str) -> None:
+        """载荷与自身校验和仍匹配时,也需守住恢复后 canonical 冲突防线。"""
+
+        manifest, snapshots, provider = _non_u_signal_setup("RR-issue470b-drift", "issue470b-drift")
+
+        async def snapshot_provider(snapshot_id: str) -> Any:
+            return snapshots.get(snapshot_id)
+
+        kwargs = {
+            "manifest": manifest,
+            "release_provider_factory": _factory_for(provider),
+            "snapshot_provider": snapshot_provider,
+        }
+        store = InMemoryResearchRunStore()
+        coordinator = ResearchRunCoordinator(store)
+        interrupted = await coordinator.execute(manifest, _InterruptAfterKSignalAdapter(k=1, **kwargs))
+        assert interrupted.status is ResearchRunStatus.INTERRUPTED
+        artifacts = store._artifacts[manifest.run_id]
+        stage = ResearchRunStage.ORDERS if changed == "orders_date" else ResearchRunStage.FEATURES
+        row = next(row for row in artifacts.values() if row.stage is stage)
+        payload = dict(row.payload)
+        if changed.endswith("_date"):
+            payload["decision_at"] = "2024-01-01T00:00:00+00:00"
+        else:
+            features = cast(list[dict[str, JsonValue]], payload["features"])
+            first = dict(features[0])
+            if changed == "feature_integer":
+                first["value"] = 1
+            elif changed == "feature_iso":
+                original = cast(str, first["available_at"])
+                first["available_at"] = original.replace("T", " ")
+            else:
+                first["unexpected"] = None
+            payload["features"] = cast(list[JsonValue], [first, *features[1:]])
+        artifacts[row.artifact_id] = replace(row, payload=payload, checksum=stable_checksum(payload))
+
+        resumed = await coordinator.execute(manifest, SignalEnginePipelineAdapter(**kwargs))
+        assert resumed.status is ResearchRunStatus.FAILED
+        assert resumed.error_code == "ResearchRunConflictError"
+        assert "断点重放内容不一致" in (resumed.error_summary or "")
 
 
 # ---------------------------------------------------------------------------

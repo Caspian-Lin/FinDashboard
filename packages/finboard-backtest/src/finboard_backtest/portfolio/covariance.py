@@ -150,7 +150,8 @@ def pairwise_aligned_returns(
 
 
 def _ledoit_wolf_target_correlation(
-    sample: npt.NDArray[np.float64],
+    sample_cov: npt.NDArray[np.float64],
+    n_samples: int,
 ) -> tuple[npt.NDArray[np.float64], float]:
     """Ledoit-Wolf 常数相关系数收缩目标。
 
@@ -158,24 +159,18 @@ def _ledoit_wolf_target_correlation(
 
     参考:Ledoit & Wolf (2004) "Honey, I Shrunk the Sample Covariance Matrix."
     """
-    n_samples, n_assets = sample.shape
-
-    sample_cov = np.cov(sample, rowvar=False, ddof=1)
-    if n_assets == 1:
-        return sample_cov.copy(), 0.0
-
+    n_assets = sample_cov.shape[0]
     std = np.sqrt(np.diag(sample_cov))
     std_safe = np.where(std > 0, std, 1.0)
-    corr = sample_cov / np.outer(std_safe, std_safe)
+    outer_std = np.outer(std_safe, std_safe)
+    corr = sample_cov / outer_std
     np.fill_diagonal(corr, 1.0)
 
     k_bar = corr.mean()
     target_corr = np.full((n_assets, n_assets), k_bar)
     np.fill_diagonal(target_corr, 1.0)
-    target = target_corr * np.outer(std_safe, std_safe)
+    target = target_corr * outer_std
 
-    diag_cov = np.diag(sample_cov)
-    outer_std = np.outer(std_safe, std_safe)
     mask = outer_std > 0
     sum_var_diff = 0.0
     if mask.any():
@@ -183,7 +178,6 @@ def _ledoit_wolf_target_correlation(
             (sample_cov[mask] - target[mask]) ** 2
         ) / n_samples
 
-    np.outer(diag_cov, diag_cov)
     off_diag_mask = ~np.eye(n_assets, dtype=bool)
     prod = np.outer(std, std)
     off_diag_valid = off_diag_mask & (prod > 0)
@@ -234,8 +228,8 @@ def estimate_covariance(
             n_observations=n_samples,
         )
 
-    target, shrinkage = _ledoit_wolf_target_correlation(aligned)
     sample_cov = np.cov(aligned, rowvar=False, ddof=1)
+    target, shrinkage = _ledoit_wolf_target_correlation(sample_cov, n_samples)
     shrunk = shrinkage * target + (1.0 - shrinkage) * sample_cov
 
     if n_samples < min_observations * 2:
