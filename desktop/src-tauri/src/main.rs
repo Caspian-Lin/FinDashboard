@@ -279,6 +279,7 @@ mod tests {
             exit_code: 0,
             elapsed_seconds: 0.0,
             command: String::new(),
+            source: None,
             status: Some(
                 serde_json::from_value(serde_json::json!({
                     "docker": "linux", "installed": true, "has_instance": true,

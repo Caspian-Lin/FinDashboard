@@ -81,6 +81,20 @@
           <button id="attach" type="button">接入或切换</button>
         </div>
       </section>
+
+      <section class="panel source-panel" aria-labelledby="source-title">
+        <h2 id="source-title">Tushare 数据源</h2>
+        <form id="source-form" class="actions">
+          <label class="field"><span>Tushare Token</span><input id="source-token" type="password" autocomplete="off" spellcheck="false" maxlength="256" required></label>
+          <button id="source-save" type="submit">保存并重启研究服务</button>
+          <button id="source-probe" type="button">检查权限</button>
+        </form>
+        <p id="source-state" role="status">服务就绪后可检查权限。</p>
+        <details id="source-details" class="source-details" hidden>
+          <summary>接口检查结果</summary>
+          <dl id="source-capabilities" class="source-capabilities"></dl>
+        </details>
+      </section>
     </div>
 
     <section class="diagnostics" id="diagnostics" aria-labelledby="diagnostic-title">

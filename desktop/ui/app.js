@@ -6,6 +6,8 @@ const labels = {
   stop: '正在停止研究服务',
   import: '正在校验并导入合成样例',
   attach: '正在接入 Codex 并验证凭据',
+  source_status: '正在检查 Tushare 权限',
+  source_configure: '正在检查 Tushare 凭据并应用配置',
   uninstall_preserve: '正在卸载服务并保留数据',
   uninstall_purge: '正在删除本实例',
 };
@@ -26,6 +28,15 @@ const serviceLabels = {
 const presets = { readonly: '只读', 'topic-writer': '课题与研究运行' };
 const workbenchPreferenceKey = 'finboard-workbench-target';
 const workbenchActions = { in_app: '在应用内打开', browser: '在浏览器中打开' };
+const sourceCapabilities = {
+  daily: '股票日线', adj_factor: '复权因子', index_daily: '指数日线',
+  daily_basic: '每日指标', fina_indicator: '财务指标', trade_cal: '交易日历',
+};
+const sourceChecks = {
+  available: '可用', credentials_missing: '未配置', invalid_credentials: '凭据无效',
+  permission_denied: '权限不足', quota_exhausted: '已达配额', connection_failed: '网络或服务不可用',
+  coverage_insufficient: '样本无数据',
+};
 let status;
 let busy = false;
 
@@ -46,6 +57,36 @@ function alternateWorkbenchTarget() {
 function setWorkbenchStatus(message, error = false) {
   ui['workbench-status'].textContent = message;
   ui['workbench-status'].dataset.error = String(error);
+}
+
+function renderSourceDiagnostic(diagnostic, saving) {
+  const state = ui['source-state'];
+  const checks = diagnostic.capabilities;
+  if (saving) {
+    state.textContent = diagnostic.saved
+      ? diagnostic.restart === 'ready'
+        ? '配置已保存，研究服务已重启。'
+        : '配置已保存，服务重启未确认。请刷新状态后启动服务。'
+      : '配置未保存。请查看接口检查结果后重试。';
+    state.dataset.error = String(!diagnostic.saved || diagnostic.restart !== 'ready');
+  } else {
+    state.textContent = checks.daily === 'credentials_missing'
+      ? 'Tushare 尚未配置。'
+      : '权限检查已完成。展开查看各接口的可用状态。';
+    state.dataset.error = 'false';
+  }
+  const fields = Object.entries(sourceCapabilities).flatMap(([name, label]) => {
+    if (!checks[name]) return [];
+    const title = document.createElement('dt');
+    const value = document.createElement('dd');
+    title.textContent = label;
+    value.textContent = sourceChecks[checks[name]] ?? '未确认';
+    value.dataset.tone = checks[name] === 'available' ? 'good' : 'warning';
+    return [title, value];
+  });
+  ui['source-capabilities'].replaceChildren(...fields);
+  ui['source-details'].hidden = fields.length === 0;
+  ui['source-details'].open = Object.values(checks).some((check) => check !== 'available');
 }
 
 function setResult(message, error = false) {
@@ -69,6 +110,9 @@ function reconcile() {
   ui.start.textContent = running && changedPort ? '应用端口' : installed ? '启动服务' : '安装并启动';
   ui.stop.disabled = busy || !engine || !installed || cleaning;
   ui.import.disabled = busy || !running;
+  ui['source-token'].disabled = busy || !running;
+  ui['source-save'].disabled = busy || !running || !ui['source-token'].value;
+  ui['source-probe'].disabled = busy || !running;
   ui.preset.disabled = busy || !running;
   ui.attach.disabled = busy || !running;
   ui.attach.textContent = !status?.preset ? '接入 Codex' : ui.preset.value === status.preset ? '重新接入' : '切换预设';
@@ -147,6 +191,10 @@ async function perform(operation) {
   busy = true;
   startRecord();
   setResult(`${labels[operation.kind]}…`);
+  if (operation.kind.startsWith('source_')) {
+    ui['source-state'].textContent = `${labels[operation.kind]}…`;
+    ui['source-state'].dataset.error = 'false';
+  }
   reconcile();
   try {
     const result = await run(operation);
@@ -168,7 +216,10 @@ async function perform(operation) {
       }
     }
 
-    if (result.exit_code === 0 && operation.kind === 'status' && !result.status) {
+    if (result.source) {
+      renderSourceDiagnostic(result.source, operation.kind === 'source_configure');
+      setResult(ui['source-state'].textContent, ui['source-state'].dataset.error === 'true');
+    } else if (result.exit_code === 0 && operation.kind === 'status' && !result.status) {
       setResult('安装器没有返回可识别的状态，请刷新后重试。', true);
     } else if (result.exit_code === 0) {
       setResult(done[operation.kind]);
@@ -178,6 +229,11 @@ async function perform(operation) {
     }
   } catch (error) {
     if (operation.kind === 'status') setStatusUnknown();
+    if (operation.kind.startsWith('source_')) {
+      ui['source-state'].textContent = String(error);
+      ui['source-state'].dataset.error = 'true';
+      ui['source-details'].hidden = true;
+    }
     setResult(String(error), true);
   } finally {
     busy = false;
@@ -220,6 +276,15 @@ ui['service-form'].addEventListener('submit', (event) => {
 });
 ui.stop.addEventListener('click', () => perform({ kind: 'stop' }));
 ui.import.addEventListener('click', () => perform({ kind: 'import' }));
+ui['source-token'].addEventListener('input', reconcile);
+ui['source-probe'].addEventListener('click', () => perform({ kind: 'source_status' }));
+ui['source-form'].addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (ui['source-save'].disabled) return;
+  const token = ui['source-token'].value.trim();
+  ui['source-token'].value = '';
+  perform({ kind: 'source_configure', token });
+});
 ui.attach.addEventListener('click', () => perform({ kind: 'attach', preset: ui.preset.value }));
 ui.preserve.addEventListener('click', () => perform({ kind: 'uninstall_preserve' }));
 ui['show-purge'].addEventListener('click', () => {

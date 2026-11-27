@@ -273,6 +273,13 @@ main {
 
 .sample { grid-column: span 5; }
 .codex { grid-column: span 7; }
+.source-panel { grid-column: 1 / -1; }
+.source-details { margin-block-start: .6rem; }
+.source-capabilities { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .3rem 1rem; }
+.source-capabilities dd { margin: 0; }
+.source-capabilities dd[data-tone="good"] { color: var(--ready); }
+.source-capabilities dd[data-tone="warning"] { color: var(--warning); }
+#source-state[data-error="true"] { color: var(--danger); }
 .sample > button { margin-block-start: auto; }
 .sample p { margin-block-end: 1rem; }
 

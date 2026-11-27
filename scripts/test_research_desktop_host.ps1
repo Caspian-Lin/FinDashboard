@@ -16,6 +16,7 @@ $secondProject = "$fixtureProject-other"
 $fixture = @{
     docker = $true; port = 0; running = $false; portBusy = $false; failVolume = $false
     loads = 0; downs = 0; composeArgs = @(); operator = @()
+    sourceToken = $null; sourceCode = "credentials_missing"; failRestart = $false; sourceRestarts = 0
     container = @{}; network = @{}; volume = @{}; images = @{}; sharedTag = $null
     marketplace = $true; installedPlugin = $true
 }
@@ -108,6 +109,12 @@ function Invoke-DesktopDocker(
                 return Result
             }
             "stop" { $fixture.running = $false; return Result }
+            "restart" {
+                Require ($Arguments[-2] -ceq "gateway" -and $Arguments[-1] -ceq "worker") "Tushare may restart the research services only."
+                $fixture.sourceRestarts += 1
+                if ($fixture.failRestart) { return Result "" 1 "injected restart error" }
+                return Result
+            }
             "down" {
                 $fixture.downs += 1
                 foreach ($kind in @("container", "network")) {
@@ -126,6 +133,21 @@ function Invoke-DesktopDocker(
                 return Result ($lines -join [Environment]::NewLine)
             }
             "exec" {
+                if ($Arguments[-1] -cin @("source-configure", "source-status")) {
+                    $checks = @{daily = $fixture.sourceCode}
+                    $exitCode = 0
+                    if ($Arguments[-1] -ceq "source-configure") {
+                        $reader = New-Object IO.StreamReader($InputData)
+                        try { $fixture.sourceToken = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                        if ($fixture.sourceCode -ceq "available") { $checks.trade_cal = "available" }
+                        else { $exitCode = 1 }
+                    }
+                    $reply = @{
+                        source = "tushare"; capabilities = $checks
+                        arbitrary_log = $fixture.sourceToken
+                    } | ConvertTo-Json -Compress
+                    return Result $reply $exitCode
+                }
                 Require ($Arguments[-1] -ceq "import" -and $null -ne $InputData) "Import bypassed the existing operator."
                 $reader = New-Object IO.StreamReader($InputData)
                 try { $fixture.operator += $reader.ReadToEnd() } finally { $reader.Dispose() }
@@ -237,6 +259,27 @@ try {
     Write-File $archivePath "test-image-archive"
 
     Run-Desktop "install" @{"--port" = "18198"}
+    $unconfigured = Run-Desktop "source-status" | ConvertFrom-Json
+    Require ($unconfigured.capabilities.daily -ceq "credentials_missing") "An empty instance must report the missing Tushare credential."
+    $fixtureSourceToken = "tushare-fixture-not-a-real-token"
+    foreach ($check in @("invalid_credentials", "permission_denied", "quota_exhausted", "connection_failed", "available")) {
+        $fixture.sourceCode = $check
+        $inputData = [IO.MemoryStream]::new($Utf8.GetBytes($fixtureSourceToken))
+        try { $report = Invoke-DesktopSource $true 18198 $inputData }
+        finally { $inputData.Dispose() }
+        Require ($fixture.sourceToken -ceq $fixtureSourceToken) "Tushare credential must travel via stdin."
+        Require ($report.capabilities.daily -ceq $check) "An interface result was lost."
+        Require ($report.saved -eq ($check -ceq 'available')) "Only verified setup can report a saved credential."
+        Require (($report | ConvertTo-Json -Depth 4) -notmatch $fixtureSourceToken) "Tushare output leaked a credential."
+    }
+    Require ($report.restart -ceq "ready" -and $fixture.sourceRestarts -eq 1) "Only a saved credential should restart the services."
+    $fixture.failRestart = $true
+    $inputData = [IO.MemoryStream]::new($Utf8.GetBytes($fixtureSourceToken))
+    try { $report = Invoke-DesktopSource $true 18198 $inputData }
+    finally { $inputData.Dispose() }
+    Require ($report.saved -and $report.restart -ceq "failed") "A restart failure must distinguish an already saved credential."
+    $fixture.failRestart = $false
+    Require-Failure { Invoke-DesktopSource $false 18199 } "desktop_gateway_unavailable"
     $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
     Require ($state.port -eq 18198 -and $fixture.loads -eq 1) "The first install did not commit the expected port and image load."
     $savedOwner = $state.instance_id
