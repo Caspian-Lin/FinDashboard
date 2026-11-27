@@ -317,6 +317,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                     lot_info=context.lot_info,
                     input_artifact_ids=context.input_artifact_ids,
                     covariance=loaded.covariance,
+                    deferred_covariance=loaded.deferred_covariance,
                 )
                 # issue #463:逐期捕获 screen 投影与决策日(流式化前等价位置
                 # 为 _screen_inputs 逐期 append;不再驻留全量输入)。

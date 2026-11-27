@@ -132,6 +132,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 缺失特征与所需发布 kind —— 不再拖到执行期才报「identity 节点缺少数据源」。
 研究数据发布的 manifest 冻结 `derived_features`(可派生特征集合),旧发布
 按 kind 回退判定。
+- 新提交可显式冻结 `parameters.covariance_policy_version=lazy_effective_v2`。组合先检查覆盖,成功重建时跳过首次估计,决策输入摘要绑定生效矩阵。缺省与历史重放按源 manifest 契约执行。跨版本复核使用订单、成交、持仓和账本轨迹,每个版本内部核对 checksum。
 - 错误码(#513,与 REST `POST /api/research/runs` 共用同一提交服务,按
   `error.kind` 判定,不要按文本分支):
   `invalid_argument`(422:门控失败 / 候选池为空 / 快照或序列缺失 /

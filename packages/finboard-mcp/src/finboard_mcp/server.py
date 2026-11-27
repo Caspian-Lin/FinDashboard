@@ -155,6 +155,8 @@ finboard_topic_write(operation="append") 追加轮次 + finboard_memory_remember
   final_test_unsealed=true表示已揭盲/最终窗已使用/禁止重做,不是未揭盲;读final_test_state同源解释。
   finboard_research_stress 的plan/get只读、queue才运行,最多24档;成本同时缩放佣金率、
   最低佣金和卖出税,滑点独立,资金10-50万元;2Bar延迟unsupported,不能移动决策日代替。
+  新提交可显式冻结parameters.covariance_policy_version=lazy_effective_v2,
+    用于按需估计与生效矩阵摘要;缺省与历史重放沿用首次矩阵摘要契约。
   新研究费用优先级parameters.fee_policy_version=explicit_overrides_v1,显式fee覆盖进入
   可行性/手数/成交,保留免税资产;旧manifest保持资产规则优先,先跑cost_x1控制再归因。
   压力配置≠执行证据,completed≠达到门槛;失败/不支持/未知不能称全通过。

@@ -177,6 +177,16 @@ class FrozenArtifactRef:
             raise ValueError("冻结引用必须包含 artifact_id/version/checksum")
 
 
+LAZY_COVARIANCE_POLICY_VERSION = "lazy_effective_v2"
+
+
+def validate_covariance_policy_version(value: object) -> None:
+    if value is not None and value != LAZY_COVARIANCE_POLICY_VERSION:
+        raise ValueError(
+            f"parameters.covariance_policy_version 仅接受 {LAZY_COVARIANCE_POLICY_VERSION}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchRunManifest:
     """一次研究运行的不可变输入清单。"""
@@ -258,6 +268,7 @@ class ResearchRunManifest:
                 )
         if not MIN_RESEARCH_CAPITAL <= self.initial_capital <= MAX_RESEARCH_CAPITAL:
             raise ValueError("研究资金必须位于 10 万至 50 万元")
+        validate_covariance_policy_version(self.parameters.get("covariance_policy_version"))
         reject_executable_payload(self.parameters, path="$.parameters")
         reject_executable_payload(self.validation_config, path="$.validation_config")
         reject_executable_payload(self.portfolio_config, path="$.portfolio_config")
@@ -265,6 +276,10 @@ class ResearchRunManifest:
         reject_executable_payload(self.execution_config, path="$.execution_config")
         reject_executable_payload(self.fee_config, path="$.fee_config")
         reject_executable_payload(self.benchmark_config, path="$.benchmark_config")
+
+    @property
+    def uses_lazy_effective_covariance(self) -> bool:
+        return self.parameters.get("covariance_policy_version") == LAZY_COVARIANCE_POLICY_VERSION
 
     @property
     def checksum(self) -> str:
