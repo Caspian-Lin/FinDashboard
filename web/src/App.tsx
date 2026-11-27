@@ -16,7 +16,6 @@ const DataBase = React.lazy(() => import("@/pages/data/DataBase"));
 
 /* Research domain (lazy) */
 const ResearchTools = React.lazy(() => import("@/pages/research/ResearchTools"));
-const ResearchPreferences = React.lazy(() => import("@/pages/ResearchPreferences"));
 const ResearchHome = React.lazy(() => import("@/pages/research/ResearchHome"));
 const FactorLab = React.lazy(() => import("@/pages/research/FactorLab"));
 const StrategyStudio = React.lazy(() => import("@/pages/research/StrategyStudio"));
@@ -104,7 +103,7 @@ export default function App() {
 
             {/* Deployment-specific entries. Research fallbacks never mount live components. */}
             <Route path="/" element={<ResearchHome workspace={!RESEARCH_EDITION} />} />
-            <Route path="/settings" element={RESEARCH_EDITION ? <ResearchPreferences /> : <Settings />} />
+            <Route path="/settings" element={<Settings />} />
             <Route path="/live" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Dashboard />} />
             <Route path="/positions" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Positions />} />
             <Route path="/orders" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Orders />} />

@@ -493,8 +493,12 @@ export const api = {
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),
-  updateConfig: (body: Partial<SchedulerConfig>) =>
-    fetchJSON<SchedulerConfig>("/data/config", { method: "PUT", body: JSON.stringify(body) }),
+  updateConfig: (body: Partial<SchedulerConfig>, expectedRevision?: string) =>
+    fetchJSON<SchedulerConfig>("/data/config", {
+      method: "PUT",
+      body: JSON.stringify({ ...body, expected_revision: expectedRevision }),
+    }),
+  getDataSourceStatus: () => fetchJSON<DataSourceStatus>("/data/source-status"),
 
   // ---- LLM Provider Config (persisted to .env) ----
 };
@@ -883,7 +887,14 @@ export interface TushareQuota {
   remaining: number;
 }
 
+export interface DataSourceStatus {
+  provider: string;
+  tushare_configured: boolean;
+  sandbox_enabled: boolean | null;
+}
+
 export interface SchedulerConfig {
+  revision?: string;
   sync_enabled: boolean;
   sync_time: string;
   download_enabled: boolean;

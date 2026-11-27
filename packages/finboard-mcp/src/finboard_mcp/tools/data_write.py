@@ -38,6 +38,13 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 from sqlalchemy import select
 
+from finboard_app.data_scheduler_config import (
+    DEFAULT_CONFIG_FILE,
+    DataScheduleConflictError,
+    data_schedule_revision,
+    read_data_schedule,
+    save_data_schedule,
+)
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
@@ -59,7 +66,7 @@ from finboard_shared.background_jobs import (
 # 与 finboard_api.routes.data 一致:缓存目录 / 标的池 / 调度配置文件路径。
 _CACHE_DIR = "data_cache"
 _SYMBOLS_FILE = "symbols.yaml"
-_CONFIG_FILE = "data_config.json"
+_CONFIG_FILE = DEFAULT_CONFIG_FILE
 _SUPPORTED_BAR_PROVIDERS = {"akshare", "tushare", "yfinance"}
 
 
@@ -282,24 +289,8 @@ def _config_out_dict(cfg: dict[str, Any], *, settings: Any) -> dict[str, Any]:
         "download_markets": cfg.get("download_markets", ["a_share"]),
         "download_types": cfg.get("download_types", ["stock", "etf"]),
         "data_provider": settings.data_provider,
+        "revision": data_schedule_revision(cfg),
     }
-
-
-def _load_config_sync() -> dict[str, Any]:
-    """同步读取 data_config.json(不存在返回空 dict)。在 to_thread 内调用。"""
-
-    p = Path(_CONFIG_FILE)
-    if p.exists():
-        return cast(dict[str, Any], json.loads(p.read_text(encoding="utf-8")))
-    return {}
-
-
-def _save_config_sync(cfg: dict[str, Any]) -> None:
-    """同步写入 data_config.json。在 to_thread 内调用。"""
-
-    Path(_CONFIG_FILE).write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -727,7 +718,7 @@ async def dataset_release_publish(
 
 async def data_config_get(app: McpAppContext) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
-        cfg = await asyncio.to_thread(_load_config_sync)
+        cfg = await asyncio.to_thread(read_data_schedule, Path(_CONFIG_FILE))
         return _config_out_dict(cfg, settings=app.settings)
 
     return await run_tool(
@@ -753,10 +744,10 @@ async def data_config_update(
     download_lookback_days: int | None = None,
     download_markets: list[str] | None = None,
     download_types: list[str] | None = None,
+    expected_revision: str | None = None,
 ) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
-        cfg = await asyncio.to_thread(_load_config_sync)
         updates = {
             "sync_enabled": sync_enabled,
             "sync_time": sync_time,
@@ -766,8 +757,15 @@ async def data_config_update(
             "download_markets": download_markets,
             "download_types": download_types,
         }
-        cfg.update({k: v for k, v in updates.items() if v is not None})
-        await asyncio.to_thread(_save_config_sync, cfg)
+        try:
+            cfg = await asyncio.to_thread(
+                save_data_schedule,
+                Path(_CONFIG_FILE),
+                {key: value for key, value in updates.items() if value is not None},
+                expected_revision=expected_revision,
+            )
+        except DataScheduleConflictError as exc:
+            raise McpToolError("conflict", "调度配置版本变化,请重新读取并核对。") from exc
         return _config_out_dict(cfg, settings=app.settings)
 
     return await run_tool(
@@ -1214,7 +1212,7 @@ def register(mcp: MCPServer) -> None:
             "查询定时任务调度器配置(读 data_config.json)。返回 "
             "{sync_enabled, sync_time, download_enabled, download_time, "
             "download_lookback_days, download_markets, download_types, "
-            "data_provider}。只读。"
+            "data_provider, revision}。只读。"
         ),
     )
     async def _data_config_get(
@@ -1228,7 +1226,7 @@ def register(mcp: MCPServer) -> None:
             "[写] 更新定时任务调度器配置(合并写入 data_config.json,只更新"
             "非空字段)。参数:sync_enabled / sync_time / download_enabled / "
             "download_time / download_lookback_days / download_markets(列表)/ "
-            "download_types(列表),均可选。返回更新后的完整配置。"
+            "download_types(列表),均可选。expected_revision 可选,版本冲突时重读。返回完整配置。"
             "写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )
@@ -1240,6 +1238,7 @@ def register(mcp: MCPServer) -> None:
         download_lookback_days: int | None = None,
         download_markets: list[str] | None = None,
         download_types: list[str] | None = None,
+        expected_revision: str | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await data_config_update(
@@ -1251,6 +1250,7 @@ def register(mcp: MCPServer) -> None:
             download_lookback_days=download_lookback_days,
             download_markets=download_markets,
             download_types=download_types,
+            expected_revision=expected_revision,
         )
 
     @mcp.tool(

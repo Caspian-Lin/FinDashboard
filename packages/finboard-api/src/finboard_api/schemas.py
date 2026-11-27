@@ -329,6 +329,7 @@ class BulkDownloadRequest(BaseSchema):
 
 
 class SchedulerConfigOut(BaseSchema):
+    revision: str
     sync_enabled: bool = True
     sync_time: str = "15:35"
     download_enabled: bool = True
@@ -339,7 +340,14 @@ class SchedulerConfigOut(BaseSchema):
     data_provider: str = "yfinance"
 
 
+class DataSourceStatusOut(BaseSchema):
+    provider: str
+    tushare_configured: bool
+    sandbox_enabled: bool | None = None
+
+
 class SchedulerConfigUpdate(BaseSchema):
+    expected_revision: str | None = Field(default=None, min_length=64, max_length=64)
     sync_enabled: bool | None = None
     sync_time: str | None = None
     download_enabled: bool | None = None

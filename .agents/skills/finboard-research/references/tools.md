@@ -589,7 +589,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 更新定时任务调度器配置(合并写入 `data_config.json`,只更新非空字段)。
 - 参数:`sync_enabled?` / `sync_time?` / `download_enabled?` / `download_time?` /
   `download_lookback_days?` / `download_markets?` / `download_types?`(均可选)
-- 返回:更新后的完整配置(同 `config_get` 结构)
+- 返回:更新后的完整配置(同 `config_get` 结构)。可带 `expected_revision`(取自上次读取的 `revision`)保存;版本变化时重读核对。
 
 ### finboard_etf_sync **[写]**
 批量同步 ETF 元数据(akshare → 分类 → 写库 / 预览)。默认 `dry_run=True` 只预览。

@@ -1,3 +1,4 @@
+import { ThemeProvider } from "@/components/ui/theme-provider";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -108,7 +109,7 @@ function renderPage(page: React.ReactNode) {
   });
   return render(
     <MemoryRouter>
-      <QueryClientProvider client={queryClient}>{page}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}><ThemeProvider>{page}</ThemeProvider></QueryClientProvider>
     </MemoryRouter>,
   );
 }
