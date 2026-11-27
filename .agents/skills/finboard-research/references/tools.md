@@ -2181,3 +2181,9 @@ adjustment?, start?, end?, symbols?, publish?}], quality_profile?}`;
 
 审计只记录 scope_checksum / fingerprint / 数据集清单,不记录完整 symbols;
 `POST /api/jobs` 与 `finboard_job_enqueue` 不开放 `data_backfill` kind。
+
+## 冻结发布包（#559）
+
+- `finboard_data_bundle_export(release_ids)` 需 `data.write`。导出原 release ID 与 checksum 到托管目录，返回 `bundle_id`、`checksum`、`archive_bytes`、清单摘要。
+- `finboard_data_bundle_status(bundle_id | job_id)` 需 `research.read`。读取脱敏文件索引或队列阶段。
+- 文件导入走本机 CLI 或 REST/Web 的预览与显式提交。MCP 不接收文件路径。

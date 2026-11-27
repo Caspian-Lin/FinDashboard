@@ -108,3 +108,5 @@ GitHub Actions 构建研究镜像并在空库验证迁移、HTTP MCP、离线入
 复测时设 `FINBOARD_SMOKE_OFFLINE=1` 在隔离 Docker 网络运行样例，先用门槛 `0` 跑对照，再用默认门槛跑研究版。CI 使用空库迁移，样例 worker 预算 10 秒。Release 工作流对安装器和入门包各设 256 KiB 预算，必需镜像冷拉取去重压缩层设 384 MiB 预算。可选沙箱镜像单列。用 `scripts/measure_research_images.py` 读取镜像发布后的 amd64 层清单。
 
 同日完成真实 Tushare 验证。同步标的目录和沪深交易日历后，以 8 只股票和 `000001.SH` 为样例冻结 qfq 发布，运行 2024-06-03 至 2024-06-28 的周频研究。发布为 `DR-bars-qfq-BF-F040D84748D84E32`，运行 `RR-8db262f16501f747ad50eeca` 已完成。凭据和真实数据不随分发包发布。
+
+冻结发布迁移与离线导入见[冻结发布包](research/release-bundles.md)。

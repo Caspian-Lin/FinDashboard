@@ -184,3 +184,15 @@ test('generic contact configuration is removed after the first successful copy',
   assert.equal(session.nodes.get('generic-config').value, '');
   assert.equal(session.nodes.get('generic-connection').hidden, true);
 });
+
+test('bundle control opens the native fixed destination only when ready', async () => {
+  const running = await loadWorkbench();
+  await running.click('open-release-bundles');
+  assert.equal(running.calls.at(-1)[0], 'desktop_open_workbench');
+  assert.equal(running.calls.at(-1)[1].action, 'release_bundles');
+  assert.deepEqual(Object.keys(running.calls.at(-1)[1]), ['action']);
+
+  const stopped = await loadWorkbench({ running: false });
+  await stopped.click('open-release-bundles');
+  assert.equal(stopped.calls.length, 1);
+});

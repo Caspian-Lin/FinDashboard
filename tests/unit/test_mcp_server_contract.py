@@ -89,6 +89,8 @@ _EXPECTED_TOOLS = {
     # #510 统一数据范围预览(1 只读;提交仍走 finboard_run_queue)
     "finboard_data_scope_preview",
     # #511 补数请求工具(2 只读 + 2 写;预检/提交/查询/取消)
+    "finboard_data_bundle_export",
+    "finboard_data_bundle_status",
     "finboard_data_backfill_preview",
     "finboard_data_backfill_submit",
     "finboard_data_backfill_list",

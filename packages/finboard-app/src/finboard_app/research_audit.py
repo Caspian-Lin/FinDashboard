@@ -70,6 +70,7 @@ RESEARCH_JOB_KINDS: frozenset[str] = frozenset(
         "factor_series_build",
         "feature_snapshot",
         "backtest_run",
+        "release_bundle",
     }
 )
 

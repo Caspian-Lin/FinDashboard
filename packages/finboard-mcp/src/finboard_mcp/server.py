@@ -105,11 +105,15 @@ from finboard_mcp.tools import (
     register_watchlist_tools,
 )
 from finboard_mcp.tools.audit import register as register_audit_tools
+from finboard_mcp.tools.data_bundles import register as register_data_bundle_tools
 from finboard_mcp.tools.diagnostics import register as register_diagnostics_tools
 from finboard_mcp.tools.topic_actions import register as register_topic_action_tools
 from finboard_mcp.tools.workspace import register as register_workspace_tools
 
 _INSTRUCTIONS = """\
+冻结发布包:finboard_data_bundle_export 需 data.write,只导出已登记冻结发布到专用目录。
+finboard_data_bundle_status 查询文件标识/任务的脱敏状态,ZIP 导入由 CLI 或 Web 显式提交。
+
 FinBoard 研究 MCP —— 量化研究工具集
 
 你是接入 FinDashboard(简称 FinBoard)量化交易系统的 AI 研究 Agent。FinBoard 是
@@ -638,6 +642,7 @@ def build_mcp_server() -> MCPServer:
     register_data_catalog_tools(mcp)
     register_data_scope_tools(mcp)
     register_data_backfill_tools(mcp)
+    register_data_bundle_tools(mcp)
     register_data_write_tools(mcp)
     register_factor_tools(mcp)
     register_factor_series_tools(mcp)

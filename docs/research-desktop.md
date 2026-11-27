@@ -43,3 +43,5 @@ Windows 11 与 Docker Desktop 29.6.2 的一次本地复测中，原始镜像归�
 - 本地端到端脚本在独立 Docker 项目中复测离线导入、真实研究、重装和 Codex CLI 权限切换。 [桌面端到端验收](research-desktop-e2e.md)
 - 发布验收在具备前置依赖的干净 Windows x64 环境阻断 Docker Hub 和 GHCR。安装 MSI，从管理界面导入合成包并在工作台完成运行。分别验证真实 Codex 的只读、课题与研究运行、切回只读三次授权。
 - 用同一 `RT-`、`RR-` 与冻结发布校验和复核停启、升级和保留卸载再重装。另启第二个 Docker 项目，验证两种卸载和故障重试只作用于选中的桌面实例。这覆盖 `phase1_doc.md` §3.4 第 11 项的恢复要求。
+
+从数据基座的「同步与发布」可打开[冻结发布包](research/release-bundles.md)操作。

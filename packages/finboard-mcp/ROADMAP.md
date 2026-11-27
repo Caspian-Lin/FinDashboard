@@ -762,3 +762,7 @@ agent,补上「数据在哪、覆盖如何、谁在引用」的入口:
   (渲染 + 旧路由跳转保参)。
 - **回滚**:回退本 issue 提交;命名卷仍在,旧版本可重新托管容器,本版本不会自动
   启动或删除任何容器/卷。
+
+### 冻结发布包（#559）
+
+`finboard_data_bundle_export` 需 `data.write`，返回专用目录文件的标识、checksum 和大小。`finboard_data_bundle_status` 对 `research.read` 开放脱敏索引及相关作业进度。导入由 CLI 或 Web 确认提交。
