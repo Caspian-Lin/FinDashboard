@@ -5,56 +5,57 @@
 @layer base {
   :root {
     color-scheme: dark;
-    /* 深色基础表面:低饱和中性灰阶(issue #162),不再带蓝色色相 */
-    --background: 0 0% 8%;
-    --foreground: 0 0% 93%;
+    /* 深色基础表面:高对比中性底色与品牌蓝（DESIGN.md §2） */
+    --background: 180 20% 0.98%;
+    --foreground: 210 33.33% 98.82%;
 
-    --card: 0 0% 11%;
-    --card-foreground: 0 0% 93%;
+    --card: 210 9.09% 4.31%;
+    --card-foreground: 210 33.33% 98.82%;
 
-    --popover: 0 0% 13%;
-    --popover-foreground: 0 0% 93%;
+    --popover: 216 9.8% 10%;
+    --popover-foreground: 210 33.33% 98.82%;
 
-    --primary: 199 89% 48%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 207.06 100% 50%;
+    --primary-foreground: 205 75% 3.14%;
 
-    --secondary: 0 0% 15%;
-    --secondary-foreground: 0 0% 93%;
+    --secondary: 216 9.8% 10%;
+    --secondary-foreground: 210 33.33% 98.82%;
 
-    --muted: 0 0% 15%;
-    --muted-foreground: 0 0% 62%;
+    --muted: 216 9.8% 10%;
+    --muted-foreground: 207.69 6.6% 61.37%;
 
-    --accent: 0 0% 19%;
-    --accent-foreground: 0 0% 93%;
+    --accent: 213.33 13.85% 12.75%;
+    --accent-foreground: 210 33.33% 98.82%;
 
-    --destructive: 0 72% 55%;
-    --destructive-foreground: 0 0% 100%;
+    --destructive: 17.02 100% 72.35%;
+    --destructive-foreground: 205 75% 3.14%;
 
-    --success: 142 71% 45%;
-    --success-foreground: 0 0% 100%;
+    --success: 154.67 42.86% 58.82%;
+    --success-foreground: 205 75% 3.14%;
 
-    --warning: 38 92% 50%;
-    --warning-foreground: 0 0% 100%;
+    --warning: 39.3 100% 66.47%;
+    --warning-foreground: 205 75% 3.14%;
 
-    --info: 199 89% 48%;
-    --info-foreground: 0 0% 100%;
+    --info: 207.06 100% 50%;
+    --info-foreground: 205 75% 3.14%;
 
     /* A 股语义色:红涨绿跌(见 web/PRODUCT.md 颜色惯例) */
-    --up: 0 84% 62%;
-    --up-foreground: 0 0% 100%;
-    --down: 142 71% 45%;
-    --down-foreground: 0 0% 100%;
+    --up: 358.24 100% 73.33%;
+    --up-foreground: 205 75% 3.14%;
+    --down: 157.67 53.97% 53.14%;
+    --down-foreground: 205 75% 3.14%;
 
-    --border: 0 0% 24%;
-    --input: 0 0% 26%;
-    --ring: 199 89% 48%;
+    --border: 214.29 6.8% 20.2%;
+    --input: 210 5.68% 34.51%;
+    --ring: 207.06 100% 50%;
 
-    --radius: 0.5rem;
+    --radius: 2px;
+    --radius-compact: 1px;
 
     /* 图表调色板:跟随主题切换,禁止页面内 raw hex */
-    --chart-1: 199 89% 48%;
-    --chart-2: 0 84% 62%;
-    --chart-3: 142 71% 45%;
+    --chart-1: 207.06 100% 50%;
+    --chart-2: 358.24 100% 73.33%;
+    --chart-3: 157.67 53.97% 53.14%;
     --chart-4: 38 92% 50%;
     --chart-5: 262 83% 66%;
     --chart-6: 160 84% 39%;
@@ -65,51 +66,51 @@
   .light {
     color-scheme: light;
     --background: 0 0% 100%;
-    --foreground: 0 0% 11%;
+    --foreground: 210 20% 3.92%;
 
     --card: 0 0% 100%;
-    --card-foreground: 0 0% 11%;
+    --card-foreground: 210 20% 3.92%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 11%;
+    --popover-foreground: 210 20% 3.92%;
 
-    --primary: 199 89% 42%;
+    --primary: 216.47 100% 50%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 0 0% 96%;
-    --secondary-foreground: 0 0% 11%;
+    --secondary: 210 8.33% 95.29%;
+    --secondary-foreground: 210 20% 3.92%;
 
-    --muted: 0 0% 96%;
-    --muted-foreground: 0 0% 47%;
+    --muted: 210 8.33% 95.29%;
+    --muted-foreground: 208.24 9.19% 36.27%;
 
-    --accent: 0 0% 94%;
-    --accent-foreground: 0 0% 11%;
+    --accent: 205.71 17.95% 92.35%;
+    --accent-foreground: 210 20% 3.92%;
 
-    --destructive: 0 84% 55%;
+    --destructive: 17.08 69.15% 36.86%;
     --destructive-foreground: 0 0% 100%;
 
-    --success: 142 71% 40%;
+    --success: 155.86 65.41% 26.08%;
     --success-foreground: 0 0% 100%;
 
-    --warning: 38 92% 45%;
+    --warning: 38.85 88.41% 27.06%;
     --warning-foreground: 0 0% 100%;
 
-    --info: 199 89% 42%;
+    --info: 216.47 100% 50%;
     --info-foreground: 0 0% 100%;
 
     /* A 股语义色:红涨绿跌 */
-    --up: 0 72% 48%;
+    --up: 353.79 63.88% 44.51%;
     --up-foreground: 0 0% 100%;
-    --down: 142 72% 35%;
+    --down: 155 87.1% 24.31%;
     --down-foreground: 0 0% 100%;
 
-    --border: 0 0% 88%;
-    --input: 0 0% 84%;
-    --ring: 199 89% 42%;
+    --border: 206.67 9.09% 80.59%;
+    --input: 210 6.67% 58.82%;
+    --ring: 216.47 100% 50%;
 
-    --chart-1: 199 89% 42%;
-    --chart-2: 0 72% 48%;
-    --chart-3: 142 72% 35%;
+    --chart-1: 216.47 100% 50%;
+    --chart-2: 353.79 63.88% 44.51%;
+    --chart-3: 155 87.1% 24.31%;
     --chart-4: 38 92% 42%;
     --chart-5: 262 83% 55%;
     --chart-6: 160 84% 32%;

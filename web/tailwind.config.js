@@ -72,21 +72,21 @@ export default {
         },
       },
       borderRadius: {
+        DEFAULT: "var(--radius)",
         lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        md: "var(--radius)",
+        sm: "var(--radius-compact)",
       },
       fontFamily: {
         sans: [
-          "Inter",
-          "system-ui",
-          "-apple-system",
-          "Segoe UI",
-          "PingFang SC",
+          "Microsoft YaHei UI",
           "Microsoft YaHei",
+          "PingFang SC",
+          "Noto Sans CJK SC",
+          "system-ui",
           "sans-serif",
         ],
-        mono: ["JetBrains Mono", "SF Mono", "Consolas", "monospace"],
+        mono: ["Cascadia Mono", "Consolas", "SFMono-Regular", "Menlo", "monospace"],
       },
       keyframes: {
         "accordion-down": {

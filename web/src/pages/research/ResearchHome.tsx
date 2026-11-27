@@ -1,231 +1,94 @@
-import TopicOverview from "@/components/research/TopicOverview";
-import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import {
-  Database,
-  Atom,
-  SlidersHorizontal,
-  TestTube,
-  GitBranch,
-  Scale,
-  PlayCircle,
-  Plug,
-  FileText,
-  ArrowRight,
-  Activity,
-  CheckCircle2,
-  AlertCircle,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowRight, Database, ListTodo, Wrench } from "lucide-react";
+import TopicOverview from "@/components/research/TopicOverview";
+import { Button } from "@/components/ui/button";
+import { PageContainer } from "@/components/ui/page-container";
 import { PageHeader } from "@/components/ui/page-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { StatCard } from "@/components/ui/stat-card";
-import { LoadingState } from "@/components/ui/states";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { researchRunApi } from "@/lib/research";
-import { experimentApi } from "@/lib/research";
-import { datasetApi } from "@/lib/research";
-import { simulationApi } from "@/lib/simulation";
-import { formatDateTime, timeAgo } from "@/lib/utils";
-import { useLanguage, useT, type LocalizedText } from "@/i18n";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
+import { useLanguage, useT } from "@/i18n";
+import { datasetApi, researchRunApi } from "@/lib/research";
+import { timeAgo } from "@/lib/utils";
 
-const workflowSteps: { to: string; label: LocalizedText; icon: LucideIcon; desc: LocalizedText }[] = [
-  { to: "/data", label: { zh: "数据基座", en: "Data Base" }, icon: Database, desc: { zh: "共享数据目录:覆盖、缺口、同步与发布入口", en: "Shared data catalog: coverage, gaps, sync and publish entries" } },
-  { to: "/research/factors", label: { zh: "因子实验室", en: "Factor Lab" }, icon: Atom, desc: { zh: "因子目录、特征快照、信号预览与因子实验", en: "Factor catalog, feature snapshots, signal preview, and factor experiments" } },
-  { to: "/research/strategy", label: { zh: "策略 Studio", en: "Strategy Studio" }, icon: SlidersHorizontal, desc: { zh: "无代码结构化策略配置、版本 diff 与发布", en: "No-code structured strategy configuration, version diffs, and publishing" } },
-  { to: "/research/experiments", label: { zh: "实验与 OOS", en: "Experiments & OOS" }, icon: TestTube, desc: { zh: "机器验证实验、阈值与稳健性检验", en: "Machine-verified experiments, thresholds, and robustness checks" } },
-  { to: "/research/runs", label: { zh: "研究运行", en: "Research Runs" }, icon: GitBranch, desc: { zh: "冻结输入、血缘追踪与运行重放", en: "Frozen inputs, lineage tracking, and run replay" } },
-  { to: "/research/portfolio", label: { zh: "组合与风险", en: "Portfolio & Risk" }, icon: Scale, desc: { zh: "目标权重分配、离散交易与资金可行性", en: "Target weight allocation, discrete trades, and capital feasibility" } },
-  { to: "/research/simulation", label: { zh: "模拟盘", en: "Simulation" }, icon: PlayCircle, desc: { zh: "纸面撮合、目标仓位决策与绩效报告", en: "Paper matching, target position decisions, and performance reports" } },
-  { to: "/research/agent-connect", label: { zh: "Agent 接入", en: "Agent Connect" }, icon: Plug, desc: { zh: "外部 Harness 经 MCP 接入研究域、凭据与课题交接", en: "Connect an external Harness over MCP: credentials and topic handoff" } },
-  { to: "/research/reports", label: { zh: "研究报告", en: "Research Reports" }, icon: FileText, desc: { zh: "聚合展示运行结果、绩效归因与风险", en: "Aggregated run results, performance attribution, and risk" } },
+const shortcuts = [
+  { to: "/data", label: { zh: "数据基座", en: "Data Base" }, icon: Database },
+  { to: "/jobs", label: { zh: "任务与审计", en: "Tasks & audit" }, icon: ListTodo },
+  { to: "/research/tools", label: { zh: "高级工具", en: "Advanced tools" }, icon: Wrench },
 ];
 
-export default function ResearchHome() {
+export default function ResearchHome({ workspace = false }: { workspace?: boolean }) {
   const { tl } = useT();
   const { lang } = useLanguage();
-  const { data: runs, isLoading: runsLoading, isError: runsError } = useQuery({
+  const runs = useQuery({
     queryKey: ["research-runs", "home"],
     queryFn: () => researchRunApi.list({ limit: 5 }),
   });
-  const { data: experiments, isError: experimentsError } = useQuery({
-    queryKey: ["experiments", "home"],
-    queryFn: () => experimentApi.list({ limit: 5 }),
-  });
-  const { data: releases, isError: releasesError } = useQuery({
+  const releases = useQuery({
     queryKey: ["dataset-releases", "home"],
     queryFn: () => datasetApi.releases({ limit: 5 }),
   });
-  const { data: simSessions, isError: simSessionsError } = useQuery({
-    queryKey: ["sim-sessions", "home"],
-    queryFn: () => simulationApi.listSessions({ limit: 5 }),
-  });
-
-  const completedRuns = runsError ? null : runs?.filter((r) => r.status === "completed").length ?? 0;
-  const runningRuns = runsError ? null : runs?.filter((r) => r.status === "running" || r.status === "queued").length ?? 0;
-  const completedExps = experimentsError ? null : experiments?.filter((e) => e.status === "validated_oos").length ?? 0;
-  const activeSims = simSessionsError ? null : simSessions?.filter((s) => s.status === "running").length ?? 0;
-  const hasQueryError = runsError || experimentsError || releasesError || simSessionsError;
 
   return (
-    <div>
-      <PageHeader
-        title={tl({ zh: "研究首页", en: "Research Home" })}
-        description={tl({ zh: "按研究课题继续：查看当前问题、证据缺口和下一步", en: "Continue from the research question, evidence gaps and next step" })}
+    <PageContainer>
+      <PageHeader title={workspace
+        ? tl({ zh: "工作总览", en: "Workspace overview" })
+        : tl({ zh: "研究总览", en: "Research overview" })}
       />
-
       <TopicOverview />
-      {hasQueryError && (
-        <Alert variant="warning" className="mb-4">
-          <AlertTitle>{tl({ zh: "研究首页有数据未加载", en: "Some Research Home data failed to load" })}</AlertTitle>
-          <AlertDescription>
-            {tl({ zh: "“—”表示接口暂时不可用，不代表数量为 0。请进入对应工作流页面重试；已加载的数据不会被覆盖。", en: "“—” means the API is temporarily unavailable, not zero. Retry from the corresponding workflow page; already loaded data will not be overwritten." })}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* Stats */}
-      <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label={tl({ zh: "已完成研究运行", en: "Completed Research Runs" })} value={completedRuns ?? "—"} icon={CheckCircle2} hint={runningRuns === null ? tl({ zh: "加载失败", en: "Load failed" }) : runningRuns > 0 ? tl({ zh: `${runningRuns} 个进行中`, en: `${runningRuns} in progress` }) : tl({ zh: "全部完成", en: "All completed" })} />
-        <StatCard label={tl({ zh: "近期OOS流程完成", en: "Recent OOS completions" })} value={completedExps ?? "—"} icon={TestTube} hint={experimentsError ? tl({ zh: "加载失败", en: "Load failed" }) : undefined} />
-        <StatCard label={tl({ zh: "最近数据发布", en: "Recent Data Releases" })} value={releasesError ? "—" : releases?.length ?? 0} icon={Database} hint={releasesError ? tl({ zh: "加载失败", en: "Load failed" }) : undefined} />
-        <StatCard label={tl({ zh: "活动模拟会话", en: "Active Simulation Sessions" })} value={activeSims ?? "—"} icon={PlayCircle} hint={simSessionsError ? tl({ zh: "加载失败", en: "Load failed" }) : undefined} />
-      </div>
-
-      {/* Workflow quick access */}
-      <h2 className="mb-3 text-sm font-semibold text-foreground">{tl({ zh: "研究工具入口", en: "Research Workflow" })}</h2>
-      <div className="mb-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {workflowSteps.map((step) => (
-          <Link
-            key={step.to}
-            to={step.to}
-            className="group rounded-lg border border-border bg-card p-4 transition-all hover:border-primary/50"
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <step.icon className="h-5 w-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-foreground">{tl(step.label)}</h3>
-                  <p className="mt-0.5 text-xs text-muted-foreground">{tl(step.desc)}</p>
-                </div>
-              </div>
-              <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-            </div>
-          </Link>
+      <nav aria-label={tl({ zh: "常用入口", en: "Frequently used tools" })} className="flex flex-wrap gap-2">
+        {shortcuts.map(({ to, label, icon: Icon }) => (
+          <Button key={to} variant="outline" className="min-h-11 px-3 sm:min-h-9" asChild>
+            <Link to={to}><Icon className="mr-2 size-4" aria-hidden="true" />{tl(label)}</Link>
+          </Button>
         ))}
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* Recent runs */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <GitBranch className="h-4 w-4 text-muted-foreground" />
-              {tl({ zh: "最近研究运行", en: "Recent Research Runs" })}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {runsLoading ? (
-              <LoadingState rows={3} />
-            ) : runsError ? (
-              <p className="py-4 text-center text-sm text-destructive">{tl({ zh: "研究运行加载失败，请进入「研究运行」重试。", en: "Failed to load research runs. Go to “Research Runs” to retry." })}</p>
-            ) : runs && runs.length > 0 ? (
-              <div className="space-y-2">
-                {runs.slice(0, 5).map((run) => (
+      </nav>
+      <div className="grid gap-5 lg:grid-cols-2">
+        <section aria-labelledby="recent-runs" className="min-w-0">
+          <h2 id="recent-runs" className="mb-3 font-semibold">{tl({ zh: "最近研究运行", en: "Recent research runs" })}</h2>
+          {runs.isPending && <LoadingState />}
+          {runs.isError && <ErrorState onRetry={() => void runs.refetch()} />}
+          {runs.data?.length === 0 && <EmptyState title={tl({ zh: "暂无研究运行", en: "No research runs yet" })} />}
+          {!!runs.data?.length && (
+            <ul className="divide-y rounded-lg border bg-card">
+              {runs.data.map((run) => (
+                <li key={run.run_id}>
                   <Link
-                    key={run.run_id}
                     to={`/research/runs?run=${encodeURIComponent(run.run_id)}`}
-                    className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent"
+                    className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-sm hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
                   >
-                    <div className="flex items-center gap-2">
-                      <StatusBadge status={run.status} />
-                      <span className="font-mono text-xs text-muted-foreground">{run.run_id}</span>
-                    </div>
+                    <StatusBadge status={run.status} />
+                    <span className="min-w-0 flex-1 break-all font-mono text-xs">{run.run_id}</span>
                     <span className="text-xs text-muted-foreground">{timeAgo(run.created_at, lang)}</span>
                   </Link>
-                ))}
-              </div>
-            ) : (
-              <p className="py-4 text-center text-sm text-muted-foreground">{tl({ zh: "暂无研究运行", en: "No research runs yet" })}</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Data releases */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Database className="h-4 w-4 text-muted-foreground" />
-              {tl({ zh: "最近数据发布", en: "Recent Data Releases" })}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {releasesError ? (
-              <p className="py-4 text-center text-sm text-destructive">{tl({ zh: "数据发布加载失败，请进入「数据基座」重试。", en: "Failed to load data releases. Go to “Data Base” to retry." })}</p>
-            ) : releases && releases.length > 0 ? (
-              <div className="space-y-2">
-                {releases.slice(0, 5).map((rel) => (
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+        <section aria-labelledby="recent-releases" className="min-w-0">
+          <h2 id="recent-releases" className="mb-3 font-semibold">{tl({ zh: "最近数据发布", en: "Recent data releases" })}</h2>
+          {releases.isPending && <LoadingState />}
+          {releases.isError && <ErrorState onRetry={() => void releases.refetch()} />}
+          {releases.data?.length === 0 && <EmptyState title={tl({ zh: "暂无数据发布", en: "No data releases yet" })} />}
+          {!!releases.data?.length && (
+            <ul className="divide-y rounded-lg border bg-card">
+              {releases.data.map((release) => (
+                <li key={release.release_id}>
                   <Link
-                    key={rel.release_id}
-                    to="/data?tab=datasets"
-                    className="flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
+                    to={`/data?tab=datasets&release=${encodeURIComponent(release.release_id)}`}
+                    className="flex min-h-11 items-center gap-2 px-3 py-2 text-sm hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
                   >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <StatusBadge status={rel.quality_status} />
-                      <span className="min-w-0 truncate text-xs">{rel.dataset_name} v{rel.version}</span>
-                    </div>
-                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                      {tl({ zh: `${rel.symbol_count} 标的`, en: `${rel.symbol_count} symbols` })} ·{" "}
-                      {formatDateTime(rel.published_at)}
-                    </span>
+                    <StatusBadge status={release.quality_status} />
+                    <span className="min-w-0 flex-1 break-words">{release.dataset_name} v{release.version}</span>
+                    <ArrowRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                   </Link>
-                ))}
-              </div>
-            ) : (
-              <p className="py-4 text-center text-sm text-muted-foreground">{tl({ zh: "暂无数据发布", en: "No data releases yet" })}</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Simulation */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Activity className="h-4 w-4 text-muted-foreground" />
-              {tl({ zh: "模拟盘会话", en: "Simulation Sessions" })}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {simSessionsError ? (
-              <p className="py-4 text-center text-sm text-destructive">{tl({ zh: "模拟会话加载失败，请进入「模拟盘」重试。", en: "Failed to load simulation sessions. Go to “Simulation” to retry." })}</p>
-            ) : simSessions && simSessions.length > 0 ? (
-              <div className="space-y-2">
-                {simSessions.slice(0, 5).map((sess) => (
-                  <Link
-                    key={sess.session_id}
-                    to="/research/simulation"
-                    className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent"
-                  >
-                    <div className="flex items-center gap-2">
-                      <StatusBadge status={sess.status} />
-                      <span className="font-mono text-xs text-muted-foreground">{sess.session_id}</span>
-                    </div>
-                    <span className="text-xs text-muted-foreground">{sess.strategy_id}</span>
-                  </Link>
-                ))}
-              </div>
-            ) : (
-              <div className="flex flex-col items-center py-4 text-center">
-                <AlertCircle className="mb-2 h-5 w-5 text-muted-foreground/50" />
-                <p className="text-sm text-muted-foreground">{tl({ zh: "暂无模拟会话", en: "No simulation sessions yet" })}</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       </div>
-    </div>
+    </PageContainer>
   );
 }

@@ -1,50 +1,57 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/states";
+import { useT } from "@/i18n";
 import { workspaceApi } from "@/lib/research-workspace";
+
 export default function TopicOverview() {
-  const q = useQuery({ queryKey: ["topics", "overview"], queryFn: () => workspaceApi.topics() });
+  const { tl } = useT();
+  const query = useQuery({ queryKey: ["topics", "overview"], queryFn: () => workspaceApi.topics() });
+
   return (
-    <section className="mb-6 space-y-4 border-b border-border pb-6">
-      <div className="flex items-center justify-between gap-4">
-        <h2 className="text-lg font-semibold">继续研究问题</h2>
-        <Button variant="outline" asChild>
-          <Link to="/research/topics">全部课题与记忆</Link>
+    <section aria-labelledby="recent-topics" className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 id="recent-topics" className="font-semibold">{tl({ zh: "继续研究课题", en: "Continue a research topic" })}</h2>
+        <Button variant="outline" className="min-h-11 sm:min-h-9" asChild>
+          <Link to="/research/topics">{tl({ zh: "打开课题", en: "Open topics" })}</Link>
         </Button>
       </div>
-      <p className="text-sm text-muted-foreground">
-        从当前问题和证据缺口继续，可反复验证、暂停或分支尝试。工具入口不表示研究已经完成了某个阶段。
-      </p>
-      {q.isLoading && <LoadingState />}
-      {q.isError && <ErrorState message={String(q.error)} onRetry={() => q.refetch()} />}
-      {q.data?.items.length === 0 && (
+      {query.isPending && <LoadingState />}
+      {query.isError && <ErrorState onRetry={() => void query.refetch()} />}
+      {query.data?.items.length === 0 && (
         <EmptyState
-          title="为当前研究建立一个课题"
-          description="关联已有策略、回测与研究记忆，让每轮的理由、失败和下一步可查。"
-          action={
-            <Button asChild>
-              <Link to="/research/topics">打开研究课题</Link>
-            </Button>
-          }
+          title={tl({ zh: "还没有研究课题", en: "No research topics yet" })}
+          description={tl({
+            zh: "在课题页记录问题、需要补齐的证据和下一步。",
+            en: "Open Topics to record a research question, gaps in evidence, and the next step.",
+          })}
         />
       )}
-      {q.data?.items.slice(0, 5).map((t) => (
-        <article key={t.topic_id} className="space-y-2 border-t border-border pt-4">
-          <Link
-            className="font-medium text-primary underline"
-            to={`/research/topics?topic=${encodeURIComponent(t.topic_id)}`}
-          >
-            {t.title}
-          </Link>
-          <p className="max-w-prose text-sm">{t.question}</p>
-          <p className="text-xs text-muted-foreground">
-            状态：{t.status} · 工作结论：{t.conclusion} · 目标版本：{t.goal?.version ?? "未补齐"}
-          </p>
-          <p className="text-sm">证据缺口：{t.open_questions.join("；") || "尚未记录"}</p>
-          <p className="text-sm">下一步：{t.next_step || "尚未记录"}</p>
-        </article>
-      ))}
+      {!!query.data?.items.length && (
+        <ul className="divide-y rounded-lg border bg-card">
+          {query.data.items.slice(0, 5).map((topic) => (
+            <li key={topic.topic_id} className="space-y-1 px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Link
+                  className="flex min-h-11 items-center break-words text-sm font-semibold hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring sm:min-h-8"
+                  to={`/research/topics?topic=${encodeURIComponent(topic.topic_id)}`}
+                >
+                  {topic.title}
+                </Link>
+                <StatusBadge status={topic.status} />
+              </div>
+              <p className="max-w-prose break-words text-sm text-muted-foreground">{topic.question}</p>
+              {topic.next_step && (
+                <p className="max-w-prose break-words text-sm">
+                  <span className="font-medium">{tl({ zh: "下一步", en: "Next step" })} · </span>{topic.next_step}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

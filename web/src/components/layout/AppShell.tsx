@@ -1,5 +1,5 @@
 import * as React from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Menu, Moon, Sun, ChevronLeft, ChevronRight, AlertTriangle } from "lucide-react";
 import { api } from "@/lib/api";
@@ -8,10 +8,16 @@ import { useWebSocket } from "@/lib/ws";
 import { useTheme } from "@/components/ui/theme-provider";
 import { StatusDot } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTrigger, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
-import { navGroups } from "./nav-config";
+import {
+  isCurrentPath,
+  livePages,
+  navigationContext,
+  primaryNavigation,
+  toolsNav,
+} from "./nav-config";
 import {
   WorkflowHelpPopover,
   workflowNextForPath,
@@ -30,61 +36,92 @@ function ThemeToggle() {
 
 function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
   const { tl } = useT();
+  const { pathname } = useLocation();
+  const context = navigationContext(pathname, RESEARCH_EDITION);
+  const links = primaryNavigation(RESEARCH_EDITION);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Logo:与顶栏同高(56px),图标/文字在同一对齐线上 */}
-      <div className={cn("flex h-14 items-center border-b border-border px-4", collapsed && "justify-center px-2")}>
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
-            FD
-          </div>
-          {!collapsed && (
-            <span className="font-bold text-foreground text-lg tracking-tight">FinDashboard</span>
-          )}
-        </div>
-      </div>
+      <Link
+        to="/"
+        aria-label={tl({ zh: "FinDashboard 工作总览", en: "FinDashboard workspace overview" })}
+        onClick={onNavigate}
+        className={cn(
+          "flex h-14 shrink-0 items-center gap-2.5 border-b px-4 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+          collapsed && "justify-center px-2",
+        )}
+      >
+        <span className="flex size-4 shrink-0 items-end gap-0.5 text-primary" aria-hidden="true">
+          <span className="h-1.5 w-1 bg-current" />
+          <span className="h-2.5 w-1 bg-current" />
+          <span className="h-4 w-1 bg-current" />
+        </span>
+        {!collapsed && <span className="text-base">FinDashboard</span>}
+      </Link>
 
-      {/* Nav */}
-      <nav className="min-h-0 flex-1 overflow-y-auto scrollbar-thin py-3" aria-label={tl({ zh: "主导航", en: "Main navigation" })}>
-        {navGroups.map((group) => (
-          <div key={group.label.en} className="mb-4">
-            {!collapsed && (
-              <div className="mb-1 flex items-center gap-2 px-4">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  {tl(group.label)}
-                </span>
-                {group.restricted && (
-                  <AlertTriangle className="h-3 w-3 text-warning" aria-label={tl({ zh: "受控区域", en: "Restricted area" })} />
-                )}
-              </div>
-            )}
-            <div className="space-y-0.5 px-2">
-              {group.items.map((item) => (
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        <nav className="space-y-1" aria-label={tl({ zh: "主导航", en: "Main navigation" })}>
+          {links.map((item) => {
+            const active = isCurrentPath(pathname, item.to) || item.restricted && context?.restricted;
+            return (
+              <React.Fragment key={item.to}>
                 <NavLink
-                  key={item.to}
                   to={item.to}
-                  end={item.end}
+                  end
                   onClick={onNavigate}
-                  className={({ isActive }) =>
-                    cn(
-                      "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                      collapsed && "justify-center px-2",
-                      isActive
-                        ? "bg-primary/10 text-primary"
-                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                      group.restricted && !isActive && "text-muted-foreground/70",
-                    )
-                  }
+                  aria-label={tl(item.label)}
                   title={collapsed ? tl(item.label) : undefined}
+                  className={cn(
+                    "flex min-h-11 items-center gap-2.5 rounded-md px-3 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring md:min-h-9",
+                    active ? "bg-accent font-semibold text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    collapsed && "justify-center px-2",
+                  )}
                 >
-                  <item.icon className="h-4 w-4 shrink-0" />
+                  <item.icon className={cn("size-4 shrink-0", active && "text-primary")} aria-hidden="true" />
                   {!collapsed && <span>{tl(item.label)}</span>}
                 </NavLink>
-              ))}
-            </div>
-          </div>
-        ))}
-      </nav>
+                {item.restricted && context?.restricted && (
+                  <div className={cn("space-y-1", !collapsed && "pl-4")}>
+                    {livePages.map((page) => (
+                      <NavLink
+                        key={page.to}
+                        to={page.to}
+                        end
+                        onClick={onNavigate}
+                        aria-label={tl(page.label)}
+                        title={collapsed ? tl(page.label) : undefined}
+                        className={({ isActive }) => cn(
+                          "flex min-h-11 items-center gap-2 rounded-md px-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring md:min-h-9",
+                          isActive ? "bg-accent font-semibold text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                          collapsed && "justify-center px-2",
+                        )}
+                      >
+                        <page.icon className="size-4 shrink-0" aria-hidden="true" />
+                        {!collapsed && <span>{tl(page.label)}</span>}
+                      </NavLink>
+                    ))}
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </nav>
+        <NavLink
+          to={toolsNav.to}
+          end
+          onClick={onNavigate}
+          aria-label={tl(toolsNav.label)}
+          title={collapsed ? tl(toolsNav.label) : undefined}
+          className={({ isActive }) => cn(
+            "mt-4 flex min-h-11 items-center gap-2.5 rounded-md px-3 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring md:min-h-9",
+            isActive ? "bg-accent font-semibold text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            collapsed && "justify-center px-2",
+          )}
+        >
+          <toolsNav.icon className="size-4 shrink-0" aria-hidden="true" />
+          {!collapsed && <span>{tl(toolsNav.label)}</span>}
+        </NavLink>
+      </div>
     </div>
   );
 }
@@ -156,19 +193,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
   const location = useLocation();
 
-  const pageTitle = React.useMemo(() => {
-    for (const group of navGroups) {
-      for (const item of group.items) {
-        if (item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)) {
-          return { title: tl(item.label), group: tl(group.label), restricted: group.restricted };
-        }
-      }
-    }
-    return { title: "", group: "", restricted: false };
-  }, [location.pathname]);
+  const currentPage = navigationContext(location.pathname, RESEARCH_EDITION);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-dvh overflow-hidden bg-background">
+      <a
+        href="#main-content"
+        className="sr-only z-50 rounded-md bg-primary px-3 py-2 text-primary-foreground focus:not-sr-only focus:fixed focus:left-3 focus:top-3"
+      >
+        {tl({ zh: "跳到正文", en: "Skip to main content" })}
+      </a>
       {/* Desktop Sidebar */}
       <aside
         className={cn(
@@ -192,7 +226,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main Area */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Top Bar */}
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-4">
           <div className="flex items-center gap-3">
@@ -203,8 +237,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <Menu className="h-5 w-5" />
                 </Button>
               </SheetTrigger>
-              <SheetContent side="left" className="w-72 p-0">
+              <SheetContent side="left" className="w-[min(20rem,90vw)] p-0">
                 <SheetTitle className="sr-only">{tl({ zh: "导航菜单", en: "Navigation menu" })}</SheetTitle>
+                <SheetDescription className="sr-only">{tl({ zh: "选择工作区页面", en: "Choose a workspace page" })}</SheetDescription>
                 <div className="flex h-full flex-col bg-card">
                   <SidebarContent collapsed={false} onNavigate={() => setMobileOpen(false)} />
                   {!RESEARCH_EDITION && <SystemStatus />}
@@ -213,15 +248,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Sheet>
 
             <div className="flex items-center gap-2">
-              {pageTitle.group && (
-                <span className="hidden text-xs text-muted-foreground sm:inline">{pageTitle.group}</span>
-              )}
-              {pageTitle.group && <span className="hidden text-xs text-muted-foreground sm:inline">/</span>}
               {/* 顶栏只承载全局导航上下文,不渲染页面主标题;唯一 h1 由页面 PageHeader 提供 */}
-              <span className="text-sm font-semibold text-foreground" aria-hidden="true">
-                {pageTitle.title}
+              <span className="max-w-[36vw] truncate text-sm font-semibold text-foreground" aria-hidden="true">
+                {currentPage ? tl(currentPage.label) : ""}
               </span>
-              {pageTitle.restricted && (
+              {currentPage?.restricted && (
                 <span className="hidden items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning sm:inline-flex">
                   <AlertTriangle className="h-2.5 w-2.5" />
                   {tl({ zh: "受控区域", en: "Restricted area" })}
@@ -239,7 +270,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         {/* Content */}
-        <main className="flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6">
+        <main id="main-content" tabIndex={-1} className="flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6">
           {children}
         </main>
       </div>

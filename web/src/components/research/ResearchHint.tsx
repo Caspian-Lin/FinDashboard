@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { useT, type LocalizedText } from "@/i18n";
+import { RESEARCH_EDITION } from "@/lib/edition";
 import InfoHint from "@/components/InfoHint";
 import type { InfoHintDefinition } from "@/lib/infoHints";
 
@@ -154,8 +155,13 @@ export function workflowNextForPath(pathname: string): WorkflowNextStep | undefi
 }
 
 /** 顶栏 workflow help 可见性:研究分组页面 + 数据基座 + 回测页。 */
+function isResearchHome(pathname: string): boolean {
+  return pathname === "/research" || pathname === "/research/" || pathname === "/" && RESEARCH_EDITION;
+}
+
 export function isResearchWorkflowPath(pathname: string): boolean {
   return (
+    isResearchHome(pathname) ||
     pathname === "/data" ||
     pathname.startsWith("/research/") ||
     pathname.startsWith("/backtest")
@@ -169,7 +175,11 @@ export function isResearchWorkflowPath(pathname: string): boolean {
 export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
   const { tl } = useT();
   const { pathname } = useLocation();
-  const currentStep = WORKFLOW_STEPS.find((s) => pathname.startsWith(s.path));
+  const steps = WORKFLOW_STEPS.filter((step) => !RESEARCH_EDITION || step.path !== "/research/simulation");
+  const currentStep = steps.find((step) => pathname === step.path);
+  const nextTool = RESEARCH_EDITION && next?.path === "/research/simulation"
+    ? { path: "/research/reports", label: { zh: "研究报告", en: "Research reports" } }
+    : next;
 
   return (
     <Popover>
@@ -179,22 +189,26 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
           {tl({ zh: "研究入口", en: "Research tools" })}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80">
+      <PopoverContent align="end" className="max-h-[min(34rem,75dvh)] w-[min(20rem,90vw)] overflow-y-auto">
         <p className="text-sm font-medium text-foreground">
           {tl({ zh: "研究入口", en: "Research tools" })}
         </p>
-        <p className="mt-2 text-xs text-muted-foreground">研究可暂停、分支与反复验证；页面位置不表示阶段已通过。</p>
-        <Link to="/research/topics" className="mt-2 block text-sm text-primary underline">研究课题与证据时间线</Link>
+        <p className="mt-2 text-xs text-muted-foreground">{tl({
+          zh: "研究可暂停、分支与反复验证。",
+          en: "Pause, branch, and validate research as needed.",
+        })}</p>
+        <Link to="/research/topics" className="mt-2 block text-sm text-primary underline">{tl({ zh: "研究课题与证据时间线", en: "Research topics and evidence" })}</Link>
         <div className="mt-2 space-y-0.5">
-          {WORKFLOW_STEPS.map((step) => {
+          {steps.map((step) => {
             const isCurrent = currentStep?.step === step.step;
             return (
               <Link
                 key={step.path}
                 to={step.path}
+                aria-current={isCurrent ? "page" : undefined}
                 className={cn(
                   "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
-                  isCurrent && "bg-primary/10 text-primary",
+                  isCurrent && "bg-accent font-semibold text-foreground",
                   !isCurrent && "text-muted-foreground hover:text-foreground",
                 )}
               >
@@ -230,20 +244,20 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
             ))}
           </div>
         </div>
-        {next && (
+        {nextTool && (
           <div className="mt-3 border-t border-border pt-3">
             <Link
-              to={next.path}
+              to={nextTool.path}
               className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-accent"
             >
               <span>
                 <span className="block text-xs font-medium text-foreground">
                   {tl({ zh: "相关工具：", en: "Related tool: " })}
-                  {typeof next.label === "string" ? next.label : tl(next.label)}
+                  {typeof nextTool.label === "string" ? nextTool.label : tl(nextTool.label)}
                 </span>
-                {next.description && (
+                {nextTool.description && (
                   <span className="mt-0.5 block text-xs text-muted-foreground">
-                    {typeof next.description === "string" ? next.description : tl(next.description)}
+                    {typeof nextTool.description === "string" ? nextTool.description : tl(nextTool.description)}
                   </span>
                 )}
               </span>

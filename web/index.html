@@ -3,7 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FinDashboard — 交易控制台</title>
+    <title>FinDashboard</title>
+    <style>
+      html { background-color: #020303; }
+      html.light { background-color: #ffffff; }
+    </style>
     <script>
       // 首帧前恢复主题 class,避免浅色用户先看到深色背景闪一下。
       // 与 theme-provider 共用同一个 localStorage key("findashboard-theme")。
@@ -16,8 +20,7 @@
       }
     </script>
   </head>
-  <!-- 背景走主题 token:样式表加载前回退到深色中性灰,加载后由 --background 接管 -->
-  <body style="background-color: hsl(var(--background, 0 0% 8%))">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
