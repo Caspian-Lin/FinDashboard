@@ -17,6 +17,7 @@ from finboard_api.errors import finboard_error_handler
 from finboard_api.routes import (
     backtest_router,
     data_backfill_router,
+    data_bundles_router,
     data_catalog_router,
     data_router,
     data_scopes_router,
@@ -106,7 +107,7 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     for router in (
-        backtest_router, data_backfill_router, data_catalog_router, data_router,
+        backtest_router, data_backfill_router, data_bundles_router, data_catalog_router, data_router,
         data_scopes_router, instruments_router, jobs_router, portfolio_router,
         research_docs_router, research_memories_router, research_router, research_runs_router,
         strategy_presets_router, strategy_specs_router, watchlist_router, research_audit_router,

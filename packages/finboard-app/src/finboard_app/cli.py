@@ -1468,8 +1468,13 @@ def build_executor_registry(
         ResearchAuditRecorder(session_maker=session_maker),
         worker_id=worker_id or "job-replay",
     )
+    from finboard_app.release_bundle_jobs import BUNDLE_JOB_KIND, ReleaseBundleExecutor
+
     registry = JobExecutorRegistry()
     registry.register("echo", EchoExecutor())
+    registry.register(
+        BUNDLE_JOB_KIND, ReleaseBundleExecutor(session_maker, worker_id=worker_id or "job-replay"),
+    )
     # issue #511:课题缺口 → 全局补数 → 复用发布(kind=data_backfill)。
     # 内部组合既有四个数据域执行器,单并发(#144 数据源压力约束)。
     registry.register(
@@ -2046,6 +2051,9 @@ def data_release_verify(
     )
 
 
+from finboard_app.release_bundle_cli import bundle_cli  # noqa: E402
+
+data_app.add_typer(bundle_cli, name="bundle")
 app.add_typer(data_app, name="data")
 
 

@@ -87,6 +87,8 @@ TOOL_SCOPES: dict[str, frozenset[Scope]] = {
     "finboard_data_quality_check": _READ,
     "finboard_tushare_quota": _READ,
     # ---- 补数请求(#511) ----
+    "finboard_data_bundle_export": _DATA_WRITE,
+    "finboard_data_bundle_status": _READ,
     "finboard_data_backfill_preview": _READ,
     "finboard_data_backfill_submit": _DATA_WRITE,
     "finboard_data_backfill_list": _READ,

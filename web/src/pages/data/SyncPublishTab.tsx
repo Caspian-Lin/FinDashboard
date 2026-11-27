@@ -14,6 +14,7 @@ import { statusHint } from "@/lib/data-labels";
 import { dataHref } from "@/lib/data-links";
 import { formatDateTime } from "@/lib/utils";
 import type { DataTabProps } from "./DataBase";
+import { ReleaseBundlePanel } from "./ReleaseBundlePanel";
 
 interface EntryLink {
   href: string;
@@ -84,6 +85,7 @@ export function SyncPublishTab({
 
   return (
     <div className="space-y-4">
+      <ReleaseBundlePanel entries={entries} onImported={reload} />
       <Alert>
         <FolderClock className="h-4 w-4" />
         <AlertTitle>{tl({ zh: "第一阶段:只读状态面板", en: "Phase 1: read-only status" })}</AlertTitle>
