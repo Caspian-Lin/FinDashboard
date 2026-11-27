@@ -3051,7 +3051,10 @@ class SignalEnginePipelineAdapter:
 
     def can_defer_resume_features(self) -> bool:
         """只为可能进入普通 stub 回放的前缀拆分临时特征截面。"""
-        return not self._cross_section_series_capture
+        return (
+            not self._cross_section_series_capture
+            and getattr(self.decisions, "__func__", None) is SignalEnginePipelineAdapter.decisions
+        )
 
     def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
         """只确认组合管线接受的普通因子种子,在该期 yield 期间有效。"""

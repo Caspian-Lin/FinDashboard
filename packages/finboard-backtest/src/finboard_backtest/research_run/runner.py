@@ -273,7 +273,12 @@ class ResearchRunCoordinator:
             if retain_bundles and callable(getattr(adapter, "resume_from_checkpoint_spool", None)):
                 can_defer_features = getattr(adapter, "can_defer_resume_features", None)
                 resume_spool = ResumeCheckpointSpool(
-                    compact_features=bool(callable(can_defer_features) and can_defer_features()),
+                    compact_features=bool(
+                        callable(can_defer_features)
+                        # __getattr__ 透传种子能力无法保证包装器会原样产出决策。
+                        and getattr(can_defer_features, "__self__", None) is adapter
+                        and can_defer_features()
+                    ),
                 )
             resume_prefix, resume_count = await self._load_resume_prefix(
                 manifest.run_id, reuse_sections=reuse_sections,

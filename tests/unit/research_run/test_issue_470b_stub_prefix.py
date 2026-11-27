@@ -379,7 +379,7 @@ def _non_u_signal_setup(
 
 
 class TestStubPrefixResumeEndToEnd:
-    @pytest.mark.parametrize("fallback", [None, "missing_stage", "copied_decision"])
+    @pytest.mark.parametrize("fallback", [None, "missing_stage", "copied_decision", "copied_proxy"])
     async def test_resume_equals_fresh_and_prefix_not_rebuilt(
         self, monkeypatch: pytest.MonkeyPatch, fallback: str | None
     ) -> None:
@@ -429,6 +429,17 @@ class TestStubPrefixResumeEndToEnd:
             def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
                 return True
 
+        class CopyingProxy:
+            def __init__(self, adapter: SignalEnginePipelineAdapter) -> None:
+                self.adapter = adapter
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.adapter, name)
+
+            async def decisions(self, manifest: ResearchRunManifest) -> AsyncIterator[DecisionBundle]:
+                async for decision in self.adapter.decisions(manifest):
+                    yield replace(decision)
+
         adapter_class = CopyingAdapter if fallback == "copied_decision" else SignalEnginePipelineAdapter
         resumed_adapter = adapter_class(
             manifest=manifest,
@@ -438,10 +449,12 @@ class TestStubPrefixResumeEndToEnd:
         contexts_before = counters.load_context
         covariance_before = counters.covariance
         stubs_before = counters.load_stub
-        resumed = await coordinator.execute(manifest, resumed_adapter)
+        resumed = await coordinator.execute(
+            manifest, CopyingProxy(resumed_adapter) if fallback == "copied_proxy" else resumed_adapter,
+        )
         assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
         assert resumed.timing is not None
-        expected_reuse = {None: 2, "missing_stage": 1, "copied_decision": 0}
+        expected_reuse = {None: 2, "missing_stage": 1, "copied_decision": 0, "copied_proxy": 0}
         assert resumed.timing["resume_checkpoints_reused"] == expected_reuse[fallback]
         # 续跑段:stub 前缀 2 期只走 load_resume_stub,完整装载只剩 1 期
         # (load_context / 协方差各 1 次)—— 前缀零重算的直接计数证据。
