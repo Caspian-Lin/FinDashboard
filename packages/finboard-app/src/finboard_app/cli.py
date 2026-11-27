@@ -351,14 +351,28 @@ def _ensure_sandbox_image(settings: Settings) -> bool:
     image = settings.research_sandbox_image
     try:
         inspected = subprocess.run(
-            [docker_bin, "image", "inspect", image],
+            [docker_bin, "image", "inspect", "--", image],
             check=False,
             capture_output=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError as exc:
         typer.echo(f"警告: 无法调用 {docker_bin},跳过沙箱镜像检查({exc})。", err=True)
         return False
     if inspected.returncode == 0:
+        return False
+    # Docker 在镜像缺失与连接/权限失败时可能返回同一个退出码。
+    detail = inspected.stderr.strip()
+    if not any(
+        line.startswith(("Error response from daemon: No such image:", "Error: No such image:"))
+        for line in detail.splitlines()
+    ):
+        reason = detail or f"docker image inspect 退出码 {inspected.returncode}"
+        typer.echo(f"警告: 沙箱镜像 {image} 检查失败。跳过自动构建。Docker 返回 {reason}", err=True)
+        return False
+    if "@" in image:
+        typer.echo(f"警告: 固定摘要沙箱镜像 {image} 需要先用 docker pull 或 docker load 导入。", err=True)
         return False
     typer.echo(
         f"沙箱镜像 {image} 不在本机,自动构建中(docker/research-sandbox/,"

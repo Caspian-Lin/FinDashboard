@@ -277,9 +277,14 @@ kind=strategy 的 active 且 promotion_status=passed artifact,`finboard_run_queu
 默认关闭,启用前置(Docker Desktop 运行):
 
 ```bash
-docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.2.0 .
+docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.3.2 .
 # .env: FINBOARD_RESEARCH_SANDBOX_ENABLED=true
 ```
+
+启用研究沙箱后，`make dev` 在 Docker 确认镜像缺失时自动构建。若镜像检查因
+Docker 未启动或访问受限而失败，启动器会显示 Docker 返回的错误并跳过构建，
+开发服务继续启动。Windows 上，若终端可以访问 Docker，但 `uv run` 报命名管道
+或 Buildx 锁文件权限错误，请检查工作区的 Python 执行环境是否继承了低完整性标签。
 
 容器级加固验收(参照一致/断网/只读/超时/OOM/PIT)默认跳过:
 
