@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 
+import finboard_backtest.research_run.frozen_loader as frozen_loader_module
 import finboard_backtest.research_run.signal_engine as signal_engine
 from finboard_backtest.research_run.contracts import (
     ResearchRunInterruptedError,
@@ -23,6 +24,7 @@ from finboard_backtest.research_run.signal_engine import (
     DecisionLoadContext,
     iter_decision_load_contexts,
 )
+from finboard_backtest.research_run.stage_timing import collect_stage_timings
 
 from .test_issue_306_load_probe import (
     _build_release,
@@ -84,6 +86,32 @@ async def _make_stream(
 
 
 class TestDecisionLoadPrefetch:
+    async def test_frozen_market_metadata_is_built_once_and_batch_timings_are_observable(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        builds = 0
+        original = frozen_loader_module._build_candidates_and_lots
+
+        def build(*args: Any, **kwargs: Any) -> Any:
+            nonlocal builds
+            builds += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(frozen_loader_module, "_build_candidates_and_lots", build)
+        with collect_stage_timings() as timings:
+            _, _, stream = await _make_stream(tmp_path)
+            decisions = [item async for item in stream]
+        expected = _month_end_decisions()
+        assert [item.context.business_date for item in decisions] == expected
+        assert builds == 1
+        assert decisions[0].context.lot_info == decisions[1].context.lot_info
+        assert decisions[0].context.lot_info is not decisions[1].context.lot_info
+        measured = timings.as_dict()
+        assert "decision_batch_foreground_load" in measured
+        assert "decision_batch_background_load" in measured
+        assert "decision_batch_consumer" in measured
+        assert "decision_batch_wait_at_join" in measured or "decision_batch_ready_at_join" in measured
+
     async def test_cancel_during_precompute_abandons_pool(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
