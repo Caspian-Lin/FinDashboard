@@ -173,6 +173,19 @@ MCP)。MCP 只是控制面,真正的执行依赖这一轮的 DB 与 worker,所�
 dev 只告警并继续跑 API/worker —— 看启动日志里的 `警告: MCP …` 具名原因。
 前端「任务中心」页(`/jobs`)可查看全部任务、过滤、详情与取消。
 
+启动时会检查 `FINBOARD_RESEARCH_SANDBOX_WORKSPACE_ROOT`。已结束的沙箱挂载闲置**超过 30 天**后，
+只回收 `data/` 和 `data-cut-YYYY-MM-DD/` 清单中列明的 Parquet 输入。
+同一物理缓存目录下的 worktree 共用挂载锁，挂载构建、容器执行和 PIT 审计读写期间会跳过。
+回收保留 `mount_manifest.json`、`out/`、日志、校验和与正式 `FS-` 工件。
+
+闲置期以挂载最后一次正常退出使用的时间为准。旧版唯一容器目录须有对应挂载路径的完整退出归档，
+且归档时间须晚于挂载输入。旧版容器截断挂载还须核对归档中的挂载清单 SHA256。
+缺少可核对终态的旧版进程内因子目录、截断挂载与可复用的旧版研究决策目录会保留。
+启动日志列出扫描数、回收文件数、释放字节与跳过原因，包括
+`active_mount`、`completion_unconfirmed`、`file_unavailable` 和 `unsafe_path`。
+需要禁用自动回收时，设置 `FINBOARD_RESEARCH_SANDBOX_CLEANUP_ON_DEV=false`。
+再次运行时，输入由原冻结发布重新物化，仍经过原有 PIT 约束。
+
 > `finboard --env-file X dev` 的覆盖只作用于父进程:worker/MCP 子进程按 CWD 的
 > `.env` 自行读配置。需要换配置就跑 `make dev`(或先 `cd` 到目标目录)。
 

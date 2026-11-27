@@ -579,6 +579,26 @@ def _watch_dev_mcp(
     )
 
 
+def _cleanup_dev_sandbox_mounts(settings: Settings) -> None:
+    if not settings.research_sandbox_cleanup_on_dev:
+        return
+
+    try:
+        from finboard_backtest.research_sandbox.mount_retention import collect_idle_mounts
+
+        report = collect_idle_mounts(Path(settings.research_sandbox_workspace_root))
+    except Exception as exc:
+        typer.echo(f"研究沙箱挂载回收跳过 [cleanup_failed]: {exc}", err=True)
+        return
+    reasons = ", ".join(f"{key}={count}" for key, count in sorted(report.skipped.items()))
+    typer.echo(
+        f"研究沙箱挂载回收扫描 {report.scanned_mounts} 个挂载, "
+        f"回收 {report.reclaimed_mounts} 个挂载的 {report.reclaimed_files} 个文件, "
+        f"释放 {report.released_bytes} 字节。"
+        + (f" 跳过原因 {reasons}。" if reasons else "")
+    )
+
+
 @app.command()
 def dev(
     ctx: typer.Context,
@@ -642,6 +662,7 @@ def dev(
             + ", ".join(f"PID {item.pid}" for item in swept_workers)
             + "(其 in-flight 任务由 lease 过期回收后自动重排)。"
         )
+    _cleanup_dev_sandbox_mounts(settings)
 
     stop_event = threading.Event()
     frontend_holder: list[subprocess.Popen[bytes]] = []
