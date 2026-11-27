@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from itertools import batched
+from typing import Any, TypedDict, cast
 
 from psycopg.types.json import Json
-from sqlalchemy import insert, select, text
+from sqlalchemy import Table, insert, select, text, tuple_
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
@@ -26,6 +28,19 @@ def _identity_json_dumps(obj: Any) -> Any:
     """驱动级 Json 包装的直写 dumps(#472):入参已是 canonical JSON 文本。"""
 
     return obj
+
+
+class ResearchRunArtifactInsert(TypedDict):
+    run_id: str
+    artifact_id: str
+    decision_id: str | None
+    sequence: int
+    stage: str
+    trace_id: str
+    parent_trace_ids: list[str]
+    payload: dict[str, object]
+    checksum: str
+    payload_json: str | None
 
 
 class ResearchRunPersistenceConflictError(RuntimeError):
@@ -364,6 +379,90 @@ class ResearchRunRepository:
         self._session.add(row)
         await self._session.flush()
         return row, True
+
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchRunArtifactInsert]
+    ) -> list[bool]:
+        """批量追加一个决策的产物,按输入顺序返回是否插入。
+
+        续跑命中只查 ID 与 checksum。新行用一个 INSERT 落库,同键并发
+        命中后重新读 checksum。序号和 trace_id 冲突仍由数据库拒绝。
+        事务的提交与回滚由调用方负责。
+        """
+        table = cast(Table, ResearchRunArtifactModel.__table__)
+        unique: dict[tuple[str, str], ResearchRunArtifactInsert] = {}
+        for artifact in artifacts:
+            key = (artifact["run_id"], artifact["artifact_id"])
+            if unique.setdefault(key, artifact)["checksum"] != artifact["checksum"]:
+                raise ResearchRunPersistenceConflictError(
+                    f"artifact {key[1]} checkpoint 内容冲突"
+                )
+
+        pending: list[tuple[str, str]] = []
+        # 一个正常决策只有 13 行。为批量调用保留 PostgreSQL 绑定参数上限余量。
+        for keys in batched(unique, 500):
+            existing = await self._artifact_checksums(keys)
+            for key, checksum in existing.items():
+                if checksum != unique[key]["checksum"]:
+                    raise ResearchRunPersistenceConflictError(
+                        f"artifact {key[1]} checkpoint 内容冲突"
+                    )
+            pending.extend(key for key in keys if key not in existing)
+
+        inserted: set[tuple[str, str]] = set()
+        if pending:
+            # 调用方可能在同一会话捕获冲突并保存 FAILED 状态,先回滚本批。
+            async with self._session.begin_nested():
+                for new_keys in batched(sorted(pending), 500):
+                    values: list[dict[str, Any]] = []
+                    for key in new_keys:
+                        row: dict[str, Any] = dict(unique[key])
+                        payload_json = row.pop("payload_json")
+                        if payload_json is not None:
+                            row["payload"] = Json(payload_json, dumps=_identity_json_dumps)
+                        values.append(row)
+
+                    statement = (
+                        postgres_insert(table)
+                        .values(values)
+                        # 三个唯一索引都仲裁,同批并发时可能先撞 sequence 或 trace。
+                        .on_conflict_do_nothing()
+                        .returning(table.c.run_id, table.c.artifact_id)
+                    )
+                    result = await self._session.execute(statement)
+                    rows = {(row[0], row[1]) for row in result}
+                    inserted.update(rows)
+
+                    collided = set(new_keys) - rows
+                    if collided:
+                        concurrent = await self._artifact_checksums(collided)
+                        for key in collided:
+                            stored_checksum = concurrent.get(key)
+                            if stored_checksum is None:
+                                raise ResearchRunPersistenceConflictError(
+                                    f"artifact {key[1]} 序号或 trace_id 冲突"
+                                )
+                            if stored_checksum != unique[key]["checksum"]:
+                                raise ResearchRunPersistenceConflictError(
+                                    f"artifact {key[1]} checkpoint 内容冲突"
+                                )
+
+        created: list[bool] = []
+        for artifact in artifacts:
+            key = (artifact["run_id"], artifact["artifact_id"])
+            created.append(key in inserted)
+            inserted.discard(key)
+        return created
+
+    async def _artifact_checksums(
+        self, keys: Iterable[tuple[str, str]]
+    ) -> dict[tuple[str, str], str]:
+        model = ResearchRunArtifactModel
+        stmt = select(model.run_id, model.artifact_id, model.checksum).where(
+            tuple_(model.run_id, model.artifact_id).in_(list(keys))
+        )
+        result = await self._session.execute(stmt)
+        return {(run_id, artifact_id): checksum for run_id, artifact_id, checksum in result}
 
     async def list_artifacts(self, run_id: str) -> list[ResearchRunArtifactModel]:
         stmt = (

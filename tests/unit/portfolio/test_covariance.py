@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -60,6 +62,11 @@ class TestPairwiseAlignedReturns:
 
 
 class TestEstimateCovariance:
+    def test_reuses_sample_covariance_for_shrinkage_target(self) -> None:
+        with patch.object(np, "cov", wraps=np.cov) as compute_sample:
+            estimate_covariance(_make_returns())
+        compute_sample.assert_called_once()
+
     def test_basic(self) -> None:
         rets = _make_returns(100)
         est = estimate_covariance(rets)

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import pairwise
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
@@ -54,6 +55,9 @@ from finboard_data.releases import (
 from finboard_data.research import DailySecurityMetrics, FinancialIndicator
 from finboard_shared.models import Symbol
 from finboard_shared.types import AssetClass, BarPeriod, Market
+
+if TYPE_CHECKING:
+    from finboard_backtest.research_run.frozen_loader import SymbolCloseHistory
 
 _EPS = 1e-12
 _logger = structlog.get_logger(__name__)
@@ -1275,8 +1279,10 @@ def _read_close_history_in_worker(
 
 def _compute_close_history_process_task(
     task: _CloseHistoryProcessTask,
-) -> tuple[str, CloseHistoryColumns]:
-    """在子进程中读取一个标的的列式 PIT close 历史(issue #301)。"""
+) -> tuple[str, SymbolCloseHistory | None]:
+    """在子进程转换紧凑 PIT close 矩阵,进程间只传递原生数组。"""
+    from finboard_backtest.research_run.frozen_loader import SymbolCloseHistory
+
 
     context = _PRICE_FEATURE_PROCESS_CONTEXT
     if context is None:
@@ -1289,7 +1295,12 @@ def _compute_close_history_process_task(
         task.decision_at,
         include_open=task.include_open,
     )
-    return task.code, columns
+    return task.code, SymbolCloseHistory.from_sequences(
+        available_at=columns.available_at,
+        dates=columns.dates,
+        closes=columns.closes,
+        opens=columns.opens,
+    )
 
 
 def _compute_price_feature_process_task(

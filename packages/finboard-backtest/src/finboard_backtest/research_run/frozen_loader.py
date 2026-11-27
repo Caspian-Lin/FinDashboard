@@ -2859,8 +2859,8 @@ async def _load_close_histories_via_pool(
 ) -> dict[str, SymbolCloseHistory | None] | None:
     """经常驻进程池预建 close 矩阵(issue #301);不可用时返回 ``None``。
 
-    worker 内完成 parquet 解码 + 列式转换(PIT 门控含内),主进程只收列式
-    数据并组装 ``SymbolCloseHistory``,绕开反序列化段的 GIL;磁盘并发由
+    worker 内完成 parquet 解码、PIT 门控与 ``SymbolCloseHistory`` 转换,
+    主进程只收原生数组;磁盘并发由
     ``worker_count`` 个串行 worker 进程自然钳制(与 io_semaphore 同语义)。
     池未启动 / 任务损坏(BrokenProcessPool 等)/ 逐任务业务异常时记具名
     warning 并返回 ``None``,调用方降级为进程内线程路径(结果逐值一致,
@@ -2871,8 +2871,6 @@ async def _load_close_histories_via_pool(
         _CloseHistoryProcessTask,
         _compute_close_history_process_task,
     )
-    from finboard_data.releases import CloseHistoryColumns
-
     if not candidates or pool.broken:
         return None
     try:
@@ -2896,15 +2894,15 @@ async def _load_close_histories_via_pool(
     # 4.36GB 后才回落):此前 ``asyncio.gather`` 把全部标的的**列式肥结果**
     # (每标的 4 列 x 全历史 ≈ 0.7MB Python 对象)攒在一个 list 里,5215
     # 标的全部完成后才开始逐个转紧凑 numpy —— 全部肥载荷同时驻留 ≈ 3.5GB
-    # 纯瞬时。改为有界在途(信号量) + ``as_completed`` 逐个到达逐个转换:
-    # 任意时刻在途肥载荷 ≈ 窗口 x 0.7MB,驻留只有紧凑矩阵本身。语义保持:
+    # 纯瞬时。保留有界在途(信号量) + ``as_completed`` 逐项消费,并在子进程
+    # 内先转紧凑矩阵。驻留以原生数组计量。语义保持:
     # 全部任务仍会被消费(与 gather 等价,不提前打死池队列);任一任务异常
     # → 整体返回 None 降级进程内路径(记录第一个异常);打断异常优先上抛。
     inflight = asyncio.Semaphore(_CLOSE_POOL_MAX_INFLIGHT)
 
     async def _run_one(
         task: _CloseHistoryProcessTask,
-    ) -> tuple[str, CloseHistoryColumns] | BaseException:
+    ) -> tuple[str, SymbolCloseHistory | None] | BaseException:
         async with inflight:
             try:
                 result = await loop.run_in_executor(
@@ -2927,13 +2925,8 @@ async def _load_close_histories_via_pool(
             if failure is None:
                 failure = result
             continue
-        code, columns = result
-        built[code] = SymbolCloseHistory.from_sequences(
-            available_at=columns.available_at,
-            dates=columns.dates,
-            closes=columns.closes,
-            opens=columns.opens,
-        )
+        code, history = result
+        built[code] = history
     if interrupted is not None:
         raise interrupted
     if failure is not None:

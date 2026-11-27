@@ -30,7 +30,7 @@ import contextlib
 import math
 import os
 import weakref
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -45,6 +45,7 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -102,6 +103,7 @@ from finboard_backtest.research_run.portfolio_pipeline import (
     PortfolioPipelineAdapter,
     _ResumeReplayStub,
 )
+from finboard_backtest.research_run.stage_timing import record_stage_timing
 from finboard_backtest.strategy_spec.contracts import (
     ExecutionTiming,
     FeatureNode,
@@ -1067,6 +1069,16 @@ def _estimate_covariance(
     return estimate
 
 
+def _timed_covariance(
+    price_series: Mapping[str, Sequence[float]], stage: str
+) -> CovarianceEstimate | None:
+    started = perf_counter()
+    try:
+        return _estimate_covariance(price_series)
+    finally:
+        record_stage_timing(stage, started)
+
+
 def _impute_unestimable_assets(
     estimate: CovarianceEstimate,
     symbols: Sequence[str],
@@ -1667,13 +1679,29 @@ async def _market_close_map(
     semaphore = asyncio.Semaphore(8)
 
     async def _fetch(code: str) -> dict[date, Decimal]:
+        from finboard_data.releases import FrozenReleaseProvider
+        from finboard_shared.types import BarPeriod
+
         async with semaphore:
+            symbol = _symbol_from_release(provider, code)
+            release = provider.release
+            if isinstance(provider, FrozenReleaseProvider) and release.period is BarPeriod.D1:
+                # 权益计算沿用 Decimal 收盘价。日线仅解码 timestamp / close。
+                points = await provider.fetch_point_in_time_prices(
+                    symbol,
+                    release.period,
+                    release.start_date,
+                    release.end_date,
+                    decision_at=datetime.max.replace(tzinfo=UTC),
+                    adjust=release.adjustment,
+                )
+                return {point.timestamp.date(): point.close for point in points}
             bars = await provider.fetch_bars(
-                _symbol_from_release(provider, code),
-                provider.release.period,
-                provider.release.start_date,
-                provider.release.end_date,
-                adjust=provider.release.adjustment,
+                symbol,
+                release.period,
+                release.start_date,
+                release.end_date,
+                adjust=release.adjustment,
             )
         return {bar.timestamp.date(): bar.close for bar in bars}
 
@@ -1729,7 +1757,9 @@ async def build_daily_equity_curve(
     segments.sort(key=lambda item: item[0])
 
     held_symbols = sorted({symbol for _, _, positions in segments for symbol in positions})
+    started = perf_counter()
     closes_by_symbol = await _market_close_map(provider, held_symbols)
+    record_stage_timing("equity_market_read", started)
     # 每标的预排好日期键,停牌日用最近历史收盘承载。
     sorted_days: dict[str, list[date]] = {
         symbol: sorted(days) for symbol, days in closes_by_symbol.items()
@@ -2219,6 +2249,7 @@ async def iter_decision_load_contexts(
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
     skip_prefix: int = 0,
+    prefetch_next_batch: bool = True,
 ) -> AsyncIterator[DecisionLoadContext]:
     """逐期流式产出决策的机械上下文(不含信号,issue #218 / #463)。
 
@@ -2231,9 +2262,8 @@ async def iter_decision_load_contexts(
     issue #470 后半场:``skip_prefix`` > 0(断点续算,前缀期已由
     ``resume_from`` 种子覆盖)时前 ``skip_prefix`` 期**零构建** —— 不进入
     ``_load_one``(features / 周期价格特征 / 价格序列 / 协方差全部不构建),
-    本流从第 ``skip_prefix`` 期起按原分块与期序产出;前置预建(close /
-    daily / 价格特征)仍按全决策日构建(续算期需要,期次口径与 checksum
-    不变),前缀期的预计算槽位在预建后即刻释放(本流不再消费)。运行级
+    本流从第 ``skip_prefix`` 期起按原分块与期序产出。close 历史仍提供完整
+    预热数据,daily 与价格特征只为后缀日期预建截面。运行级
     进度帧的 k 从 ``skip_prefix`` 起报(种子前缀已落库 —— 「已完成期数」
     的真实值)。前缀 stub 与 ``skip_prefix`` 期数必须同源(见
     :func:`_resolve_decision_days`)。
@@ -2296,6 +2326,7 @@ async def iter_decision_load_contexts(
     )
     # #470 后半场:续跑前缀期(种子已覆盖,本流从 skip_prefix 期起产出)。
     skip = min(max(int(skip_prefix), 0), len(decision_days))
+    remaining_dates = tuple(decision_at for decision_at, _ in decision_days[skip:])
 
     # issue #288:日历与 close 矩阵(#287 的惰性进程内缓存)在进入分块并行
     # 前预建 —— 并发首建只会重复读盘且打穿矩阵收益,预建收敛到单一顺序点。
@@ -2314,74 +2345,61 @@ async def iter_decision_load_contexts(
     pool: PriceFeatureProcessPool | None = None
     if schedule is not None and process_workers > 0:
         pool = await _start_period_feature_pool(provider, process_workers)
-    await _release_trading_days(provider, trading_days_loader=trading_days_loader)
-    # issue #450:预计算段进度帧(尽力而为)。首帧 0/N 之后到首个分块边界
-    # 之间是 close / daily 矩阵预建的长段,逐标的节流帧只写 phase 文本,
-    # #306 僵尸指纹(逐 phase 变化)在预建期间保持活跃。上报失败一律吞掉。
-    if precompute_phase_reporter is not None:
-        with contextlib.suppress(Exception):
-            await precompute_phase_reporter(
-                "research_run:decision_load precompute start"
-            )
-    await loader.ensure_close_histories(
-        manifest,
-        process_pool=pool,
-        progress=precompute_phase_reporter,
-        cancel_probe=precompute_cancel_probe,
-    )
-    # issue #438:研究观测(daily_metrics)run 级预建与 close 矩阵同类——决策日
-    # 全集在分块前已冻结,每标的一次列式读取覆盖全部决策期;逐期消费查矩阵,
-    # 零 IO 零逐行解析(stub / 对象路径 provider 不预建,逐期路径行为不变)。
-    await loader.ensure_daily_metrics_histories(
-        manifest,
-        tuple(decision_at for decision_at, _ in decision_days),
-        progress=precompute_phase_reporter,
-        cancel_probe=precompute_cancel_probe,
-    )
-    # issue #450 追续:价格特征 run 级预计算(逐期矩阵切片仍要 5000 次
-    # per-symbol 循环 + 快照 checksum,全市场 ≈ 30s/期;预建后逐期查表)。
-    # issue #464:进程池分发 + 进度帧接通(该段此前单线程零帧,全市场 x
-    # 全历史实测 ~17 分钟且 phase 冻结在 daily 段最后一帧)。
-    await loader.ensure_price_feature_precompute(
-        manifest,
-        tuple(decision_at for decision_at, _ in decision_days),
-        progress=precompute_phase_reporter,
-        cancel_probe=precompute_cancel_probe,
-        process_pool=pool,
-    )
-    if precompute_phase_reporter is not None:
-        with contextlib.suppress(Exception):
-            await precompute_phase_reporter(
-                "research_run:decision_load precompute done"
-            )
-    # 内存预算(2026-09-14 归因):预计算段结束后池再无消费方 —— 逐期价格
-    # 特征查 price_precompute 表,未命中走 close 矩阵切片,再退进程内协程
-    # 路径(#288 降级语义,结果逐值一致)。8 个 spawn worker 各 ~160MB 在
-    # 整个决策段(数百期)常驻是纯浪费,即刻退役收回;生成器 finally 的
-    # aclose 幂等,生成器提前关闭也安全。
-    if pool is not None and not pool.broken:
-        pool.retire()
-        await pool.aclose()
+    try:
+        await _release_trading_days(provider, trading_days_loader=trading_days_loader)
+        # issue #450:预计算段进度帧(尽力而为)。首帧 0/N 之后到首个分块边界
+        # 之间是 close / daily 矩阵预建的长段,逐标的节流帧只写 phase 文本,
+        # #306 僵尸指纹(逐 phase 变化)在预建期间保持活跃。上报失败一律吞掉。
+        if precompute_phase_reporter is not None:
+            with contextlib.suppress(Exception):
+                await precompute_phase_reporter(
+                    "research_run:decision_load precompute start"
+                )
+        await loader.ensure_close_histories(
+            manifest,
+            process_pool=pool,
+            progress=precompute_phase_reporter,
+            cancel_probe=precompute_cancel_probe,
+        )
+        # issue #438:研究观测(daily_metrics)run 级预建与 close 矩阵同类——决策日
+        # 全集在分块前已冻结,每标的一次列式读取覆盖待执行的决策期;逐期消费查矩阵,
+        # 零 IO 零逐行解析(stub / 对象路径 provider 不预建,逐期路径行为不变)。
+        await loader.ensure_daily_metrics_histories(
+            manifest,
+            remaining_dates,
+            progress=precompute_phase_reporter,
+            cancel_probe=precompute_cancel_probe,
+        )
+        # issue #450 追续:价格特征 run 级预计算(逐期矩阵切片仍要 5000 次
+        # per-symbol 循环 + 快照 checksum,全市场 ≈ 30s/期;预建后逐期查表)。
+        # issue #464:进程池分发 + 进度帧接通(该段此前单线程零帧,全市场 x
+        # 全历史实测 ~17 分钟且 phase 冻结在 daily 段最后一帧)。
+        await loader.ensure_price_feature_precompute(
+            manifest,
+            remaining_dates,
+            progress=precompute_phase_reporter,
+            cancel_probe=precompute_cancel_probe,
+            process_pool=pool,
+        )
+        if precompute_phase_reporter is not None:
+            with contextlib.suppress(Exception):
+                await precompute_phase_reporter(
+                    "research_run:decision_load precompute done"
+                )
+    finally:
+        # 成功、预计算失败或取消后都释放 spawn 进程。逐期装载使用已建矩阵。
+        if pool is not None:
+            pool.retire()
+            await pool.aclose()
+    if pool is not None:
         logger.info(
             "research_run.process_pool_retired",
             stage="decision_load",
             release_id=release_ref.artifact_id,
-            message="预计算完成,特征计算进程池即刻退役(决策段零子进程驻留)",
-        )
-    if skip:
-        # #470 后半场:前缀期(种子已覆盖)的预计算槽位本流不再消费 ——
-        # 预建后即刻释放(#438 v2 / #463 下半场同契约:被释放期复读回落
-        # 逐期路径,值语义不变)。daily 槽位是独立 numpy 大数组(全市场
-        # 0.45GB/发布),前缀占比按 skip/总期数即时归还 OS。
-        precompute = loader.price_feature_precompute
-        if precompute is not None:
-            for decision_at, _ in decision_days[:skip]:
-                precompute.release_period(decision_at)
-        loader.release_daily_precompute_periods(
-            [decision_at for decision_at, _ in decision_days[:skip]]
         )
 
     async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
+        started = perf_counter()
         execution_at = await _next_execution_at(
             provider,
             decision_at,
@@ -2397,7 +2415,6 @@ async def iter_decision_load_contexts(
                 manifest,
                 decision_at,
                 release_ref.artifact_id,
-                process_pool=pool,
                 close_histories=loader.close_histories or None,
                 price_precompute=loader.price_feature_precompute,
                 trading_days_loader=trading_days_loader,
@@ -2452,6 +2469,7 @@ async def iter_decision_load_contexts(
         signalable = frozenset(
             symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
         )
+        record_stage_timing("decision_load_without_covariance", started)
         return DecisionLoadContext(
             context=context,
             candidates=candidates,
@@ -2461,7 +2479,9 @@ async def iter_decision_load_contexts(
             # 协方差估计是纯 CPU 段(numpy 矩阵运算),经 to_thread 卸载
             # (issue #286);price_series 为普通数据,线程间无共享可变态。
             # 分块 gather(issue #288)下各期的卸载调用互不共享状态,安全。
-            covariance=await asyncio.to_thread(_estimate_covariance, price_series),
+            covariance=await asyncio.to_thread(
+                _timed_covariance, price_series, "initial_covariance"
+            ),
             snapshot_id=snapshot_id,
             # 2026-09-13 事故修复:组合阶段按需补齐目标标的覆盖(持仓掉出
             # 选股池 / 停牌);闭包只captured loader 引用与决策时点,矩阵是
@@ -2543,8 +2563,7 @@ async def iter_decision_load_contexts(
         for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
             chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
             if chunk_start + len(chunk) <= skip:
-                # 整块落在续跑前缀内:零构建、零探针(本块无加载工作),
-                # 槽位已在预建后释放。
+                # 整块落在续跑前缀内:零构建、零探针。
                 continue
             if prefetch_task is None:
                 # 首批没有可复用的预取结果,沿用原有批内 gather。
@@ -2570,7 +2589,7 @@ async def iter_decision_load_contexts(
             # 纯读 / 协方差计算与调用方当前批的信号、组合状态和持久化相重叠;
             # 只有在下一批被取走后才创建再下一批,内存上限为两批。
             next_start = chunk_start + _DECISION_LOAD_CHUNK
-            if next_start < len(decision_days):
+            if prefetch_next_batch and next_start < len(decision_days):
                 next_chunk = decision_days[
                     next_start : next_start + _DECISION_LOAD_CHUNK
                 ]
@@ -2579,12 +2598,10 @@ async def iter_decision_load_contexts(
                         _load_chunk(next_start, next_chunk),
                         name="research_run.decision_load_prefetch",
                     )
-            # issue #463:块内全部期次加载完成后逐期 yield(期序不变)。
-            for result in loaded:
-                yield result
-            # 不把已消费批次的列表留到下一轮;最后一个循环变量只保留
-            # 一个 context,不会突破「当前批 + 下一批」的双批上限。
-            loaded.clear()
+            # 保持期序,每期交给下游后立即释放本批对它的引用。
+            loaded.reverse()
+            while loaded:
+                yield loaded.pop()
     finally:
         # issue #475:消费者提前关闭 / 下游抛错时,预取任务必须显式
         # cancel + await;否则其 gather 子任务可能继续读盘并把半批对象
@@ -2596,10 +2613,6 @@ async def iter_decision_load_contexts(
                 task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-        # issue #463:生成器耗尽 / 被关闭(aclose)/ 抛错任一路径都立即
-        # 关闭常驻特征进程池 —— 流式化后池生命周期跟随生成器而非全量加载。
-        if pool is not None:
-            await pool.aclose()
 
 
 async def build_decision_load_contexts(
@@ -2658,6 +2671,7 @@ async def iter_decision_inputs(
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
     skip_prefix: int = 0,
+    prefetch_next_batch: bool = True,
 ) -> AsyncIterator[PortfolioDecisionInput]:
     """逐期流式产出 ``PortfolioDecisionInput``(issue #170 / #183 / #463)。
 
@@ -2701,6 +2715,7 @@ async def iter_decision_inputs(
         precompute_phase_reporter=precompute_phase_reporter,
         precompute_cancel_probe=precompute_cancel_probe,
         skip_prefix=skip_prefix,
+        prefetch_next_batch=prefetch_next_batch,
     )
     try:
         async for loaded in source:
@@ -2921,6 +2936,7 @@ class SignalEnginePipelineAdapter:
         trading_days_loader: TradingDaysLoader | None = None,
         precompute_phase_reporter: LoadPhaseReporter | None = None,
         precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+        prefetch_next_batch: bool = True,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -2942,6 +2958,7 @@ class SignalEnginePipelineAdapter:
         # issue #288:multi_period 逐期价格特征使用的常驻进程池 worker 数
         # (settings ``research_price_feature_process_workers``;0 = 进程内)。
         self._process_workers = max(0, process_workers)
+        self._prefetch_next_batch = prefetch_next_batch
         # issue #306:加载期分块探针(run status / cancel 轮询 + 进度上报)。
         self._chunk_probe = chunk_probe
         # issue #450:预计算段 phase 进度上报器(只写 phase 文本,与探针
@@ -3118,6 +3135,7 @@ class SignalEnginePipelineAdapter:
                 precompute_phase_reporter=self._precompute_phase_reporter,
                 precompute_cancel_probe=self._precompute_cancel_probe,
                 skip_prefix=skip_prefix,
+                prefetch_next_batch=self._prefetch_next_batch,
             )
             try:
                 async for item in source:
@@ -3283,7 +3301,7 @@ class SignalEnginePipelineAdapter:
         manifest: ResearchRunManifest,
     ) -> AsyncIterator[DecisionBundle]:
         resume = self._resume_bundles
-        resume_all: tuple[DecisionBundle, ...] | None = None
+        resume_all: deque[DecisionBundle] | None = None
         pipeline: PortfolioPipelineAdapter | None = None
         pipeline_iter: AsyncIterator[DecisionBundle] | None = None
         try:
@@ -3296,13 +3314,12 @@ class SignalEnginePipelineAdapter:
                     # k/N phase(#308)随之不触发 —— 无加载即无加载进度,
                     # phase 直接进入决策执行段。
                     self._fast_path = True
-                    resume_all = resume
+                    resume_all = deque(resume)
                 else:
                     # #470 后半场:续跑时主线输入流从第 len(resume) 期起产出
                     # (skip_prefix),前缀五字段改由 stub-only 装载流预取 ——
                     # 前缀期不再构建完整输入(协方差 / 特征 / 价格序列),
-                    # 预计算段(close / daily / 价格特征)仍按全决策日构建,
-                    # 前缀期槽位预建后即刻释放。
+                    # close 历史保留预热数据,daily 与价格特征只预建后缀。
                     pipeline = await self._load(resume=resume)
                     # issue #463:流式输入下 resume_from 的种子校验需要前缀
                     # 冻结输入 —— 先从输入流预取 len(resume) 期(#470 前半场:
@@ -3324,7 +3341,8 @@ class SignalEnginePipelineAdapter:
                 resume = None
             collected: list[DecisionLedgerRecord] = []
             if resume_all is not None:
-                for decision in resume_all:
+                while resume_all:
+                    decision = resume_all.popleft()
                     yield decision
                     # issue #473:append 账本级记录 —— yield 出去的仍是完整
                     # bundle(coordinator 校验/持久化用),列表只留落库后的
@@ -3535,6 +3553,7 @@ def build_signal_engine_adapter_factory(
     *,
     release_root: str | Path | None = None,
     settings_factory: Callable[[], Any] | None = None,
+    prefetch_next_batch: bool = True,
 ) -> Callable[[ResearchRunManifest], ResearchStrategyAdapter]:
     """构造 CLI 可注入的 ``AdapterFactory``(multi_factor / user_code 分发)。
 
@@ -3748,6 +3767,8 @@ def build_signal_engine_adapter_factory(
             suspension_view_factory=_suspension_view_factory,
             trading_days_loader=_trading_days_loader,
             precompute_phase_reporter=precompute_phase_reporter,
+            precompute_cancel_probe=precompute_cancel_probe,
+            prefetch_next_batch=prefetch_next_batch,
         )
 
     return _factory

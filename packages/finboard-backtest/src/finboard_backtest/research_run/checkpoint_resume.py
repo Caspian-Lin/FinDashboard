@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import cast
@@ -53,7 +54,7 @@ from finboard_backtest.research_run.contracts import (
     RiskExitOutcome,
     TargetPosition,
     UniverseCandidate,
-    stable_checksum,
+    stable_checksum_normalized,
 )
 
 logger = structlog.get_logger(__name__)
@@ -226,7 +227,8 @@ def _verify_stage_checksums(
     """逐 artifact 复验载荷校验和(存储损坏的读回防线)。"""
 
     for stage, artifact in sorted(by_stage.items(), key=lambda item: item[0].value):
-        if stable_checksum(artifact.payload) != artifact.checksum:
+        # 存储返回 JSON 规范化对象,直接复验原 canonical 字节,省掉全截面的递归拷贝。
+        if stable_checksum_normalized(artifact.payload) != artifact.checksum:
             raise ValueError(
                 f"artifact {artifact.artifact_id}(run={run_id}"
                 f" decision#{index} stage={stage.value})载荷校验和不一致"
@@ -347,6 +349,7 @@ def rebuild_decision(
     orders = stage_payload(ResearchRunStage.ORDERS)
     fills = stage_payload(ResearchRunStage.FILLS)
     ledger_stage = stage_payload(ResearchRunStage.LEDGER)
+    feature_metadata = _FeatureMetadata()
 
     return DecisionBundle(
         business_date=_as_date(
@@ -364,7 +367,7 @@ def rebuild_decision(
             )
         ),
         features=tuple(
-            _rebuild_feature(item, f"{label} features[{position}]")
+            _rebuild_feature(item, f"{label} features[{position}]", feature_metadata)
             for position, item in enumerate(
                 _require_list(_field(features, "features", f"{label} features"), label)
             )
@@ -470,19 +473,36 @@ def _rebuild_candidate(value: object, label: str) -> UniverseCandidate:
     )
 
 
-def _rebuild_feature(value: object, label: str) -> FeatureValue:
+@dataclass(slots=True)
+class _FeatureMetadata:
+    """同一决策的冻结特征共享重复的不可变元数据。"""
+
+    names: dict[str, str] = field(default_factory=dict)
+    sources: dict[tuple[str, ...], tuple[str, ...]] = field(default_factory=dict)
+    timestamps: dict[str, datetime] = field(default_factory=dict)
+
+
+def _rebuild_feature(value: object, label: str, metadata: _FeatureMetadata) -> FeatureValue:
     item = _mapping(value, label)
     raw_value = _field(item, "value", label)
+    symbol = _as_str(_field(item, "symbol", label), f"{label}.symbol")
+    feature_id = _as_str(_field(item, "feature_id", label), f"{label}.feature_id")
+    measured = None if raw_value is None else _as_float(raw_value, f"{label}.value")
+    sources = _as_str_list(
+        _field(item, "source_artifact_ids", label), f"{label}.source_artifact_ids"
+    )
+    timestamp_text = _as_str(_field(item, "available_at", label), f"{label}.available_at")
+    available_at = metadata.timestamps.get(timestamp_text)
+    if available_at is None:
+        # 保留原时区偏移。同一瞬间的不同 ISO 表示可能有不同的 canonical 字节。
+        available_at = _as_datetime(timestamp_text, f"{label}.available_at")
+        metadata.timestamps[timestamp_text] = available_at
     return FeatureValue(
-        symbol=_as_str(_field(item, "symbol", label), f"{label}.symbol"),
-        feature_id=_as_str(_field(item, "feature_id", label), f"{label}.feature_id"),
-        value=None if raw_value is None else _as_float(raw_value, f"{label}.value"),
-        source_artifact_ids=_as_str_list(
-            _field(item, "source_artifact_ids", label), f"{label}.source_artifact_ids"
-        ),
-        available_at=_as_datetime(
-            _field(item, "available_at", label), f"{label}.available_at"
-        ),
+        symbol=metadata.names.setdefault(symbol, symbol),
+        feature_id=metadata.names.setdefault(feature_id, feature_id),
+        value=measured,
+        source_artifact_ids=metadata.sources.setdefault(sources, sources),
+        available_at=available_at,
     )
 
 

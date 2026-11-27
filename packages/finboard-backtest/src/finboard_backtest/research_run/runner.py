@@ -53,6 +53,7 @@ from finboard_backtest.research_run.failure_context import (
     FailureContext,
     build_failure_summary,
 )
+from finboard_backtest.research_run.stage_timing import collect_stage_timings
 from finboard_backtest.research_run.store import ResearchRunStore
 from finboard_data.cache import ParquetReadJobStats, collect_parquet_read_stats
 
@@ -258,7 +259,9 @@ class ResearchRunCoordinator:
             # 的适配器跳过前缀重算(#304 getattr 探测先例;不支持 / 拒绝 /
             # 读回失败一律走既有全量重算路径 —— 幂等去重保证正确性,
             # 「宁重算不漂移」)。
+            resume_started = time.monotonic()
             resume_prefix = await self._load_resume_prefix(manifest.run_id)
+            resume_seconds = time.monotonic() - resume_started if resume_prefix else None
             if resume_prefix:
                 self._offer_resume(manifest.run_id, adapter, resume_prefix)
                 # #470 前半场:种子引用即刻移交 —— 适配器接受后自行持有
@@ -284,7 +287,10 @@ class ResearchRunCoordinator:
             failure_ctx.stage = "decision_load"
             decision_iterator = adapter.decisions(manifest)
             try:
-                with collect_parquet_read_stats() as parquet_stats:
+                with (
+                    collect_parquet_read_stats() as parquet_stats,
+                    collect_stage_timings() as stage_timings,
+                ):
                     while True:
                         load_started = time.monotonic()
                         try:
@@ -389,6 +395,11 @@ class ResearchRunCoordinator:
                 report_elapsed=report_elapsed,
                 parquet_stats=parquet_stats,
             )
+            stage_totals = stage_timings.as_dict()
+            if stage_totals:
+                timing["decision_load_stages"] = stage_totals
+            if resume_seconds is not None:
+                timing["resume_prefix_readback_seconds"] = round(resume_seconds, 3)
             await self._store.save_result(
                 manifest.run_id,
                 report=report,

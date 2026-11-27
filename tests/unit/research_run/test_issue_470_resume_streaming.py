@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -25,6 +26,10 @@ from finboard_backtest.research_run import (
     iter_completed_decision_prefix,
     stable_checksum,
     to_json_value,
+)
+from finboard_backtest.research_run.checkpoint_resume import (
+    _FeatureMetadata,
+    _rebuild_feature,
 )
 from finboard_backtest.research_run.contracts import DecisionBundle
 from finboard_backtest.research_run.runner import ResearchRunCoordinator
@@ -83,6 +88,30 @@ async def test_streaming_prefix_equals_list_version(
     streamed = await _streamed_prefix(store, run_id)
     assert len(listed) == 3
     assert streamed == listed
+
+
+async def test_rebuild_features_share_metadata_with_exact_timestamp_fidelity() -> None:
+    payload = {
+        "symbol": "fixture-instrument.SH",
+        "feature_id": "fixture-observation",
+        "source_artifact_ids": ["frozen-fixture-release"],
+        "available_at": "2024-01-02T15:00:00+08:00",
+        "value": 1.5,
+    }
+    metadata = _FeatureMetadata()
+    encoded = json.dumps(payload)
+    first = _rebuild_feature(json.loads(encoded), "first feature", metadata)
+    second = _rebuild_feature(json.loads(encoded), "second feature", metadata)
+    assert first.symbol is second.symbol
+    assert first.feature_id is second.feature_id
+    assert first.source_artifact_ids is second.source_artifact_ids
+    assert first.available_at is second.available_at
+    assert to_json_value(first) == payload
+
+    utc_payload = {**payload, "available_at": "2024-01-02T07:00:00+00:00"}
+    utc_value = _rebuild_feature(utc_payload, "UTC feature", metadata)
+    assert first.available_at == utc_value.available_at
+    assert to_json_value(utc_value) == utc_payload
 
 
 async def test_streaming_prefix_truncates_with_list_version(

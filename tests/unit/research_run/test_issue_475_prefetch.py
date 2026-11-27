@@ -11,6 +11,7 @@ import pytest
 
 import finboard_backtest.research_run.signal_engine as signal_engine
 from finboard_backtest.research_run.contracts import (
+    ResearchRunInterruptedError,
     ResearchRunManifest,
 )
 from finboard_backtest.research_run.failure_context import read_decision_load_context
@@ -83,6 +84,32 @@ async def _make_stream(
 
 
 class TestDecisionLoadPrefetch:
+    async def test_cancel_during_precompute_abandons_pool(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[str] = []
+
+        class Pool:
+            def retire(self) -> None:
+                events.append("retired")
+
+            async def aclose(self) -> None:
+                events.append("closed")
+
+        async def start(*args: Any) -> Pool:
+            return Pool()
+
+        async def abort_precompute(*args: Any, **kwargs: Any) -> None:
+            raise ResearchRunInterruptedError("cancel precompute")
+
+        monkeypatch.setattr(signal_engine, "_start_period_feature_pool", start)
+        monkeypatch.setattr(FrozenInputLoader, "ensure_close_histories", abort_precompute)
+        _, _, stream = await _make_stream(tmp_path, process_workers=2)
+        with pytest.raises(ResearchRunInterruptedError, match="cancel precompute"):
+            await stream.__anext__()
+        assert events == ["retired", "closed"]
+        assert _prefetch_tasks() == []
+
     async def test_next_batch_starts_while_current_batch_is_consumed(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
