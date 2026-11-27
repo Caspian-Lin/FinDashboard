@@ -4,7 +4,7 @@
 
 ## 主题 / 结论
 
-OpenCode agent 用 `finboard_run_get(view=summary)` 查询真实多期运行
+外部研究 Agent(外部 Harness)用 `finboard_run_get(view=summary)` 查询真实多期运行
 `RR-169678a2196b8842ac8f28fb`(7203 artifacts / ≈5.9GB 逻辑 JSON,rejected
 multi_factor)时报 MCP error -32001;FinDashboard API/MCP Python 进程从约
 170MB 涨到 **13.27GB**,PostgreSQL 活动查询可见
@@ -93,4 +93,4 @@ SELECT,dev server 驻留 20.6GB;经线上 MCP 端口复现锁定肇事工具 =
 - MCP 进程内存飙升排查顺序:`pg_stat_activity` 看是否在拉 payload 大列 →
   Python 进程 RSS 采样定位;恢复 = 终止进程(查询只读,cancel 无副作用,
   PG 侧可 `pg_cancel_backend`),然后先修查询路径再重启 dev server
-  (内嵌 `finboard_mcp` 随 finboard-app 启动,改代码后须重启才生效)。
+  (独立 `finboard_mcp` 进程,改代码后须重启该进程才生效)。

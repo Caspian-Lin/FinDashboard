@@ -48,6 +48,10 @@ from finboard_persistence.lifecycle_sync import (
     persist_tushare_lifecycle_events,
 )
 from finboard_persistence.mcp_audit_repo import McpAuditRepository
+from finboard_persistence.mcp_client_repo import (
+    McpClientConflictError,
+    McpClientRepository,
+)
 from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
@@ -73,9 +77,11 @@ from finboard_persistence.models import (
     InstrumentModel,
     InstrumentNameModel,
     McpAuditEventModel,
+    McpClientModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    ResearchAuditEventModel,
     ResearchBalanceSheetModel,
     ResearchCashflowStatementModel,
     ResearchCodeArtifactModel,
@@ -95,6 +101,7 @@ from finboard_persistence.models import (
     ResearchRunModel,
     ResearchStrategySpecModel,
     ResearchSyncBatchModel,
+    ResearchTopicLinkModel,
     ResearchTrialModel,
     SimulationAccountModel,
     SimulationAuditModel,
@@ -124,6 +131,7 @@ from finboard_persistence.repo import (
     StrategyPresetRepository,
     WatchlistRepository,
 )
+from finboard_persistence.research_audit_repo import ResearchAuditRepository
 from finboard_persistence.research_code_repo import (
     ResearchCodeArtifact,
     ResearchCodeArtifactRepository,
@@ -150,6 +158,10 @@ from finboard_persistence.research_run_repo import (
     ResearchRunRepository,
 )
 from finboard_persistence.research_sync import ResearchDataSyncService
+from finboard_persistence.research_topic_link_repo import (
+    ResearchTopicLinkConflictError,
+    ResearchTopicLinkRepository,
+)
 from finboard_persistence.session import session_factory
 from finboard_persistence.strategy_spec_repo import (
     ResearchStrategySpecRepository,
@@ -225,6 +237,9 @@ __all__ = [
     "InstrumentSyncResult",
     "McpAuditEventModel",
     "McpAuditRepository",
+    "McpClientConflictError",
+    "McpClientModel",
+    "McpClientRepository",
     "OrderModel",
     "OrderRepository",
     "PgTradingCalendarStore",
@@ -234,6 +249,8 @@ __all__ = [
     "ReconciliationLogRepository",
     "ReleaseInstrumentCatalogRepository",
     "ReleaseSymbolSourceError",
+    "ResearchAuditEventModel",
+    "ResearchAuditRepository",
     "ResearchBalanceSheetModel",
     "ResearchCashflowStatementModel",
     "ResearchCodeArtifact",
@@ -271,6 +288,9 @@ __all__ = [
     "ResearchSuspensionModel",
     "ResearchSyncBatchModel",
     "ResearchSyncBatchRepository",
+    "ResearchTopicLinkConflictError",
+    "ResearchTopicLinkModel",
+    "ResearchTopicLinkRepository",
     "ResearchTrialModel",
     "ResearchTrialRepository",
     "SimulationAccountModel",

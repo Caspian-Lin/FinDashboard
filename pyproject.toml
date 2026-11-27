@@ -30,7 +30,6 @@ finboard-scheduler = { workspace = true }
 finboard-backtest = { workspace = true }
 finboard-simulation = { workspace = true }
 finboard-mcp = { workspace = true }
-finboard-opencode = { workspace = true }
 finboard-data = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
@@ -96,7 +95,6 @@ known-first-party = [
   "finboard_backtest",
   "finboard_simulation",
   "finboard_mcp",
-  "finboard_opencode",
 ]
 
 # -----------------------------------------------------------------------------
@@ -131,7 +129,6 @@ mypy_path = [
   "packages/finboard-backtest/src",
   "packages/finboard-simulation/src",
   "packages/finboard-mcp/src",
-  "packages/finboard-opencode/src",
 ]
 exclude = ["migrations/versions/", "data_releases/", "data_cache/"]  # 后两者为 gitignored 本地研究数据/沙箱运行工件(容器 root 写入,Windows ACL 拒绝遍历;data_cache 下的 RCR-* 内含用户 factor.py 会被当顶层模块重复检查)
 
@@ -182,7 +179,6 @@ addopts = [
   "--cov=finboard_backtest",
   "--cov=finboard_simulation",
   "--cov=finboard_mcp",
-  "--cov=finboard_opencode",
   "--cov-report=term-missing",
 ]
 markers = [

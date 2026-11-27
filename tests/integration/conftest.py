@@ -168,9 +168,8 @@ async def api(_api_engine: Any) -> AsyncIterator[ApiTestApp]:
         account_id="test-account-api",
         db_url=TEST_DB_URL,
         risk_allow_market_order=True,
-        # 集成测试不得继承本机.env的外置研究容器/MCP开关。
-        opencode_enabled=False,
-        opencode_web_enabled=False,
+        # 集成测试不得继承本机 .env 的外置研究 MCP 开关(#520:不再有 OpenCode
+        # 托管配置,旧 FINBOARD_OPENCODE_* 键由 API 启动时告警忽略)。
         mcp_enabled=False,
     )
     app = create_app(settings)

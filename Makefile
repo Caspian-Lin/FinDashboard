@@ -7,8 +7,8 @@
 .PHONY: help install sync lint format typecheck test test-unit test-integration \
         db-up db-down db-logs migrate migrate-new run serve \
         web-install web-dev web-build web-lint \
-        opencode-serve opencode-web mcp-serve \
-        opencode-agent-image opencode-agent-smoke \
+        mcp-serve mcp-serve-http mcp-serve-http-remote \
+        mcp-client-create mcp-client-list mcp-client-revoke \
         worker dev clean
 
 PYTHON ?= python3.12
@@ -99,47 +99,43 @@ web-build: ## 构建前端生产包到 web/dist
 web-lint: ## 前端 ESLint
 	cd $(WEB_DIR) && $(NPM) run lint
 
-# --------------------------------------------------------------------------- OpenCode 研究运行时(#108/#109/#118)
-OPENCODE_PORT ?= 4097
-OPENCODE_SERVE_PORT ?= 4096
-# iframe 跨源嵌入必须允许 FinBoard 前端源
-OPENCODE_CORS ?= http://localhost:5173
-# HTTP 传输强制 Bearer 鉴权(空 token 拒绝启动);用 make mcp-serve-http MCP_AUTH_TOKEN=xxx 覆盖
-MCP_AUTH_TOKEN ?= change-me
+# --------------------------------------------------------------------------- MCP 研究工具服务(#108/#517)
+# HTTP 传输必须有服务端凭据(#517):推荐用 `make mcp-client-create` 签发
+# 按客户端凭据;旧共享 token 仅在兼容期通过 MCP_AUTH_TOKEN 显式传入(默认空)。
+MCP_AUTH_TOKEN ?=
+MCP_CLIENT_NAME ?= codex
+MCP_CLIENT_PRESET ?= readonly
 
-opencode-serve: ## 启动 opencode serve(headless HTTP API,端口 $(OPENCODE_SERVE_PORT))
-	opencode serve --port $(OPENCODE_SERVE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
+mcp-client-create: ## 签发 MCP 客户端凭据(NAME=$(MCP_CLIENT_NAME) PRESET=$(MCP_CLIENT_PRESET);明文 token 只打印一次)
+	$(UV) run finboard mcp client create --name $(MCP_CLIENT_NAME) --preset $(MCP_CLIENT_PRESET)
 
-opencode-web: ## 启动 opencode web(带 Web UI,端口 $(OPENCODE_PORT));FinBoard 托管时无需手动启动
-	opencode web --port $(OPENCODE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
+mcp-client-list: ## 列出 MCP 客户端(不显示 secret / 摘要)
+	$(UV) run finboard mcp client list
 
-mcp-serve: ## 启动 finboard-mcp(stdio 传输,供 OpenCode 子进程接入)
+mcp-client-revoke: ## 吊销 MCP 客户端(需 CLIENT_ID=MC-xxx)
+	$(UV) run finboard mcp client revoke $(CLIENT_ID)
+
+mcp-serve: ## 启动 finboard-mcp(stdio 传输,本机子进程接入;默认作用域 research.read)
 	FINBOARD_MCP_ENABLED=true $(UV) run python -m finboard_mcp
 
-mcp-serve-http: ## 启动 finboard-mcp(HTTP 传输,Docker 隔离前置;容器内 opencode 通过 host.docker.internal:8765 接入;须设 MCP_AUTH_TOKEN)
-	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN=$(MCP_AUTH_TOKEN) $(UV) run python -m finboard_mcp
+mcp-serve-http: ## 启动 finboard-mcp(本机 loopback HTTP;凭据来自 mcp_clients,或兼容期 MCP_AUTH_TOKEN)
+	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=127.0.0.1 FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN="$(MCP_AUTH_TOKEN)" $(UV) run python -m finboard_mcp
 
-# 衍生镜像 tag:与 Dockerfile ARG BASE_IMAGE 的 opencode 版本同步 bump(#313)。
-OPENCODE_AGENT_IMAGE ?= finboard-opencode-agent:1.18.15
-
-opencode-agent-image: ## 构建 OpenCode 容器衍生镜像($(OPENCODE_AGENT_IMAGE);官方镜像 + jq/python3,见 docs/opencode-agent-image.md)
-	docker build -f docker/opencode-agent/Dockerfile \
-		-t $(OPENCODE_AGENT_IMAGE) docker/opencode-agent/
-
-opencode-agent-smoke: ## 衍生镜像 smoke:jq/python3 可用 + ENTRYPOINT 完好
-	docker run --rm $(OPENCODE_AGENT_IMAGE) --version
-	docker run --rm --entrypoint /bin/sh $(OPENCODE_AGENT_IMAGE) -c 'jq --version && python3 --version'
+mcp-serve-http-remote: ## 非 loopback HTTP(容器/远程;须 TLS 反向代理 + 凭据;显式 ALLOW_REMOTE)
+	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_ALLOW_REMOTE=true FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN="$(MCP_AUTH_TOKEN)" $(UV) run python -m finboard_mcp
 
 # --------------------------------------------------------------------------- 后台任务队列
 worker: ## 启动后台任务 worker(消费研究/数据 job 队列;make dev 已默认附带)
 	$(UV) run finboard worker run
 
 # --------------------------------------------------------------------------- 一键开发
-dev: ## 一键启动开发环境(后端 :$(API_PORT) + 前端 :$(WEB_PORT) + 后台 worker,Ctrl-C 同时退出)
-	@echo "\033[36m启动后端(FastAPI :$(API_PORT)) + 前端(Vite :$(WEB_PORT)) + 后台 worker...\033[0m"
+# DEV_ARGS 透传给 finboard dev,例如 `make dev DEV_ARGS=--no-mcp`。
+DEV_ARGS ?=
+dev: ## 一键启动开发环境(API :$(API_PORT) + 前端 :$(WEB_PORT) + worker + MCP,Ctrl-C 同时退出)
+	@echo "\033[36m启动后端(FastAPI :$(API_PORT)) + 前端(Vite :$(WEB_PORT)) + 后台 worker + MCP 研究服务...\033[0m"
 	@echo "\033[33m本机数据库不可达时会自动唤醒 WSL PostgreSQL;请确保已执行 make migrate\033[0m"
-	@echo "\033[33m研究/数据 job 由随 dev 启动的 worker 消费;独立部署请用 make worker\033[0m"
-	FINBOARD_WEB_PORT=$(WEB_PORT) FINBOARD_WEB_API_PORT=$(API_PORT) $(UV) run finboard dev --port $(API_PORT) --web-dir $(WEB_DIR)
+	@echo "\033[33mMCP 仅在 mcp_transport 非 stdio(streamable-http/sse)且 mcp_enabled=true 时托管,默认 8765(受 FINBOARD_MCP_PORT 控制);开关用 make dev DEV_ARGS=--no-mcp / --no-worker\033[0m"
+	FINBOARD_WEB_PORT=$(WEB_PORT) FINBOARD_WEB_API_PORT=$(API_PORT) $(UV) run finboard dev --port $(API_PORT) --web-dir $(WEB_DIR) $(DEV_ARGS)
 
 clean: ## 清理缓存与构建产物
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov

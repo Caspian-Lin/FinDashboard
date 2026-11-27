@@ -98,7 +98,7 @@ class _RecordingStore(ResearchRunStore):
         self.calls.append("list_artifact_digests")
         return []
 
-    async def checkpoint(self) -> None:
+    async def checkpoint(self, *, commit: bool = True) -> None:
         self.calls.append("checkpoint")
 
 

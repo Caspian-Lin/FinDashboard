@@ -56,6 +56,8 @@ from typing import Any, Protocol
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from finboard_backtest.research_sandbox.mount_retention import use_mount
+
 MANIFEST_VERSION = 2
 #: 窗口挂载清单版本(issue #359,``build_window_data_mount`` 专用)
 WINDOW_MANIFEST_VERSION = 3
@@ -467,71 +469,75 @@ async def filter_window_data_mount(
         )
     ceiling = _end_of_window(new_window_end)
 
-    import pyarrow.compute as pc
+    if await asyncio.to_thread(baseline.root.resolve) == await asyncio.to_thread(out_root.resolve):
+        raise SandboxMountError("截断挂载目录须与基线挂载目录不同")
+    async with use_mount(baseline.root), use_mount(out_root):
+        import pyarrow.compute as pc
 
-    await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
-    contributions: list[MountDataset] = []
-    universe: set[str] = set()
-    for dataset in baseline.datasets:
-        source = baseline.root / dataset.file
-        if not source.exists():
-            continue
-        table = await asyncio.to_thread(pq.read_table, source)
-        if "available_at" not in table.column_names:
-            raise SandboxMountError(
-                f"基线挂载 {dataset.file} 缺少 available_at 列,无法过滤"
-                "(窗口挂载 v3 各数据集恒携带该列)"
+        contributions: list[MountDataset] = []
+        universe: set[str] = set()
+        for dataset in baseline.datasets:
+            source = baseline.root / dataset.file
+            if not source.exists():
+                if dataset.row_count:
+                    raise SandboxMountError(f"基线挂载缺少已登记的数据文件: {dataset.file}")
+                continue
+            table = await asyncio.to_thread(pq.read_table, source)
+            if "available_at" not in table.column_names:
+                raise SandboxMountError(
+                    f"基线挂载 {dataset.file} 缺少 available_at 列,无法过滤"
+                    "(窗口挂载 v3 各数据集恒携带该列)"
+                )
+            keep = pc.invert(
+                pc.fill_null(pc.greater(table.column("available_at"), ceiling), False)
             )
-        keep = pc.invert(
-            pc.fill_null(pc.greater(table.column("available_at"), ceiling), False)
+            filtered = table.filter(keep)
+            date_field = _DATASET_DATE_FIELD.get(dataset.dataset_kind)
+            if date_field is not None and filtered.num_rows:
+                _guard_window_pit_table(
+                    filtered, date_field, dataset.release_id, new_window_end
+                )
+            if dataset.dataset_kind == "bars" and filtered.num_rows:
+                universe.update(filtered.column("symbol").unique().to_pylist())
+            max_day: date | None = None
+            if date_field is not None and filtered.num_rows:
+                max_day = pc.max(filtered.column(date_field)).as_py()
+            await asyncio.to_thread(
+                _write_table_parquet, out_root / dataset.file, filtered
+            )
+            contributions.append(
+                MountDataset(
+                    release_id=dataset.release_id,
+                    dataset_kind=dataset.dataset_kind,
+                    file=dataset.file,
+                    row_count=filtered.num_rows,
+                    max_data_date=max_day,
+                )
+            )
+
+        mount = WindowDataMount(
+            root=out_root,
+            window_start=baseline.window_start,
+            window_end=new_window_end,
+            dates=ordered_dates,
+            symbols=tuple(sorted(universe)),
+            datasets=tuple(contributions),
+            manifest_checksum="",
+            code_artifact=baseline.code_artifact,
+            code_commit=baseline.code_commit,
+            release_id=baseline.release_id,
+            dataset_release_ids=baseline.dataset_release_ids,
         )
-        filtered = table.filter(keep)
-        date_field = _DATASET_DATE_FIELD.get(dataset.dataset_kind)
-        if date_field is not None and filtered.num_rows:
-            _guard_window_pit_table(
-                filtered, date_field, dataset.release_id, new_window_end
-            )
-        if dataset.dataset_kind == "bars" and filtered.num_rows:
-            universe.update(filtered.column("symbol").unique().to_pylist())
-        max_day: date | None = None
-        if date_field is not None and filtered.num_rows:
-            max_day = pc.max(filtered.column(date_field)).as_py()
+        payload = json.dumps(
+            {**mount.manifest_dict(), "generated_at": datetime.now(UTC).isoformat()},
+            ensure_ascii=False,
+            indent=2,
+        )
         await asyncio.to_thread(
-            _write_table_parquet, out_root / dataset.file, filtered
+            mount.manifest_path.write_text, payload, encoding="utf-8"
         )
-        contributions.append(
-            MountDataset(
-                release_id=dataset.release_id,
-                dataset_kind=dataset.dataset_kind,
-                file=dataset.file,
-                row_count=filtered.num_rows,
-                max_data_date=max_day,
-            )
-        )
-
-    mount = WindowDataMount(
-        root=out_root,
-        window_start=baseline.window_start,
-        window_end=new_window_end,
-        dates=ordered_dates,
-        symbols=tuple(sorted(universe)),
-        datasets=tuple(contributions),
-        manifest_checksum="",
-        code_artifact=baseline.code_artifact,
-        code_commit=baseline.code_commit,
-        release_id=baseline.release_id,
-        dataset_release_ids=baseline.dataset_release_ids,
-    )
-    payload = json.dumps(
-        {**mount.manifest_dict(), "generated_at": datetime.now(UTC).isoformat()},
-        ensure_ascii=False,
-        indent=2,
-    )
-    await asyncio.to_thread(
-        mount.manifest_path.write_text, payload, encoding="utf-8"
-    )
-    checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return replace(mount, manifest_checksum=checksum)
+        checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return replace(mount, manifest_checksum=checksum)
 
 
 def _write_table_parquet(path: Path, table: pa.Table) -> None:

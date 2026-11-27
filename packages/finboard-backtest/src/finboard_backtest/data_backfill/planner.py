@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_backtest.background_jobs.dataset_sync.spec import (
@@ -1024,7 +1024,16 @@ async def _resolve_item_types(
     if not item_symbols:
         return {}
     if scope.types:
-        return {code: scope.types.get(code, "unknown") for code in item_symbols}
+        extra_codes = tuple(code for code in item_symbols if code not in scope.types)
+        extra_types = (
+            await _instrument_rows(session, extra_codes)
+            if extra_codes and len(extra_codes) <= _MAX_SYMBOL_FILTER
+            else {}
+        )
+        return {
+            code: scope.types.get(code, extra_types.get(code, "unknown"))
+            for code in item_symbols
+        }
     if len(item_symbols) <= _MAX_SYMBOL_FILTER:
         return await _instrument_rows(session, item_symbols)
     return {}
@@ -1198,13 +1207,13 @@ async def _release_coverage(
         ResearchDatasetReleaseInstrumentModel.end_date >= start,
         ResearchDatasetReleaseInstrumentModel.start_date <= end,
     ]
-    if source and source != "mixed" and support.sync_mode != "bulk_download":
-        # 研究数据发布按 source 严格隔离(异源不混接);bars 发布固定是
-        # ``multi_asset_mixed``(source=mixed,逐标的实际来源写质量报告),
-        # 因此 bars 的覆盖只按复权口径 + 窗口 + 标的匹配。
-        conditions.append(ResearchDatasetReleaseModel.source == source)
     if support.sync_mode == "bulk_download":
         conditions.append(ResearchDatasetReleaseModel.adjustment == adjustment)
+        if source.strip().lower() == "tushare":
+            # Tushare bars 冻结走严格单源。旧 mixed 发布无法证明整份发布同源。
+            conditions.append(ResearchDatasetReleaseModel.source == "tushare")
+    elif source and source != "mixed":
+        conditions.append(ResearchDatasetReleaseModel.source == source)
     if symbols and len(symbols) <= _MAX_SYMBOL_FILTER:
         conditions.append(
             ResearchDatasetReleaseInstrumentModel.code.in_(tuple(symbols))
@@ -1294,7 +1303,13 @@ async def _conflicting_release_count(
         ResearchDatasetReleaseModel.start_date <= end,
     ]
     if support.sync_mode == "bulk_download":
-        conditions.append(ResearchDatasetReleaseModel.adjustment != adjustment)
+        adjustment_mismatch = ResearchDatasetReleaseModel.adjustment != adjustment
+        if source.strip().lower() == "tushare":
+            conditions.append(
+                or_(adjustment_mismatch, ResearchDatasetReleaseModel.source != "tushare")
+            )
+        else:
+            conditions.append(adjustment_mismatch)
     else:
         conditions.append(ResearchDatasetReleaseModel.source != source)
     stmt = select(

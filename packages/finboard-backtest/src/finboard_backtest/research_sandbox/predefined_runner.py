@@ -72,6 +72,7 @@ from finboard_backtest.research_sandbox.factor_publish import (
     SeriesQualityReport,
     check_series_quality,
 )
+from finboard_backtest.research_sandbox.mount_retention import use_mount
 from finboard_backtest.research_sandbox.runner import (
     FactorSeriesRunSpec,
     _series_providers,
@@ -509,148 +510,149 @@ async def run_predefined_factor_series(
     run_dir = workspace / f"FSP-{uuid.uuid4().hex[:12]}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    benchmark = benchmark_only_symbols
-    industry: dict[str, str | None] | None = (
-        dict(industry_groups) if industry_groups is not None else None
-    )
-    release_checksums: dict[str, str] = {}
-    if mount_override is not None:
-        _validate_mount_override(spec, mount_override)
-        mount = mount_override
-        if benchmark is None:
-            raise SandboxError(
-                "mount_spec_mismatch",
-                "mount_override 路径须显式传入 benchmark_only_symbols"
-                "(审计变体从基线产物继承,#380 基准集不随挂载重派生)",
-            )
-        if industry is None:
-            raise SandboxError(
-                "mount_spec_mismatch",
-                "mount_override 路径须显式传入 industry_groups"
-                "(审计变体从基线产物继承,#400 行业分组不随挂载重派生)",
-            )
-    else:
-        providers, release_checksums = await _series_providers(
-            spec, release_provider_factory, settings
+    async with use_mount(mount_override.root if mount_override else run_dir / "data"):
+        benchmark = benchmark_only_symbols
+        industry: dict[str, str | None] | None = (
+            dict(industry_groups) if industry_groups is not None else None
         )
-        mount = await build_window_data_mount(
-            providers=providers,
-            window_start=spec.window_start,
-            window_end=spec.window_end,
+        release_checksums: dict[str, str] = {}
+        if mount_override is not None:
+            _validate_mount_override(spec, mount_override)
+            mount = mount_override
+            if benchmark is None:
+                raise SandboxError(
+                    "mount_spec_mismatch",
+                    "mount_override 路径须显式传入 benchmark_only_symbols"
+                    "(审计变体从基线产物继承,#380 基准集不随挂载重派生)",
+                )
+            if industry is None:
+                raise SandboxError(
+                    "mount_spec_mismatch",
+                    "mount_override 路径须显式传入 industry_groups"
+                    "(审计变体从基线产物继承,#400 行业分组不随挂载重派生)",
+                )
+        else:
+            providers, release_checksums = await _series_providers(
+                spec, release_provider_factory, settings
+            )
+            mount = await build_window_data_mount(
+                providers=providers,
+                window_start=spec.window_start,
+                window_end=spec.window_end,
+                dates=spec.dates,
+                out_root=run_dir / "data",
+                code_artifact=spec.code_artifact,
+                code_commit=spec.code_commit,
+                release_id=spec.release_id,
+                dataset_release_ids=spec.dataset_release_ids,
+                on_batch=mount_on_batch,
+            )
+            if benchmark is None or industry is None:
+                from finboard_backtest.strategy_spec.universe_precheck import (
+                    is_benchmark_only_instrument,
+                )
+
+                benchmark = frozenset(
+                    str(item.code)
+                    for item in providers[0].release.instruments
+                    if is_benchmark_only_instrument(item)
+                )
+                # 行业标签自冻结发布 instruments.industry(#185);getattr
+                # 探针兼容无该字段的 provider/测试 stub(#304 先例),缺失
+                # 视为 None → 因子侧缺组缺测可计数。
+                industry = {
+                    str(item.code): getattr(item, "industry", None)
+                    for item in providers[0].release.instruments
+                    if not is_benchmark_only_instrument(item)
+                }
+
+        bars_table = _read_mount_table(mount.root / "bars.parquet")
+        needs_daily = any(
+            dep.startswith("daily_metrics.") for dep in definition.data_dependencies
+        )
+        daily_path = mount.root / "daily_metrics.parquet"
+        daily_table = _read_mount_table(daily_path) if needs_daily and daily_path.exists() else None
+        # issue #401/#402:声明公告类数据集依赖的因子自对应发布挂载装配公告
+        # 序列 / 分红事件史;未挂载(联合发布未声明该 kind)→ 空表缺省,因子
+        # 取数口返回空映射(与财务因子「未挂载 → 空映射」同语义)。
+        dataset_tables: dict[str, Any] = {}
+        needed_kinds = {
+            dep.split(".", 1)[0]
+            for dep in definition.data_dependencies
+            if dep.split(".", 1)[0] in _ANNOUNCED_MOUNT_KINDS
+        }
+        for dataset_kind in needed_kinds:
+            table_path = mount.root / f"{dataset_kind}.parquet"
+            if table_path.exists():
+                dataset_tables[dataset_kind] = _read_mount_table(table_path)
+
+        mount_series = _symbol_series_from_table(bars_table, "close")
+        mount_symbols = tuple(sorted(mount_series))
+        tradable = tuple(
+            symbol for symbol in mount_symbols if symbol not in benchmark
+        )
+        value_universe = tradable if definition.cross_section else mount_symbols
+        industry_map = industry or {}
+        # 缺组计数只覆盖可交易域(基准标的刻意不在分组映射中,不算缺失)
+        industry_missing = sum(1 for symbol in tradable if not industry_map.get(symbol))
+
+        inp = _MountFactorInput(
+            definition=definition,
+            bars_table=bars_table,
+            daily_table=daily_table,
+            dataset_tables=dataset_tables,
+            mount_symbols=mount_symbols,
+            decision_dates=tuple(spec.dates),
+            value_universe=value_universe,
+            tradable_symbols=tradable,
+            benchmark_only_symbols=benchmark,
+            industry_groups=industry_map,
+        )
+        frame = definition.compute(inp)
+        _validate_frame(frame, spec)
+
+        quality = check_series_quality(
+            frame,
             dates=spec.dates,
-            out_root=run_dir / "data",
+            universe=list(value_universe),
+            max_nan_ratio=settings.research_sandbox_max_nan_ratio,
+            min_coverage=settings.research_sandbox_min_coverage,
+        )
+        elapsed = round(time.monotonic() - started, 3)
+        return PredefinedFactorSeriesOutput(
             code_artifact=spec.code_artifact,
             code_commit=spec.code_commit,
             release_id=spec.release_id,
-            dataset_release_ids=spec.dataset_release_ids,
-            on_batch=mount_on_batch,
+            dataset_release_ids=tuple(spec.dataset_release_ids),
+            params=dict(spec.params),
+            window_start=spec.window_start,
+            window_end=spec.window_end,
+            dates=tuple(spec.dates),
+            values=frame,
+            quality=quality,
+            metrics={
+                "mode": "predefined_inprocess",
+                "factor": spec.code_artifact,
+                "implementation_commit": spec.code_commit,
+                "cross_section": definition.cross_section,
+                "data_dependencies": list(definition.data_dependencies),
+                "value_symbols": len(value_universe),
+                "mount_symbols": len(mount_symbols),
+                "benchmark_only_excluded": definition.cross_section,
+                "industry_groups_mapped": sum(
+                    1 for symbol in tradable if industry_map.get(symbol)
+                ),
+                "industry_groups_missing": industry_missing,
+                "elapsed_seconds": elapsed,
+                "release_checksums": release_checksums,
+            },
+            mount_manifest_checksum=mount.manifest_checksum,
+            value_symbols=tuple(value_universe),
+            workspace_dir=run_dir,
+            mount=mount,
+            benchmark_only_symbols=benchmark,
+            industry_groups=industry_map,
         )
-        if benchmark is None or industry is None:
-            from finboard_backtest.strategy_spec.universe_precheck import (
-                is_benchmark_only_instrument,
-            )
-
-            benchmark = frozenset(
-                str(item.code)
-                for item in providers[0].release.instruments
-                if is_benchmark_only_instrument(item)
-            )
-            # 行业标签自冻结发布 instruments.industry(#185);getattr
-            # 探针兼容无该字段的 provider/测试 stub(#304 先例),缺失
-            # 视为 None → 因子侧缺组缺测可计数。
-            industry = {
-                str(item.code): getattr(item, "industry", None)
-                for item in providers[0].release.instruments
-                if not is_benchmark_only_instrument(item)
-            }
-
-    bars_table = _read_mount_table(mount.root / "bars.parquet")
-    needs_daily = any(
-        dep.startswith("daily_metrics.") for dep in definition.data_dependencies
-    )
-    daily_path = mount.root / "daily_metrics.parquet"
-    daily_table = _read_mount_table(daily_path) if needs_daily and daily_path.exists() else None
-    # issue #401/#402:声明公告类数据集依赖的因子自对应发布挂载装配公告
-    # 序列 / 分红事件史;未挂载(联合发布未声明该 kind)→ 空表缺省,因子
-    # 取数口返回空映射(与财务因子「未挂载 → 空映射」同语义)。
-    dataset_tables: dict[str, Any] = {}
-    needed_kinds = {
-        dep.split(".", 1)[0]
-        for dep in definition.data_dependencies
-        if dep.split(".", 1)[0] in _ANNOUNCED_MOUNT_KINDS
-    }
-    for dataset_kind in needed_kinds:
-        table_path = mount.root / f"{dataset_kind}.parquet"
-        if table_path.exists():
-            dataset_tables[dataset_kind] = _read_mount_table(table_path)
-
-    mount_series = _symbol_series_from_table(bars_table, "close")
-    mount_symbols = tuple(sorted(mount_series))
-    tradable = tuple(
-        symbol for symbol in mount_symbols if symbol not in benchmark
-    )
-    value_universe = tradable if definition.cross_section else mount_symbols
-    industry_map = industry or {}
-    # 缺组计数只覆盖可交易域(基准标的刻意不在分组映射中,不算缺失)
-    industry_missing = sum(1 for symbol in tradable if not industry_map.get(symbol))
-
-    inp = _MountFactorInput(
-        definition=definition,
-        bars_table=bars_table,
-        daily_table=daily_table,
-        dataset_tables=dataset_tables,
-        mount_symbols=mount_symbols,
-        decision_dates=tuple(spec.dates),
-        value_universe=value_universe,
-        tradable_symbols=tradable,
-        benchmark_only_symbols=benchmark,
-        industry_groups=industry_map,
-    )
-    frame = definition.compute(inp)
-    _validate_frame(frame, spec)
-
-    quality = check_series_quality(
-        frame,
-        dates=spec.dates,
-        universe=list(value_universe),
-        max_nan_ratio=settings.research_sandbox_max_nan_ratio,
-        min_coverage=settings.research_sandbox_min_coverage,
-    )
-    elapsed = round(time.monotonic() - started, 3)
-    return PredefinedFactorSeriesOutput(
-        code_artifact=spec.code_artifact,
-        code_commit=spec.code_commit,
-        release_id=spec.release_id,
-        dataset_release_ids=tuple(spec.dataset_release_ids),
-        params=dict(spec.params),
-        window_start=spec.window_start,
-        window_end=spec.window_end,
-        dates=tuple(spec.dates),
-        values=frame,
-        quality=quality,
-        metrics={
-            "mode": "predefined_inprocess",
-            "factor": spec.code_artifact,
-            "implementation_commit": spec.code_commit,
-            "cross_section": definition.cross_section,
-            "data_dependencies": list(definition.data_dependencies),
-            "value_symbols": len(value_universe),
-            "mount_symbols": len(mount_symbols),
-            "benchmark_only_excluded": definition.cross_section,
-            "industry_groups_mapped": sum(
-                1 for symbol in tradable if industry_map.get(symbol)
-            ),
-            "industry_groups_missing": industry_missing,
-            "elapsed_seconds": elapsed,
-            "release_checksums": release_checksums,
-        },
-        mount_manifest_checksum=mount.manifest_checksum,
-        value_symbols=tuple(value_universe),
-        workspace_dir=run_dir,
-        mount=mount,
-        benchmark_only_symbols=benchmark,
-        industry_groups=industry_map,
-    )
 
 
 def _validate_frame(frame: FactorSeriesFrame, spec: FactorSeriesRunSpec) -> None:
@@ -740,59 +742,60 @@ async def build_window_eval_bundle(
     workspace = Path(settings.research_sandbox_workspace_root)
     run_dir = workspace / f"FSE-{uuid.uuid4().hex[:12]}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    mount = await build_window_data_mount(
-        providers=providers,
-        window_start=spec.window_start,
-        window_end=spec.window_end,
-        dates=spec.dates,
-        out_root=run_dir / "data",
-        code_artifact=spec.code_artifact,
-        code_commit=spec.code_commit,
-        release_id=spec.release_id,
-        dataset_release_ids=spec.dataset_release_ids,
-    )
-    benchmark = frozenset(
-        str(item.code)
-        for item in providers[0].release.instruments
-        if is_benchmark_only_instrument(item)
-    )
-    industry = {
-        str(item.code): getattr(item, "industry", None)
-        for item in providers[0].release.instruments
-        if not is_benchmark_only_instrument(item)
-    }
+    async with use_mount(run_dir / "data"):
+        mount = await build_window_data_mount(
+            providers=providers,
+            window_start=spec.window_start,
+            window_end=spec.window_end,
+            dates=spec.dates,
+            out_root=run_dir / "data",
+            code_artifact=spec.code_artifact,
+            code_commit=spec.code_commit,
+            release_id=spec.release_id,
+            dataset_release_ids=spec.dataset_release_ids,
+        )
+        benchmark = frozenset(
+            str(item.code)
+            for item in providers[0].release.instruments
+            if is_benchmark_only_instrument(item)
+        )
+        industry = {
+            str(item.code): getattr(item, "industry", None)
+            for item in providers[0].release.instruments
+            if not is_benchmark_only_instrument(item)
+        }
 
-    bars_table = _read_mount_table(mount.root / "bars.parquet")
-    daily_path = mount.root / "daily_metrics.parquet"
-    daily_table = _read_mount_table(daily_path) if daily_path.exists() else None
-    dataset_tables: dict[str, Any] = {}
-    for dataset_kind in _ANNOUNCED_MOUNT_KINDS:
-        table_path = mount.root / f"{dataset_kind}.parquet"
-        if table_path.exists():
-            dataset_tables[dataset_kind] = _read_mount_table(table_path)
+        bars_table = _read_mount_table(mount.root / "bars.parquet")
+        daily_path = mount.root / "daily_metrics.parquet"
+        daily_table = _read_mount_table(daily_path) if daily_path.exists() else None
+        dataset_tables: dict[str, Any] = {}
+        for dataset_kind in _ANNOUNCED_MOUNT_KINDS:
+            table_path = mount.root / f"{dataset_kind}.parquet"
+            if table_path.exists():
+                dataset_tables[dataset_kind] = _read_mount_table(table_path)
 
-    close_series = _symbol_series_from_table(bars_table, "close")
-    mount_symbols = tuple(sorted(close_series))
-    close_panel: dict[date, dict[str, float]] = {}
-    for symbol, series in close_series.items():
-        for position, day in enumerate(series.dates):
-            value = float(series.values[position])
-            if math.isfinite(value):
-                close_panel.setdefault(day, {})[symbol] = value
-    tradable = tuple(s for s in mount_symbols if s not in benchmark)
+        close_series = _symbol_series_from_table(bars_table, "close")
+        mount_symbols = tuple(sorted(close_series))
+        close_panel: dict[date, dict[str, float]] = {}
+        for symbol, series in close_series.items():
+            for position, day in enumerate(series.dates):
+                value = float(series.values[position])
+                if math.isfinite(value):
+                    close_panel.setdefault(day, {})[symbol] = value
+        tradable = tuple(s for s in mount_symbols if s not in benchmark)
 
-    return MountEvalBundle(
-        mount=mount,
-        bars_table=bars_table,
-        daily_table=daily_table,
-        dataset_tables=dataset_tables,
-        mount_symbols=mount_symbols,
-        tradable_symbols=tradable,
-        benchmark_only_symbols=benchmark,
-        industry_groups=industry,
-        close_panel=close_panel,
-        decision_dates=tuple(spec.dates),
-    )
+        return MountEvalBundle(
+            mount=mount,
+            bars_table=bars_table,
+            daily_table=daily_table,
+            dataset_tables=dataset_tables,
+            mount_symbols=mount_symbols,
+            tradable_symbols=tradable,
+            benchmark_only_symbols=benchmark,
+            industry_groups=industry,
+            close_panel=close_panel,
+            decision_dates=tuple(spec.dates),
+        )
 
 
 def _default_series_settings() -> Any | None:

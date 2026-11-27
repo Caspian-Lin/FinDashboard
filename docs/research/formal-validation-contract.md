@@ -27,3 +27,11 @@ IS逐trial提交，失败计预算，续跑复用持久化trial与确定性子ru
 2Bar延迟没有执行入口，unsupported；不得移动决策日伪装延迟。WF最差窗口只属窗口敏感性，非参数邻域；请求neighbourhood_steps>0但无扫描时unsupported。缺支持、失败或超时不能全通过。历史探针缺detail.status在UI显示执行未核验，不追改旧通过结论。
 
 错误契约：REST缺引用404、参数/窗口/覆盖422、载荷413；MCP not_found/invalid_argument/payload_too_large。研究读投影SQL在加载前估计，单决策也不豁免。所有能力仅研究域；对应phase1_doc.md §3.4 3–14的离线等价验证，不声称券商或实盘验收。
+
+## 课题内 OOS 展示与动作（#516）
+
+课题可经 `POST /api/research/topics/{id}/actions`（MCP `finboard_topic_action`）执行 `validation_experiment.create` / `add_trial` / `unseal`，服务端在同一事务写入不可变课题链接与 `topic.action.validation_experiment.*` 研究审计；动作要求课题 active 且 `goal_version` 匹配，创建与 trial 登记只写元数据，`unseal` 走既有一致性入队（执行器仍重放同一组 preflight）。
+
+读取端（`/context.experiment_links`、`/topics/{id}/artifacts`、`finboard_topic_read(view=artifacts)`）对每个 OOS 实验**先给 `oos_outcome`**，再给流程 `status`、`trial_budget{used,limit}`、`final_test_unsealed` 与具名 `evidence_gaps`（`no_trials` / `final_test_not_unsealed` / `oos_inconclusive` / `trial_summary_oversized` / `status_not_terminal`）。trial 超 500 条或 1 MiB 时只返回 `oos_outcome=unknown` 与缺口，不加载全部 trial、不推断结论。
+
+重复揭盲返回 409 `already_unsealed`（MCP `conflict`），`final_test_unsealed` 不被改写；已揭盲实验不能再次执行，需新证据时必须新建实验并用 `supersedes_id` 关联。压力计划、执行状态与 unsupported 与 `oos_outcome` 分开呈现：`supported` 仍要求 OOS 门通过且揭盲达标，`validated_oos` 单独不能作为假设获支持的证据。

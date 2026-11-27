@@ -652,6 +652,31 @@ class TestForeignCacheStrategy:
         assert statuses == ["checking_cache", "cache_hit"]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("upstream_has_bars", [True, False])
+    async def test_single_source_update_checks_full_foreign_cache(
+        self, tmp_path: Path, upstream_has_bars: bool
+    ) -> None:
+        client = FakeTushareBarClient()
+        if not upstream_has_bars:
+            client.daily_rows = []
+            client.factor_rows = []
+        budget = NoopBudget()
+        provider = TushareBarProvider(
+            client=client, budget=budget, cache_dir=tmp_path, max_retries=0, allow_foreign_cache=False
+        )
+        assert provider._cache is not None
+        symbol = make_symbol("000001.SZ")
+        start, end = date(2024, 1, 2), date(2024, 1, 3)
+        await provider._cache.write(
+            symbol, BarPeriod.D1, "qfq", [_foreign_bar(start), _foreign_bar(end)]
+        )
+
+        assert await provider.update_cache(symbol, BarPeriod.D1, start, end) is upstream_has_bars
+        assert budget.calls > 0
+        bars = await provider._cache.read(symbol, BarPeriod.D1, "qfq")
+        assert {bar.source for bar in bars} == ({"tushare"} if upstream_has_bars else {"akshare"})
+
+    @pytest.mark.unit
     async def test_foreign_cache_falls_back_when_tushare_empty(self, tmp_path: Path) -> None:
         """缺口区间 tushare 拉不到(股票上游为空):具名回退返回异源缓存,不改写缓存。
 

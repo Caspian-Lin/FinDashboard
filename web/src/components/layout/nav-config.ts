@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import type { LocalizedText } from "@/i18n";
+import { RESEARCH_EDITION } from "@/lib/edition";
 import {
   Home,
   Database,
@@ -9,7 +10,7 @@ import {
   GitBranch,
   Scale,
   PlayCircle,
-  MonitorSmartphone,
+  Plug,
   BookOpen,
   FileText,
   LayoutDashboard,
@@ -68,9 +69,9 @@ export const navGroups: NavGroup[] = [
         icon: Scale,
       },
       {
-        to: "/research/workbench",
-        label: { zh: "研究工作台", en: "Research Workbench" },
-        icon: MonitorSmartphone,
+        to: "/research/agent-connect",
+        label: { zh: "Agent 接入", en: "Agent Connect" },
+        icon: Plug,
       },
       {
         to: "/research/reports",
@@ -97,4 +98,7 @@ export const navGroups: NavGroup[] = [
       { to: "/settings", label: { zh: "设置", en: "Settings" }, icon: Settings },
     ],
   },
-];
+].filter((group) => !RESEARCH_EDITION || !group.restricted).map((group) => ({
+  ...group,
+  items: group.items.filter((item) => !RESEARCH_EDITION || !["/settings", "/research/simulation"].includes(item.to)),
+}));

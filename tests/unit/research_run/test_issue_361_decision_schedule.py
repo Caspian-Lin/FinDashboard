@@ -197,7 +197,7 @@ def _queue_payload(parameters: dict[str, Any]) -> dict[str, Any]:
 
 
 class TestRestSchemaGate:
-    """REST ``ResearchRunQueueIn`` 入队即拒(与 MCP ``parse_queue_payload``
+    """REST ``ResearchRunQueueIn`` 入队即拒(与 MCP ``finboard_run_queue``
     共用同一 schema,两口径一致;MCP 侧见 tests/unit/test_mcp_tools_runs.py)。"""
 
     def test_daily_and_weekly_legacy_now_accepted(self) -> None:
