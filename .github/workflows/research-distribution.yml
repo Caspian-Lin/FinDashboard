@@ -123,6 +123,8 @@ jobs:
           node --check desktop/ui/app.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --check desktop/ui/window-frame.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test desktop/tests/*.test.cjs
       - name: Exercise the Windows desktop installer and recovery paths
         shell: powershell
         run: ./scripts/test_research_desktop_host.ps1

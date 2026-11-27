@@ -8,7 +8,10 @@ use std::sync::{
     Arc,
 };
 
-use operator::{execute, Invocation, Operation, OperationResult, Progress};
+use operator::{
+    execute, open_in_default_browser, Invocation, Operation, OperationResult, Progress,
+};
+use serde::Deserialize;
 use tauri::{
     ipc::Channel, webview::NewWindowResponse, AppHandle, Manager, State, Url, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
@@ -119,13 +122,32 @@ fn is_workbench_origin(url: &Url, port: u16) -> bool {
         && url.password().is_none()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkbenchAction {
+    InApp,
+    Browser,
+    Address,
+}
+
+fn workbench_url(status: &OperationResult) -> Result<Url, String> {
+    let port = status
+        .status
+        .as_ref()
+        .filter(|state| status.exit_code == 0 && state.running && state.port >= 1024)
+        .map(|state| state.port)
+        .ok_or_else(|| "研究服务尚未就绪，请启动后重试。".to_owned())?;
+    Url::parse(&format!("http://127.0.0.1:{port}/research")).map_err(|_| "端口无效。".into())
+}
+
 #[tauri::command]
 async fn desktop_open_workbench(
     app: AppHandle,
     window: WebviewWindow,
     operations: State<'_, Operations>,
     workbench_port: State<'_, WorkbenchPort>,
-) -> Result<(), String> {
+    action: WorkbenchAction,
+) -> Result<Option<String>, String> {
     authorize(&window)?;
     let _permit = operations.acquire()?;
     let path = operator_path(&app)?;
@@ -133,13 +155,23 @@ async fn desktop_open_workbench(
         tauri::async_runtime::spawn_blocking(move || execute(&path, &Invocation::Status, |_| {}))
             .await
             .map_err(|_| "无法确认研究服务状态。")??;
-    let port = status
-        .status
-        .filter(|state| state.running && state.port >= 1024)
-        .map(|state| state.port)
-        .ok_or_else(|| "研究服务尚未就绪，请启动后重试。".to_owned())?;
-    let url = Url::parse(&format!("http://127.0.0.1:{port}/research")).map_err(|_| "端口无效。")?;
+    let url = workbench_url(&status)?;
+    match action {
+        WorkbenchAction::Address => return Ok(Some(url.into())),
+        WorkbenchAction::Browser => {
+            tauri::async_runtime::spawn_blocking(move || open_in_default_browser(&url))
+                .await
+                .map_err(|_| "浏览器未能打开，可复制地址后重试。")??;
+            return Ok(None);
+        }
+        WorkbenchAction::InApp => {}
+    }
+    show_workbench(&app, &workbench_port, url)?;
+    Ok(None)
+}
 
+fn show_workbench(app: &AppHandle, workbench_port: &WorkbenchPort, url: Url) -> Result<(), String> {
+    let port = url.port().ok_or("端口无效。")?;
     if let Some(workbench) = app.get_webview_window("research") {
         let current = workbench.url().ok();
         let recovering = current.as_ref().is_some_and(|url| {
@@ -165,7 +197,7 @@ async fn desktop_open_workbench(
         workbench.destroy().map_err(|_| "无法关闭旧研究工作台。")?;
     }
     let frame = window_frame::initialization("research", &url.origin().ascii_serialization());
-    let builder = WebviewWindowBuilder::new(&app, "research", WebviewUrl::External(url))
+    let builder = WebviewWindowBuilder::new(app, "research", WebviewUrl::External(url))
         .title("FinDashboard 研究工作台")
         .inner_size(1240.0, 800.0)
         .decorations(false)
@@ -239,6 +271,41 @@ mod tests {
         ] {
             assert!(!is_workbench_origin(&Url::parse(url).unwrap(), 8176));
         }
+    }
+
+    #[test]
+    fn browser_and_clipboard_require_current_ready_instance() {
+        let mut result = OperationResult {
+            exit_code: 0,
+            elapsed_seconds: 0.0,
+            command: String::new(),
+            status: Some(
+                serde_json::from_value(serde_json::json!({
+                    "docker": "linux", "installed": true, "has_instance": true,
+                    "phase": "ready", "running": true, "port": 8376
+                }))
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            workbench_url(&result).unwrap().as_str(),
+            "http://127.0.0.1:8376/research"
+        );
+        result.status.as_mut().unwrap().running = false;
+        assert!(workbench_url(&result).is_err());
+        let state = result.status.as_mut().unwrap();
+        state.running = true;
+        state.port = 9184;
+        assert_eq!(
+            workbench_url(&result).unwrap().as_str(),
+            "http://127.0.0.1:9184/research"
+        );
+        result.status.as_mut().unwrap().port = 80;
+        assert!(workbench_url(&result).is_err());
+        result.status.as_mut().unwrap().port = 9184;
+        result.exit_code = 1;
+        assert!(workbench_url(&result).is_err());
+        assert!(serde_json::from_str::<WorkbenchAction>(r#""https://example.test""#).is_err());
     }
 
     #[test]

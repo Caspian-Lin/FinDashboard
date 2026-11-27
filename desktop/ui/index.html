@@ -44,7 +44,20 @@
           <h2 id="workbench-title">研究工作台</h2>
           <p>查看课题、策略与冻结运行。</p>
         </div>
-        <button id="open-workbench" class="workbench-action" type="button">打开工作台 <span class="icon" aria-hidden="true">↗</span></button>
+        <div class="actions">
+          <button id="open-workbench" class="workbench-action" type="button">在应用内打开</button>
+          <button id="open-workbench-alternate" type="button">在浏览器中打开</button>
+          <button id="copy-workbench-address" type="button">复制地址</button>
+        </div>
+        <label class="field workbench-preference">
+          <span>默认打开方式</span>
+          <select id="workbench-target">
+            <option value="in_app">应用内</option>
+            <option value="browser">系统默认浏览器</option>
+          </select>
+        </label>
+        <p id="workbench-status" role="status">启动研究服务后可打开工作台。</p>
+        <input id="workbench-address" aria-label="研究工作台地址" readonly hidden>
       </section>
 
       <section class="panel sample" aria-labelledby="sample-title">
