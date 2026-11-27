@@ -125,6 +125,22 @@ def _reduce_mapping_proxy(
     return _restore_mapping_proxy, (dict(value),)
 
 
+def _reduce_feature_value(
+    value: FeatureValue,
+) -> tuple[type[FeatureValue], tuple[str, str, float | None, tuple[str, ...], datetime]]:
+    return FeatureValue, (
+        value.symbol, value.feature_id, value.value, value.source_artifact_ids, value.available_at,
+    )
+
+
+def _reduce_universe_candidate(
+    value: UniverseCandidate,
+) -> tuple[type[UniverseCandidate], tuple[str, bool, tuple[str, ...], str, str]]:
+    return UniverseCandidate, (
+        value.symbol, value.included, value.reasons, value.asset_class, value.market,
+    )
+
+
 class ResumeCheckpointSpool:
     """在协调器与组合管线之间保存已验证的重决策前缀。
 
@@ -158,6 +174,9 @@ class ResumeCheckpointSpool:
         writer.dispatch_table = {
             **copyreg.dispatch_table,
             MappingProxyType: _reduce_mapping_proxy,
+            # 截面内单期数万项,避免 slots dataclass 逐个扫描字段并重建状态。
+            FeatureValue: _reduce_feature_value,
+            UniverseCandidate: _reduce_universe_candidate,
         }
         writer.dump(checkpoint)
         decision = checkpoint.decision

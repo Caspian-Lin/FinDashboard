@@ -42,6 +42,8 @@ uv run python scripts/benchmark_research_run.py --manifest case.json --release-r
 
 恢复基准同时关注进程树峰值、领取至首个新决策时间与临时磁盘开销。用户因子路径继续装载前缀所需的 screen 数据，逐项核对未中断运行的产物和结果摘要。
 
+以历史第 271 期的 56,684 个特征和 5,215 个候选为样本，固定同一重建 bundle，各执行 10 次临时编码与回读。为高频的 `FeatureValue` 和 `UniverseCandidate` 指定构造参数后，平均时间从 1.520 秒降至 0.682 秒，编码由 3,016,584 缩至 2,830,860 字节。两版恢复对象逐值相同。该微测仅包含内存中的编码和回读，端到端恢复时间单独测量。
+
 ## 存储
 
 基准的 `stored_payload_bytes` 是 PostgreSQL 逐载荷 `pg_column_size` 的和。26 期样本为 37,615,298 字节。数据库占用另用 `pg_total_relation_size`，同时计入关系、索引和 TOAST 相关开销。WAL 单独测量。
