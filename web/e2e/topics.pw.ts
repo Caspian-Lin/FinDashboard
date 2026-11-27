@@ -35,7 +35,12 @@ test("create and activate a manual topic without starting work", async ({ page }
   await expect(page.getByText("空库首个研究问题", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "补齐目标并激活", exact: true }).click();
   await page.getByLabel("目标版本", { exact: true }).fill("v1");
-  await page.getByRole("combobox", { name: /目标来源/ }).selectOption({ label: "研究路线" });
+  const source = page.getByRole("combobox", { name: /目标来源/ });
+  await expect(source).toBeVisible();
+  await page.getByRole("button", { name: "使用其他仓库文档路径" }).click();
+  await expect(page.getByRole("textbox", { name: /目标来源/ })).toBeEditable();
+  await page.getByRole("button", { name: "从文档列表选择" }).click();
+  await source.selectOption({ label: "研究路线" });
   await page.getByLabel("目标和验收门槛", { exact: true }).fill("评估冻结样例在两段窗口的风险变化。");
   await page.getByRole("button", { name: "激活课题", exact: true }).click();
   await expect(page.getByRole("button", { name: "发起研究运行", exact: true })).toBeVisible();

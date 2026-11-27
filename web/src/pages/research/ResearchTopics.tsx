@@ -261,22 +261,33 @@ function SourceFact({ reference }: { reference: EvidenceRef }) {
 }
 function TopicGoalSource({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const { tl } = useT();
+  const [manual, setManual] = useState(false);
   const docs = useQuery({ queryKey: ["research-docs"], queryFn: researchDocsApi.list });
   const options = docs.data?.docs ?? [];
-  if (options.length === 0) {
-    return <Field label={tl({ zh: "目标来源（研究文档相对路径）", en: "Goal source (repository document path)" })}
-      required value={value} onChange={onChange} />;
-  }
+  const hasCatalog = options.length > 0;
   return (
-    <label className="grid gap-1 text-sm">
-      <span className="font-medium">{tl({ zh: "目标来源（正式文档）", en: "Goal source (canonical document)" })}</span>
-      <select className="h-11 min-w-0 rounded-md border border-input bg-background px-3" required
-        value={value} onChange={(event) => onChange(event.target.value)}>
-        <option value="">{tl({ zh: "选择仓库文档", en: "Choose a repository document" })}</option>
-        {options.map((doc) => <option value={doc.path} key={doc.path}>{doc.title}</option>)}
-        {value && !options.some((doc) => doc.path === value) && <option value={value}>{value}</option>}
-      </select>
-    </label>
+    <div className="min-w-0 space-y-1">
+      {hasCatalog && !manual ? (
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">{tl({ zh: "目标来源（正式文档）", en: "Goal source (canonical document)" })}</span>
+          <select className="h-11 min-w-0 rounded-md border border-input bg-background px-3" required
+            value={value} onChange={(event) => onChange(event.target.value)}>
+            <option value="">{tl({ zh: "选择仓库文档", en: "Choose a repository document" })}</option>
+            {options.map((doc) => <option value={doc.path} key={doc.path}>{doc.title}</option>)}
+            {value && !options.some((doc) => doc.path === value) && <option value={value}>{value}</option>}
+          </select>
+        </label>
+      ) : (
+        <Field label={tl({ zh: "目标来源（研究文档相对路径）", en: "Goal source (repository document path)" })}
+          required value={value} onChange={onChange} />
+      )}
+      {hasCatalog && (
+        <Button type="button" variant="link" className="min-h-8 p-0" onClick={() => setManual(!manual)}>
+          {manual ? tl({ zh: "从文档列表选择", en: "Choose from documents" })
+            : tl({ zh: "使用其他仓库文档路径", en: "Use another repository document path" })}
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -1322,9 +1333,7 @@ export default function ResearchTopics() {
               value={form.goal.version}
               onChange={(v) => setValue("goal", { ...form.goal, version: v })}
             />
-            <Field
-              label="目标来源（研究文档相对路径）"
-              required
+            <TopicGoalSource
               value={form.goal.source.ref_id}
               onChange={(v) =>
                 setValue("goal", { ...form.goal, source: { kind: "document", ref_id: v } })
