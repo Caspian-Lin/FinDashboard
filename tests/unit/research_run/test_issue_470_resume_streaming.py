@@ -104,7 +104,7 @@ async def test_checkpoint_spool_replays_exact_decisions_with_one_current_bundle(
     spool = ResumeCheckpointSpool()
     assert await ResearchRunCoordinator(store)._load_resume_prefix(
         run_id, reuse_sections=True, spool=spool,
-    ) == []
+    ) == ([], len(expected))
     assert [seed.business_date for seed in spool.seeds] == [row.business_date for row in expected]
     assert spool.current is None
     file = spool._file
@@ -164,7 +164,7 @@ async def test_checkpoint_spool_failure_discards_partial_readback(
     monkeypatch.setattr(spool, "append", broken_append)
     assert await ResearchRunCoordinator(store)._load_resume_prefix(
         run_id, reuse_sections=True, spool=spool,
-    ) == []
+    ) == ([], 0)
     assert len(spool) == 0
     file = files[0]
     assert file is not None
@@ -205,7 +205,8 @@ async def test_resume_readback_progress_timeout_and_external_cancellation(
         with pytest.raises(asyncio.CancelledError, match="external cancel"):
             await task
     else:
-        prefix = await asyncio.wait_for(task, timeout=2)
+        prefix, count = await asyncio.wait_for(task, timeout=2)
+        assert count == len(expected)
         assert [checkpoint.decision for checkpoint in prefix] == expected
     assert progress_closed.is_set()
     assert stream_closed.is_set()
@@ -255,6 +256,9 @@ async def test_streaming_prefix_truncates_with_list_version(
     spool = ResumeCheckpointSpool()
     await ResearchRunCoordinator(store)._load_resume_prefix(run_id, reuse_sections=True, spool=spool)
     assert list(spool.replay()) == listed
+    assert await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=False, retain_bundles=False,
+    ) == ([], len(listed))
 
 
 async def test_digests_match_full_listing_projection(

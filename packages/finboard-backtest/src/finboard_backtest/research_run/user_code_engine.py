@@ -148,6 +148,9 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
     (失败落在 coordinator 异常分流,run 状态正确迁移 FAILED)。
     """
 
+    # 沙箱与本期输入在 decisions() 才构建,历史种子无法进入继承的组合管线校验。
+    supports_resume_checkpoints = False
+
     def __init__(
         self,
         *,

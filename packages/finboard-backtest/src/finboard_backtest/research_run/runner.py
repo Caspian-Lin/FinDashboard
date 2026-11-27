@@ -269,22 +269,29 @@ class ResearchRunCoordinator:
             confirms_checkpoint = getattr(adapter, "is_accepted_checkpoint", None)
             checksum_store = self._store if isinstance(self._store, CheckpointChecksumStore) else None
             reuse_sections = callable(confirms_checkpoint) and checksum_store is not None
-            if callable(getattr(adapter, "resume_from_checkpoint_spool", None)):
+            retain_bundles = getattr(adapter, "supports_resume_checkpoints", True) is not False
+            if retain_bundles and callable(getattr(adapter, "resume_from_checkpoint_spool", None)):
                 can_defer_features = getattr(adapter, "can_defer_resume_features", None)
                 resume_spool = ResumeCheckpointSpool(
                     compact_features=bool(callable(can_defer_features) and can_defer_features()),
                 )
-            resume_prefix = await self._load_resume_prefix(
+            resume_prefix, resume_count = await self._load_resume_prefix(
                 manifest.run_id, reuse_sections=reuse_sections,
                 progress=resume_progress if reuse_sections else None,
-                spool=resume_spool,
+                spool=resume_spool, retain_bundles=retain_bundles,
             )
             offered_prefix = (
                 resume_spool if resume_spool is not None
                 else [item.decision for item in resume_prefix]
             )
-            resume_seconds = time.monotonic() - resume_started if offered_prefix else None
+            resume_seconds = time.monotonic() - resume_started if resume_count else None
             checkpoints: deque[DecisionCheckpoint] = deque()
+            if resume_count and not retain_bundles:
+                logger.info(
+                    "research_run.resume_declined", run_id=manifest.run_id,
+                    completed_decisions=resume_count,
+                    message="适配器不接受断点种子,已完成决策将原路径重算",
+                )
             if offered_prefix and self._offer_resume(manifest.run_id, adapter, offered_prefix):
                 if reuse_sections:
                     checkpoints.extend(resume_prefix)
@@ -768,8 +775,8 @@ class ResearchRunCoordinator:
 
     async def _load_resume_prefix(
         self, run_id: str, *, reuse_sections: bool, progress: ProgressHook | None = None,
-        spool: ResumeCheckpointSpool | None = None,
-    ) -> list[DecisionCheckpoint]:
+        spool: ResumeCheckpointSpool | None = None, retain_bundles: bool = True,
+    ) -> tuple[list[DecisionCheckpoint], int]:
         """读回已完整落库的决策前缀(issue #314 入口;流式,#470 前半场)。
 
         前缀判定与重建见 ``checkpoint_resume.iter_decision_checkpoints``:
@@ -795,7 +802,8 @@ class ResearchRunCoordinator:
             )
             try:
                 async for bundle in bundles:
-                    append(bundle)
+                    if retain_bundles:
+                        append(bundle)
                     count += 1
                     if progress is not None and time.monotonic() >= next_progress_at:
                         # 让 worker 从实际完成校验的组判断活性。已落库计数由原阶段上报。
@@ -821,14 +829,14 @@ class ResearchRunCoordinator:
                 run_id=run_id,
                 exc_info=True,
             )
-            return []
+            return [], 0
         if count:
             logger.info(
                 "research_run.resume_prefix_loaded",
                 run_id=run_id,
                 completed_decisions=count,
             )
-        return prefix
+        return prefix, count
 
     def _offer_resume(
         self,
