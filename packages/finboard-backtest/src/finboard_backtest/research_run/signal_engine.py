@@ -30,13 +30,14 @@ import contextlib
 import math
 import os
 import weakref
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
     Collection,
+    Iterator,
     Mapping,
     Sequence,
 )
@@ -64,6 +65,11 @@ from finboard_backtest.factors.standardize import (
     winsorize,
 )
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
+from finboard_backtest.research_run.checkpoint_resume import (
+    ResumeCheckpointSpool,
+    ResumeLedgerSeed,
+    replay_resume_bundles,
+)
 from finboard_backtest.research_run.contracts import (
     REBALANCE_FREQUENCIES,
     DecisionBundle,
@@ -3013,7 +3019,7 @@ class SignalEnginePipelineAdapter:
         self._factor_screen: dict[str, Any] | None = None
         # issue #314:断点续算种子(coordinator 从 artifact 读回的已完成决策
         # 前缀,resume_from 接受后非空;decisions() 首次迭代时惰性消费)。
-        self._resume_bundles: tuple[DecisionBundle, ...] | None = None
+        self._resume_bundles: tuple[DecisionBundle, ...] | ResumeCheckpointSpool | None = None
         self._accepted_checkpoint: DecisionBundle | None = None
 
     @property
@@ -3037,12 +3043,27 @@ class SignalEnginePipelineAdapter:
         self._resume_bundles = tuple(completed)
         return True
 
+    def resume_from_checkpoint_spool(self, source: ResumeCheckpointSpool) -> bool:
+        if self._input_iterator is not None or self._resume_bundles is not None or not source:
+            return False
+        self._resume_bundles = source
+        return True
+
+    def can_defer_resume_features(self) -> bool:
+        """只为可能进入普通 stub 回放的前缀拆分临时特征截面。"""
+        return (
+            not self._cross_section_series_capture
+            and getattr(self.decisions, "__func__", None) is SignalEnginePipelineAdapter.decisions
+        )
+
     def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
         """只确认组合管线接受的普通因子种子,在该期 yield 期间有效。"""
 
         return self._accepted_checkpoint is decision
 
-    async def _resume_all_completed(self, resume: tuple[DecisionBundle, ...]) -> bool:
+    async def _resume_all_completed(
+        self, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
+    ) -> bool:
         """全部决策均已落库时允许跳过整段加载(issue #314)。
 
         快速路径的两个前置:(1) 报告构建不依赖冻结输入 —— 引用用户因子
@@ -3053,13 +3074,7 @@ class SignalEnginePipelineAdapter:
         会在加载期以既有语义重现(fail-closed,不吞错)。
         """
 
-        from finboard_data.factor_lab import is_user_factor_name
-
-        if any(
-            is_user_factor_name(feature.feature_id)
-            for bundle in resume
-            for feature in bundle.features
-        ):
+        if self._resume_observed_user_features(resume):
             return False
         total = await self._resume_schedule_total()
         return total is not None and len(resume) == total
@@ -3166,7 +3181,7 @@ class SignalEnginePipelineAdapter:
         return _stream()
 
     def _resume_prefix_needs_full_load(
-        self, resume: tuple[DecisionBundle, ...]
+        self, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
     ) -> bool:
         """前缀是否必须走全量装载(#470 后半场消费审计结论,两道门)。
 
@@ -3190,8 +3205,14 @@ class SignalEnginePipelineAdapter:
         warning 具名记录,不静默。
         """
 
-        if self._cross_section_series_capture:
-            return True
+        return self._cross_section_series_capture or self._resume_observed_user_features(resume)
+
+    @staticmethod
+    def _resume_observed_user_features(
+        resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
+    ) -> bool:
+        if isinstance(resume, ResumeCheckpointSpool):
+            return resume.has_user_features
         from finboard_data.factor_lab import is_user_factor_name
 
         return any(
@@ -3201,7 +3222,7 @@ class SignalEnginePipelineAdapter:
         )
 
     def _iter_resume_stub_inputs(
-        self, resume: tuple[DecisionBundle, ...]
+        self, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
     ) -> AsyncIterator[_ResumeReplayStub]:
         """stub-only 前缀装载流 + business_date 登记(#470 后半场)。
 
@@ -3217,9 +3238,12 @@ class SignalEnginePipelineAdapter:
         错位 / 丢失失败日期)。
         """
 
+        decision_seeds: Sequence[DecisionBundle | ResumeLedgerSeed] = (
+            resume.seeds if isinstance(resume, ResumeCheckpointSpool) else resume
+        )
         symbols = frozenset(
             symbol
-            for bundle in resume
+            for bundle in decision_seeds
             for symbol in (
                 *(fill.symbol for fill in bundle.fills),
                 *(position.symbol for position in bundle.positions),
@@ -3253,7 +3277,7 @@ class SignalEnginePipelineAdapter:
         return _stream()
 
     async def _load(
-        self, *, resume: tuple[DecisionBundle, ...] | None = None
+        self, *, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool | None = None,
     ) -> PortfolioPipelineAdapter:
         """装配管线与输入流;``resume`` 非空时按消费审计选择前缀装载方式。
 
@@ -3315,7 +3339,7 @@ class SignalEnginePipelineAdapter:
         manifest: ResearchRunManifest,
     ) -> AsyncIterator[DecisionBundle]:
         resume = self._resume_bundles
-        resume_all: deque[DecisionBundle] | None = None
+        resume_all: Iterator[DecisionBundle] | None = None
         pipeline: PortfolioPipelineAdapter | None = None
         pipeline_iter: AsyncIterator[DecisionBundle] | None = None
         accepted_checkpoints = 0
@@ -3329,7 +3353,7 @@ class SignalEnginePipelineAdapter:
                     # k/N phase(#308)随之不触发 —— 无加载即无加载进度,
                     # phase 直接进入决策执行段。
                     self._fast_path = True
-                    resume_all = deque(resume)
+                    resume_all = replay_resume_bundles(resume)
                 else:
                     # #470 后半场:续跑时主线输入流从第 len(resume) 期起产出
                     # (skip_prefix),前缀五字段改由 stub-only 装载流预取 ——
@@ -3343,10 +3367,14 @@ class SignalEnginePipelineAdapter:
                     # 不构建)。种子被拒时输入流已被预取消费,全量重算经流重建
                     # 从第 0 期重拉(fail-closed,代价 = 预计算重建,罕见路径)。
                     await pipeline.aprefetch_inputs(len(resume))
-                    if not pipeline.resume_from(resume):
+                    if not pipeline.resume_from(
+                        resume, defer_features=self._stub_prefix_periods == len(resume),
+                    ):
                         # 种子被拒(数量/时序与冻结输入不一致):整段回退全量
                         # 重算(#314 fail-closed 兜底,宁重算不漂移)。
                         self._resume_bundles = None
+                        if isinstance(resume, ResumeCheckpointSpool):
+                            resume.close()
                         await self._reset_input_stream()
                         pipeline = await self._load()
                     elif self._stub_prefix_periods == len(resume):
@@ -3358,14 +3386,14 @@ class SignalEnginePipelineAdapter:
                 resume = None
             collected: list[DecisionLedgerRecord] = []
             if resume_all is not None:
-                while resume_all:
-                    decision = resume_all.popleft()
+                for decision in resume_all:
                     yield decision
                     # issue #473:append 账本级记录 —— yield 出去的仍是完整
                     # bundle(coordinator 校验/持久化用),列表只留落库后的
                     # 账本投影(消费审计:equity 曲线只读 fills/positions/
                     # ledger.cash,candidates 不再钉住)。
                     collected.append(decision_ledger_record(decision))
+                    del decision
                 # 快速路径种子消费完毕,末个整前缀引用随之释放(#470)。
                 resume_all = None
             else:

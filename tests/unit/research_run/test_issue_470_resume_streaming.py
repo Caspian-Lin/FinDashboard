@@ -15,13 +15,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from dataclasses import replace
+from typing import Any, BinaryIO
 
 import pytest
 
 from finboard_backtest.research_run import (
     DecisionSequenceAdapter,
     InMemoryResearchRunStore,
+    ResearchArtifact,
     ResearchRunStage,
     completed_decision_prefix,
     iter_completed_decision_prefix,
@@ -29,6 +31,8 @@ from finboard_backtest.research_run import (
     to_json_value,
 )
 from finboard_backtest.research_run.checkpoint_resume import (
+    DecisionCheckpoint,
+    ResumeCheckpointSpool,
     _FeatureMetadata,
     _rebuild_feature,
 )
@@ -91,6 +95,83 @@ async def test_streaming_prefix_equals_list_version(
     assert streamed == listed
 
 
+@pytest.mark.parametrize("defer_features", [False, True])
+async def test_checkpoint_spool_replays_exact_decisions_with_one_current_bundle(
+    manifest_factory, decision_factory, defer_features: bool,
+) -> None:
+    store, run_id = await _completed_run(manifest_factory, decision_factory)
+    expected = await _streamed_prefix(store, run_id)
+    spool = ResumeCheckpointSpool()
+    assert await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=True, spool=spool,
+    ) == ([], len(expected))
+    assert [seed.business_date for seed in spool.seeds] == [row.business_date for row in expected]
+    assert spool.current is None
+    file = spool._file
+    feature_file = spool._feature_file
+    assert file is not None
+    assert feature_file is not None
+    for decision, original in zip(spool.replay(defer_features=defer_features), expected, strict=True):
+        assert spool.current is not None
+        assert spool.current.decision is decision
+        assert spool.current.stages is not None
+        if defer_features:
+            assert original.features
+            assert not decision.features
+            decision = spool.restore_current_features(decision)
+        assert to_json_value(decision) == to_json_value(original)
+    assert spool.current is None
+    assert len(spool) == 0
+    assert file.closed
+    assert feature_file.closed
+
+
+async def test_compact_features_truncate_on_changed_payload(
+    manifest_factory, decision_factory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, run_id = await _completed_run(manifest_factory, decision_factory)
+    iter_artifacts = store.iter_artifacts
+
+    async def corrupt_second_features(key: str) -> AsyncIterator[ResearchArtifact]:
+        async for row in iter_artifacts(key):
+            if row.stage is ResearchRunStage.FEATURES and ":00000001:" in row.artifact_id:
+                row = replace(row, payload={**row.payload, "features": []})
+            yield row
+
+    monkeypatch.setattr(store, "iter_artifacts", corrupt_second_features)
+    with_spool = ResumeCheckpointSpool()
+    await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=True, spool=with_spool,
+    )
+    assert len(with_spool) == 1
+    with_spool.close()
+
+
+async def test_checkpoint_spool_failure_discards_partial_readback(
+    manifest_factory, decision_factory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, run_id = await _completed_run(manifest_factory, decision_factory)
+    spool = ResumeCheckpointSpool()
+    append = spool.append
+    files: list[BinaryIO | None] = []
+
+    def broken_append(checkpoint: DecisionCheckpoint) -> None:
+        if files:
+            raise OSError("spool write failed")
+        append(checkpoint)
+        files.append(spool._file)
+
+    monkeypatch.setattr(spool, "append", broken_append)
+    assert await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=True, spool=spool,
+    ) == ([], 0)
+    assert len(spool) == 0
+    file = files[0]
+    assert file is not None
+    assert file.closed
+    assert tuple(spool.replay()) == ()
+
+
 @pytest.mark.parametrize("cancel_externally", [False, True])
 async def test_resume_readback_progress_timeout_and_external_cancellation(
     manifest_factory, decision_factory, monkeypatch: pytest.MonkeyPatch, cancel_externally: bool,
@@ -124,7 +205,8 @@ async def test_resume_readback_progress_timeout_and_external_cancellation(
         with pytest.raises(asyncio.CancelledError, match="external cancel"):
             await task
     else:
-        prefix = await asyncio.wait_for(task, timeout=2)
+        prefix, count = await asyncio.wait_for(task, timeout=2)
+        assert count == len(expected)
         assert [checkpoint.decision for checkpoint in prefix] == expected
     assert progress_closed.is_set()
     assert stream_closed.is_set()
@@ -171,6 +253,12 @@ async def test_streaming_prefix_truncates_with_list_version(
     streamed = await _streamed_prefix(store, run_id)
     assert len(listed) == 1
     assert streamed == listed
+    spool = ResumeCheckpointSpool()
+    await ResearchRunCoordinator(store)._load_resume_prefix(run_id, reuse_sections=True, spool=spool)
+    assert list(spool.replay()) == listed
+    assert await ResearchRunCoordinator(store)._load_resume_prefix(
+        run_id, reuse_sections=False, retain_bundles=False,
+    ) == ([], len(listed))
 
 
 async def test_digests_match_full_listing_projection(
