@@ -189,6 +189,37 @@ fn equivalent_command(script: &Path, args: &[String]) -> String {
     )
 }
 
+fn powershell() -> Result<std::path::PathBuf, String> {
+    let system = std::env::var_os("SystemRoot").ok_or("无法定位 Windows PowerShell。")?;
+    Ok(Path::new(&system).join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+}
+
+pub(crate) fn open_in_default_browser(url: &tauri::Url) -> Result<(), String> {
+    let mut launcher = Command::new(powershell()?);
+    launcher
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Process -FilePath $env:FINBOARD_DESKTOP_WORKBENCH_URL -ErrorAction Stop",
+        ])
+        .env("FINBOARD_DESKTOP_WORKBENCH_URL", url.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        launcher.creation_flags(0x0800_0000);
+    }
+    if launcher.status().is_ok_and(|exit_code| exit_code.success()) {
+        Ok(())
+    } else {
+        Err("无法打开系统浏览器，请检查默认浏览器，或复制工作台地址。".into())
+    }
+}
+
 pub fn execute(
     script: &Path,
     invocation: &Invocation,
@@ -198,9 +229,7 @@ pub fn execute(
     let script = dunce::simplified(script);
     let arguments = invocation.args();
     let started = Instant::now();
-    let system = std::env::var_os("SystemRoot").ok_or("无法定位 Windows PowerShell。")?;
-    let executable = Path::new(&system).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let mut command = Command::new(executable);
+    let mut command = Command::new(powershell()?);
     command
         .args([
             "-NoLogo",

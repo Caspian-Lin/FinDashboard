@@ -24,8 +24,29 @@ const serviceLabels = {
   wrong_engine: '需要 Linux 容器模式',
 };
 const presets = { readonly: '只读', 'topic-writer': '课题与研究运行' };
+const workbenchPreferenceKey = 'finboard-workbench-target';
+const workbenchActions = { in_app: '在应用内打开', browser: '在浏览器中打开' };
 let status;
 let busy = false;
+
+try {
+  if (localStorage.getItem(workbenchPreferenceKey) === 'browser') ui['workbench-target'].value = 'browser';
+} catch {
+  // 持久化不可用时沿用应用内打开。
+}
+
+function workbenchTarget() {
+  return ui['workbench-target'].value === 'browser' ? 'browser' : 'in_app';
+}
+
+function alternateWorkbenchTarget() {
+  return workbenchTarget() === 'browser' ? 'in_app' : 'browser';
+}
+
+function setWorkbenchStatus(message, error = false) {
+  ui['workbench-status'].textContent = message;
+  ui['workbench-status'].dataset.error = String(error);
+}
 
 function setResult(message, error = false) {
   ui['result-status'].textContent = message;
@@ -51,7 +72,12 @@ function reconcile() {
   ui.preset.disabled = busy || !running;
   ui.attach.disabled = busy || !running;
   ui.attach.textContent = !status?.preset ? '接入 Codex' : ui.preset.value === status.preset ? '重新接入' : '切换预设';
-  ui['open-workbench'].disabled = busy || !running;
+  for (const operation of ['open-workbench', 'open-workbench-alternate', 'copy-workbench-address']) {
+    ui[operation].disabled = busy || !running;
+  }
+  ui['workbench-target'].disabled = busy;
+  ui['open-workbench'].textContent = workbenchActions[workbenchTarget()];
+  ui['open-workbench-alternate'].textContent = workbenchActions[alternateWorkbenchTarget()];
   ui.preserve.disabled = busy || !engine || !hasInstance || purging;
   ui.preserve.textContent = preserving ? '继续保留数据卸载' : '卸载并保留研究数据';
   ui['show-purge'].disabled = busy || !engine || !hasInstance || preserving;
@@ -63,6 +89,10 @@ function reconcile() {
 }
 
 function renderStatus(next) {
+  if (status?.port !== next.port || status?.running !== next.running) {
+    ui['workbench-address'].hidden = true;
+    setWorkbenchStatus(next.running ? '可以打开工作台或复制本机地址。' : '启动研究服务后可打开工作台。');
+  }
   status = next;
   const badge = ui['service-state'];
   const phaseLabels = { initializing: '等待完成安装', retained: '研究数据已保留', preserving: '等待继续卸载', purging: '等待继续清理' };
@@ -157,6 +187,8 @@ async function perform(operation) {
 
 function setStatusUnknown() {
   status = undefined;
+  ui['workbench-address'].hidden = true;
+  setWorkbenchStatus('请刷新本机状态，确认服务就绪。');
   ui['service-state'].textContent = '未确认';
   ui['service-state'].dataset.tone = 'warning';
   ui['service-detail'].textContent = '请刷新本机状态。';
@@ -204,22 +236,49 @@ ui['purge-form'].addEventListener('submit', (event) => {
   event.preventDefault();
   if (!ui.purge.disabled) perform({ kind: 'uninstall_purge', confirmation: ui.confirmation.value });
 });
-ui['open-workbench'].addEventListener('click', async () => {
-  if (busy) return;
-  busy = true;
-  startRecord();
-  setResult('正在打开研究工作台…');
+ui['workbench-target'].addEventListener('change', () => {
   reconcile();
   try {
-    await core.invoke('desktop_open_workbench');
-    setResult('已打开研究工作台。');
+    localStorage.setItem(workbenchPreferenceKey, workbenchTarget());
+    setWorkbenchStatus('已保存默认打开方式。');
+  } catch {
+    setWorkbenchStatus('无法保存偏好。本次选择仍可使用。', true);
+  }
+});
+
+async function performWorkbench(action) {
+  if (busy || !core) return;
+  busy = true;
+  ui['workbench-address'].hidden = true;
+  setWorkbenchStatus(action === 'address' ? '正在检查工作台地址…' : '正在打开研究工作台…');
+  reconcile();
+  try {
+    const address = await core.invoke('desktop_open_workbench', { action });
+    if (action !== 'address') {
+      setWorkbenchStatus(action === 'browser' ? '已在系统浏览器中打开工作台。' : '已在应用内打开工作台。');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(address);
+      setWorkbenchStatus('已复制工作台地址。');
+    } catch {
+      ui['workbench-address'].value = address;
+      ui['workbench-address'].hidden = false;
+      ui['workbench-address'].focus();
+      ui['workbench-address'].select();
+      setWorkbenchStatus('剪贴板不可用。请按 Ctrl+C 复制已选中的地址。', true);
+    }
   } catch (error) {
-    setResult(String(error), true);
+    setWorkbenchStatus(String(error), true);
   } finally {
     busy = false;
     reconcile();
   }
-});
+}
+
+ui['open-workbench'].addEventListener('click', () => performWorkbench(workbenchTarget()));
+ui['open-workbench-alternate'].addEventListener('click', () => performWorkbench(alternateWorkbenchTarget()));
+ui['copy-workbench-address'].addEventListener('click', () => performWorkbench('address'));
 ui.copy.addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(ui['command-text'].value);
