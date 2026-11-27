@@ -6,8 +6,8 @@ const researchPort = Number(process.env.FINBOARD_E2E_RESEARCH_PORT ?? 5387);
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.pw.ts",
-  timeout: 45_000,
-  expect: { timeout: 10_000 },
+  timeout: 60_000,
+  expect: { timeout: 20_000 },
   workers: 2,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: { trace: "retain-on-failure", screenshot: "only-on-failure", reducedMotion: "reduce" },

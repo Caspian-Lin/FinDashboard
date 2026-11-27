@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { jobId, mockApi, preferences, releaseId, topicId } from "./fixtures";
+import { evidenceRun, jobId, mockApi, preferences, releaseId, runId, topicId } from "./fixtures";
 
 test("select shared backfill scope, preview, confirm, and find the new release", async ({ page }, info) => {
   test.skip(info.project.name !== "research", "One realistic shared-data path is enough for both editions.");
@@ -82,4 +82,46 @@ test("select shared backfill scope, preview, confirm, and find the new release",
   await expect(panel.getByRole("link", { name: releaseId })).toHaveAttribute("href", new RegExp(releaseId));
   expect(wire.unexpected).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("a topic can prefill the frozen calendar coverage and datasets", async ({ page }, info) => {
+  test.skip(info.project.name !== "research", "The same form is shared by both editions.");
+  await preferences(page, "zh", "dark");
+  const scope = {
+    universe: { explicit_symbols: ["FBDEMO01.SH"] },
+    decision: { start: "2024-01-02", end: "2024-02-23" },
+    benchmarks: ["FBDEMOIDX.SH"], datasets: { required: ["bars", "convertible_metrics"] },
+    bars_adjustment: "qfq", warmup_sessions: 20, tail_sessions: 3,
+  };
+  const wire = await mockApi(page, ({ url, body }) => {
+    if (url.pathname === `/api/research/topics/${topicId}/runs`) return { json: {
+      items: [{ run_id: runId, run_status: "completed" }], has_more: false,
+    } };
+    if (url.pathname === `/api/research/runs/${runId}`) return { json: {
+      ...evidenceRun, manifest: { ...evidenceRun.manifest, data_scope: { scope } },
+    } };
+    if (url.pathname === "/api/data/backfills/preview") {
+      const spec = body.spec as { scope: typeof scope; datasets: Array<{ dataset: string; source: string | null; adjustment: string }> };
+      expect(spec.scope).toMatchObject(scope);
+      expect(spec.datasets).toEqual([
+        expect.objectContaining({ dataset: "bars", source: null, adjustment: "qfq" }),
+        expect.objectContaining({ dataset: "convertible_metrics", source: "tushare", adjustment: "none" }),
+      ]);
+      return { json: {
+        plan_checksum: "f".repeat(64), blockers: [], warnings: [], items: [],
+        quota: { estimated_total: 0, remaining_today: null }, publish_impact: { new_releases: 0 },
+      } };
+    }
+  });
+  await page.goto(`/data?tab=sync&topic=${topicId}`);
+  const panel = page.getByRole("region", { name: "共享数据补数" });
+  await panel.getByRole("button", { name: "预填最近研究的范围字段" }).click();
+  await expect(panel.getByLabel("补数决策开始")).toHaveValue(scope.decision.start);
+  await panel.getByText("数据集、来源与覆盖选项", { exact: true }).click();
+  await expect(panel.getByLabel("预热交易日数")).toHaveValue("20");
+  await expect(panel.getByLabel("估值尾部交易日数")).toHaveValue("3");
+  await expect(panel.getByLabel("可转债指标")).toBeChecked();
+  await panel.getByRole("button", { name: "范围预检" }).click();
+  await expect(panel.getByText("预检结果")).toBeVisible();
+  expect(wire.writes().map(({ url }) => url.pathname)).toEqual(["/api/data/backfills/preview"]);
 });

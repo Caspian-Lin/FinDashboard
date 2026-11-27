@@ -47,6 +47,7 @@ test("home, keyboard skip, edition boundaries, and old URLs", async ({ page }, i
   await expect(page).toHaveURL(/\/backtest\?preset=example#saved$/);
   await page.goto("/fixture-route-missing");
   await expect(page.getByRole("heading", { level: 1 })).toContainText(research ? /does not exist|has been moved/i : /不存在|已被移动/);
+  await expect(page.getByRole("main").getByRole("link", { name: research ? /Research/i : /研究/ })).toHaveAttribute("href", "/research");
   expect(wire.unexpected).toEqual([]);
 });
 
@@ -92,4 +93,24 @@ test("live pages only read fixtures and dismiss a cancellation confirmation", as
   }
   expect(wire.writes()).toEqual([]);
   expect(wire.unexpected).toEqual([]);
+});
+
+test("direct navigation renders the remaining shared routes with one page heading", async ({ page }, info) => {
+  const research = info.project.name === "research";
+  await preferences(page, research ? "en" : "zh", research ? "light" : "dark");
+  const wire = await mockApi(page);
+  for (const path of [
+    "/research", "/research/tools", "/research/factors", "/research/strategy", "/research/strategy-explanation",
+    "/research/portfolio", "/research/docs", "/backtest",
+  ]) {
+    await test.step(path, async () => {
+      await page.goto(path);
+      await expect(page).toHaveURL(path);
+      const heading = page.getByRole("main").getByRole("heading", { level: 1 });
+      await expect(heading).toBeVisible();
+      await expect(heading).not.toContainText(/页面出错了|Something went wrong/);
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  }
+  expect(wire.writes()).toEqual([]);
 });
