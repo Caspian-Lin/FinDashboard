@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import AwareDatetime, BaseModel
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +44,7 @@ from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
 )
+from finboard_persistence.models import ResearchTopicLinkModel
 from finboard_shared.background_jobs import (
     ARCHIVE_FILTER_VALUES,
     TERMINAL_STATUSES,
@@ -116,6 +120,10 @@ async def list_jobs(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     archived: str = Query(default="exclude"),
+    topic_id: str | None = Query(default=None, max_length=32),
+    request_source: Literal["web", "mcp", "worker", "other"] | None = None,
+    created_from: AwareDatetime | None = None,
+    created_before: AwareDatetime | None = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[JobOut]:
     valid = {item.value for item in BackgroundJobStatus}
@@ -126,6 +134,8 @@ async def list_jobs(
             status_code=422,
             detail=f"未知归档过滤值: {archived}(合法 {sorted(ARCHIVE_FILTER_VALUES)})",
         )
+    if created_from is not None and created_before is not None and created_before <= created_from:
+        raise HTTPException(status_code=422, detail="结束时间必须晚于开始时间")
     repo = BackgroundJobRepository(session)
     rows = await repo.list_recent(
         kinds=kind,
@@ -134,13 +144,54 @@ async def list_jobs(
         limit=limit,
         offset=offset,
         archived=archived,
+        topic_id=topic_id,
+        request_source=request_source,
+        created_from=created_from,
+        created_before=created_before,
     )
     # 总数经响应头透出(issue #373 分页):与 body 分离,旧调用方零感知。
     total = await repo.count_recent(
-        kinds=kind, statuses=status, queues=queue, archived=archived
+        kinds=kind, statuses=status, queues=queue, archived=archived,
+        topic_id=topic_id, request_source=request_source,
+        created_from=created_from, created_before=created_before,
     )
     response.headers["X-Total-Count"] = str(total)
     return [JobOut.model_validate(row) for row in rows]
+
+
+class JobResearchLinksOut(BaseModel):
+    topic_ids: list[str]
+    run_ids: list[str]
+
+
+@router.get("/{job_id}/research-links", response_model=JobResearchLinksOut)
+async def job_research_links(
+    job_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> JobResearchLinksOut:
+    row = await BackgroundJobRepository(session).get(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="后台任务不存在")
+    run_ids: set[str] = set()
+    if row.kind == "research_run":
+        for candidate in (row.payload.get("run_id"), row.result_ref):
+            if isinstance(candidate, str) and candidate.startswith("RR-"):
+                run_ids.add(candidate)
+    link = ResearchTopicLinkModel
+    query = (
+        select(link.topic_id, link.entity_type, link.entity_id)
+        .where(or_(
+            link.job_id == job_id, (link.entity_type == "research_run") & link.entity_id.in_(run_ids),
+        ))
+        .order_by(link.id)
+        .limit(100)
+    )
+    topic_ids: set[str] = set()
+    for topic_id, kind, entity_id in (await session.execute(query)).all():
+        topic_ids.add(topic_id)
+        if kind == "research_run":
+            run_ids.add(entity_id)
+    return JobResearchLinksOut(topic_ids=sorted(topic_ids), run_ids=sorted(run_ids))
 
 
 @router.get("/{job_id}", response_model=JobOut)

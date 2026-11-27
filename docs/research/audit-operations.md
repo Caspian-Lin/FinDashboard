@@ -120,7 +120,7 @@ REST（`finboard-api/routes/research_audit.py`）：
 
 ```text
 GET /api/research/audit?actor=&client_id=&source=&topic_id=&entry_id=&entity_id=
-                   &operation=&outcome=&from=&to=&cursor=&limit=   # limit ≤ 200
+                   &job_id=&run_id=&operation=&outcome=&from=&to=&before=&cursor=&limit=   # limit ≤ 200
 GET /api/research/audit/{audit_id}
 GET /api/research/audit/coverage
 POST /api/research/audit/client-events        # 默认关闭,见 §5
@@ -128,6 +128,7 @@ POST /api/research/audit/client-events        # 默认关闭,见 §5
 
 - 列表返回 `{items, limit, has_more, next_cursor}`；`next_cursor` 是不透明
   base64（`occurred_at` + `id`），只能原样回传。
+- `from` 与 `to` 包含端点，`before` 排除结束时刻。
 - 单条/列表只返回脱敏摘要与 digest，**没有**原始参数接口（原始参数从未入库）。
 - `coverage` 返回 `{from, to, total, server_observed_from, client_declared_from,
   gaps, retention_days, auto_purge:false, note}`；`from` 是最早一条记录，
@@ -136,8 +137,15 @@ POST /api/research/audit/client-events        # 默认关闭,见 §5
 MCP：`finboard_audit_query`，scope **`audit.read`**（#517）。该 scope 只发给
 运维/审计客户端，不进入 `readonly` / `topic-writer` / `data-operator` 预设。
 参数与 REST 同源：`audit_id?` / `actor?` / `client_id?` / `source?` /
-`topic_id?` / `entity_id?` / `operation?` / `outcome?` / `from?` / `to?` /
+`topic_id?` / `entry_id?` / `entity_id?` / `job_id?` / `run_id?` / `operation?` /
+`outcome?` / `from?` / `to?` / `before?` /
 `limit?`（1..200）。
+
+### 排查研究任务
+
+1. 从课题时间线打开任务或操作回执。从已有任务 ID 直接打开 `/jobs?job=BJ-…`，已归档任务也可读取。列表可按课题、声明的请求来源及创建日期筛选。请求来源来自任务原有请求者标签，可用审计记录核对服务端观察到的来源。
+2. 在任务详情核对阶段、已处理数量、尝试次数、最近心跳与租约。租约过期时查看失败原因和时序，等待后台回收。处于等待重试时继续查看原任务。受控诊断入口会显示可重放范围，运行产物从关联的研究运行查看。
+3. 用具有 `audit.read` 的 MCP 客户端凭据打开 `/research/audit`。可按课题、课题记录、任务和运行定位脱敏回执，核对结果码、拒绝原因和关联证据。浏览器在当前页面内保存凭据，离开页面需重新提供。服务端记录与客户端声明分别标示。回执缺失时核对审计覆盖及外部客户端上报情况。
 
 ## 5. 客户端声明事件（可选）
 

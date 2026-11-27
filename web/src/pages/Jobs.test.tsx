@@ -21,6 +21,7 @@ vi.mock("../lib/api", async (importOriginal) => {
       listJobs: vi.fn(),
       cancelJob: vi.fn(),
       getJob: vi.fn(),
+      getJobResearchLinks: vi.fn(),
       archiveJob: vi.fn(),
       unarchiveJob: vi.fn(),
       bulkArchiveJobs: vi.fn(),
@@ -83,6 +84,7 @@ function renderWithProviders(ui: ReactElement, initialEntries = ["/jobs"]) {
 // api 模块级 vi.fn 的调用计数跨用例累积,每个用例前清空。
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.getJobResearchLinks).mockResolvedValue({ topic_ids: [], run_ids: [] });
   // 诊断重放能力表默认回显(echo 在拒绝集合;后端静态能力)。
   vi.mocked(api.flamegraphMeta).mockResolvedValue({
     replayable_kinds: {
@@ -94,6 +96,18 @@ beforeEach(() => {
 });
 
 describe("任务中心页", () => {
+  it("深链可读当前列表外的归档任务，并链接到关联证据", async () => {
+    const archived = makeJob({ archived_at: "2026-08-16T08:10:00Z", status: "failed", error_summary: "工作器中断" });
+    vi.mocked(api.listJobs).mockResolvedValue(listResult([]));
+    vi.mocked(api.getJob).mockResolvedValue(archived);
+    vi.mocked(api.getJobResearchLinks).mockResolvedValue({ topic_ids: ["RT-a"], run_ids: ["RR-a"] });
+    renderWithProviders(<Jobs />, [`/jobs?job=${archived.job_id}&topic=RT-a&source=worker`]);
+    expect(await screen.findByText("工作器中断")).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "研究运行 RR-a" })).toHaveAttribute("href", "/research/runs?run=RR-a");
+    expect(within(screen.getByRole("region", { name: "深链任务" })).getByRole("link", { name: "研究审计" }))
+      .toHaveAttribute("href", `/research/audit?job=${archived.job_id}`);
+    expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ topic_id: "RT-a", request_source: "worker" }));
+  });
   it("渲染任务列表(ID/类型/状态/进度)", async () => {
     vi.mocked(api.listJobs).mockResolvedValue(
       listResult([

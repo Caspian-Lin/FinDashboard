@@ -14,11 +14,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, desc, func, select, text
+from sqlalchemy import ColumnElement, case, desc, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_persistence.models import BackgroundJobModel
+from finboard_persistence.models import BackgroundJobModel, ResearchTopicLinkModel
 from finboard_shared.background_jobs import (
     ARCHIVE_FILTER_VALUES,
     TERMINAL_STATUSES,
@@ -53,6 +53,38 @@ class BackgroundJobPersistenceConflictError(RuntimeError):
 _RECREATABLE_STATUSES = frozenset(
     {BackgroundJobStatus.FAILED.value, BackgroundJobStatus.CANCELLED.value}
 )
+
+
+def _activity_filters(
+    topic_id: str | None, request_source: str | None,
+    created_from: datetime | None, created_before: datetime | None,
+) -> list[ColumnElement[bool]]:
+    """按已登记课题关联及声明的请求来源筛选。"""
+    conditions: list[ColumnElement[bool]] = []
+    job = BackgroundJobModel
+    link = ResearchTopicLinkModel
+    if topic_id is not None:
+        conditions.append(select(link.id).where(
+            link.topic_id == topic_id,
+            or_(
+                link.job_id == job.job_id,
+                (link.entity_type == "research_run")
+                & (link.entity_id == job.payload["run_id"].as_string()),
+            ),
+        ).exists())
+    if request_source is not None:
+        actor = job.requested_by
+        sources = {
+            "web": or_(actor.in_(["api", "user:api"]), actor.ilike("api:%"), actor.ilike("web:%")),
+            "mcp": or_(actor.in_(["mcp", "agent"]), actor.ilike("agent:%"), actor.ilike("mcp:%")),
+            "worker": actor.ilike("worker:%"),
+        }
+        conditions.append(~or_(*sources.values()) if request_source == "other" else sources[request_source])
+    if created_from is not None:
+        conditions.append(job.created_at >= created_from)
+    if created_before is not None:
+        conditions.append(job.created_at < created_before)
+    return conditions
 
 
 class BackgroundJobRepository:
@@ -174,6 +206,10 @@ class BackgroundJobRepository:
         limit: int = 100,
         offset: int = 0,
         archived: str = "exclude",
+        topic_id: str | None = None,
+        request_source: str | None = None,
+        created_from: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[BackgroundJobModel]:
         """最近任务列表(issue #221:``archived`` 维度过滤)。
 
@@ -198,6 +234,7 @@ class BackgroundJobRepository:
             stmt = stmt.where(BackgroundJobModel.status.in_(tuple(statuses)))
         if queues is not None:
             stmt = stmt.where(BackgroundJobModel.queue.in_(tuple(queues)))
+        stmt = stmt.where(*_activity_filters(topic_id, request_source, created_from, created_before))
         stmt = stmt.order_by(
             BackgroundJobModel.created_at.desc(), BackgroundJobModel.id.desc()
         ).limit(limit)
@@ -212,6 +249,10 @@ class BackgroundJobRepository:
         statuses: Iterable[str] | None = None,
         queues: Iterable[str] | None = None,
         archived: str = "exclude",
+        topic_id: str | None = None,
+        request_source: str | None = None,
+        created_from: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> int:
         """与 :meth:`list_recent` 同过滤条件的总行数(issue #373 分页 total)。"""
 
@@ -230,6 +271,7 @@ class BackgroundJobRepository:
             stmt = stmt.where(BackgroundJobModel.status.in_(tuple(statuses)))
         if queues is not None:
             stmt = stmt.where(BackgroundJobModel.queue.in_(tuple(queues)))
+        stmt = stmt.where(*_activity_filters(topic_id, request_source, created_from, created_before))
         return int((await self._session.execute(stmt)).scalar_one())
 
     # --------------------------------------------------------------- transition

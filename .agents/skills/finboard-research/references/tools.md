@@ -1422,7 +1422,9 @@ SDK fail-fast。
   (queued|running|retry_waiting|succeeded|failed|cancel_requested|cancelled|
   interrupted)、`queue?: list[str]`、`limit?: int = 100`(1-500)、
   `archived?: "exclude"|"only"|"all" = "exclude"`(#221:默认只看未归档;
-  `only` 只看已归档;`all` 不区分)
+  `only` 只看已归档;`all` 不区分)、`topic_id?`、`request_source?`
+  (web|mcp|worker|other，取自声明的请求者标签)、`created_from?` / `created_before?`
+  (带时区的 ISO 时间，含起点，不含终点)
 - 返回:`list[JobOut]`(`job_id/kind/queue/status/priority/payload/
   progress_done/progress_total/phase/result_ref/error_*/attempt/max_attempts/
   worker_id/heartbeat_at/lease_until/requested_by/created_at/started_at/
@@ -2165,8 +2167,9 @@ adjustment?, start?, end?, symbols?, publish?}], quality_profile?}`;
 运维签发审计客户端 `finboard mcp client create --scopes audit.read`。
 
 - 参数:`audit_id?`(给了返回单条)/ `actor?` / `client_id?` / `source?`
-  (web|mcp|worker|system)/ `topic_id?` / `entity_id?` / `operation?` /
-  `outcome?`(succeeded|failed|rejected|denied)/ `from?` / `to?`
+  (web|mcp|worker|system)/ `topic_id?` / `entry_id?` / `entity_id?` / `job_id?` /
+  `run_id?` / `operation?` / `outcome?`(succeeded|failed|rejected|denied)/
+  `from?` / `to?` / `before?`
   (ISO 时间)/ `limit?: int = 100`(1..200)
 - 返回:`{event}` 或 `{items, count, has_more, limit, filters, coverage_note}`;
   每条含 `audit_id / occurred_at / actor / actor_type / source / client_id /

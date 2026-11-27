@@ -21,6 +21,7 @@ const FactorLab = React.lazy(() => import("@/pages/research/FactorLab"));
 const StrategyStudio = React.lazy(() => import("@/pages/research/StrategyStudio"));
 const Experiments = React.lazy(() => import("@/pages/research/Experiments"));
 const ResearchRuns = React.lazy(() => import("@/pages/research/ResearchRuns"));
+const ResearchAudit = React.lazy(() => import("@/pages/research/ResearchAudit"));
 const PortfolioRisk = React.lazy(() => import("@/pages/research/PortfolioRisk"));
 const Simulation = React.lazy(() => import("@/pages/research/Simulation"));
 const AgentConnect = React.lazy(() => import("@/pages/research/AgentConnect"));
@@ -115,6 +116,7 @@ export default function App() {
             {/* 策略预设已并入回测页的预设库面板 */}
             <Route path="/strategies" element={<LegacyStrategyPresetsRedirect />} />
             <Route path="/jobs" element={<Jobs />} />
+            <Route path="/research/audit" element={<ResearchAudit />} />
 
             {/* 404 */}
             <Route path="*" element={<NotFound />} />
