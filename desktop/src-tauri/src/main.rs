@@ -128,6 +128,7 @@ enum WorkbenchAction {
     InApp,
     Browser,
     Address,
+    ReleaseBundles,
 }
 
 fn workbench_url(status: &OperationResult) -> Result<Url, String> {
@@ -138,6 +139,13 @@ fn workbench_url(status: &OperationResult) -> Result<Url, String> {
         .map(|state| state.port)
         .ok_or_else(|| "研究服务尚未就绪，请启动后重试。".to_owned())?;
     Url::parse(&format!("http://127.0.0.1:{port}/research")).map_err(|_| "端口无效。".into())
+}
+
+fn release_bundles_url(mut origin: Url) -> Url {
+    origin.set_path("/data");
+    origin.set_query(Some("tab=sync"));
+    origin.set_fragment(Some("release-bundles"));
+    origin
 }
 
 #[tauri::command]
@@ -155,7 +163,8 @@ async fn desktop_open_workbench(
         tauri::async_runtime::spawn_blocking(move || execute(&path, &Invocation::Status, |_| {}))
             .await
             .map_err(|_| "无法确认研究服务状态。")??;
-    let url = workbench_url(&status)?;
+    let mut url = workbench_url(&status)?;
+    let navigate = matches!(&action, WorkbenchAction::ReleaseBundles);
     match action {
         WorkbenchAction::Address => return Ok(Some(url.into())),
         WorkbenchAction::Browser => {
@@ -165,12 +174,18 @@ async fn desktop_open_workbench(
             return Ok(None);
         }
         WorkbenchAction::InApp => {}
+        WorkbenchAction::ReleaseBundles => url = release_bundles_url(url),
     }
-    show_workbench(&app, &workbench_port, url)?;
+    show_workbench(&app, &workbench_port, url, navigate)?;
     Ok(None)
 }
 
-fn show_workbench(app: &AppHandle, workbench_port: &WorkbenchPort, url: Url) -> Result<(), String> {
+fn show_workbench(
+    app: &AppHandle,
+    workbench_port: &WorkbenchPort,
+    url: Url,
+    navigate: bool,
+) -> Result<(), String> {
     let port = url.port().ok_or("端口无效。")?;
     if let Some(workbench) = app.get_webview_window("research") {
         let current = workbench.url().ok();
@@ -182,7 +197,7 @@ fn show_workbench(app: &AppHandle, workbench_port: &WorkbenchPort, url: Url) -> 
                 .as_ref()
                 .is_some_and(|url| is_workbench_origin(url, port))
         {
-            if recovering {
+            if recovering || navigate {
                 workbench
                     .navigate(url)
                     .map_err(|_| "无法重新打开研究工作台。")?;
@@ -245,6 +260,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn release_bundle_location_keeps_the_validated_instance_origin() {
+        let origin = super::Url::parse("http://127.0.0.1:18191/research").unwrap();
+        let location = super::release_bundles_url(origin);
+        assert!(super::is_workbench_origin(&location, 18191));
+        assert_eq!(location.path(), "/data");
+        assert_eq!(location.query(), Some("tab=sync"));
+        assert_eq!(location.fragment(), Some("release-bundles"));
+    }
+
     use super::*;
 
     #[test]

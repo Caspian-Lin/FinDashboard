@@ -198,7 +198,7 @@ function reconcile() {
   ui['generic-issue'].disabled = busy || !running || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(ui['generic-name'].value);
   ui['generic-list'].disabled = busy;
   ui['generic-revoke'].disabled = busy || !running || !ui['generic-list'].value;
-  for (const operation of ['open-workbench', 'open-workbench-alternate', 'copy-workbench-address']) {
+  for (const operation of ['open-workbench', 'open-workbench-alternate', 'copy-workbench-address', 'open-release-bundles']) {
     ui[operation].disabled = busy || !running;
   }
   ui['workbench-target'].disabled = busy;
@@ -484,6 +484,7 @@ async function performWorkbench(action) {
 ui['open-workbench'].addEventListener('click', () => performWorkbench(workbenchTarget()));
 ui['open-workbench-alternate'].addEventListener('click', () => performWorkbench(alternateWorkbenchTarget()));
 ui['copy-workbench-address'].addEventListener('click', () => performWorkbench('address'));
+ui['open-release-bundles'].addEventListener('click', () => performWorkbench('release_bundles'));
 ui.copy.addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(ui['command-text'].value);
