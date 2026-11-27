@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from finboard_api.deps import get_db_session
 from finboard_api.routes.data_bundles import router
+from finboard_app import release_bundle as bundle_service
 from finboard_app.release_bundle import import_registered_bundle, preview_registered_bundle
 from finboard_app.release_bundle_jobs import BUNDLE_JOB_KIND, ReleaseBundleExecutor
 from finboard_app.starter_data import _read_bundle
@@ -92,6 +93,43 @@ async def test_bundle_import_registers_all_indexes_and_keeps_existing_metadata(
     assert (target / release.release_id / "manifest.json").read_bytes() == (
         source / release.release_id / "manifest.json"
     ).read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_bundle_recovers_if_interrupted_after_file_activation(
+    _engine: AsyncEngine,  # noqa: PT019
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = tmp_path / "legacy.zip"
+    await build(legacy)
+    fixture = tmp_path / "fixture"
+    release, dates = _read_bundle(legacy, fixture)
+    archive = tmp_path / "portable.zip"
+    calendar = tuple(BundleCalendarDay("SSE", day, True, "fixture") for day in sorted(dates))
+    export_release_bundle(archive, fixture, [release], calendar)
+    target = tmp_path / "receiver"
+    sessions = session_factory(_engine)
+    activate = bundle_service._activate_files
+
+    def interrupt_after_activation(*args: Any) -> None:
+        activate(*args)
+        raise OSError("simulated worker interruption")
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(bundle_service, "_activate_files", interrupt_after_activation)
+        with pytest.raises(OSError, match="simulated worker interruption"):
+            await import_registered_bundle(sessions, archive, root=target)
+
+    assert (target / release.release_id / "manifest.json").is_file()
+    assert await ResearchDatasetReleaseRepository(db_session).get(release.release_id) is None
+    assert not list(target.glob(".bundle-import-*"))
+
+    result = await import_registered_bundle(sessions, archive, root=target)
+    assert result.releases[0].release_checksum == release.release_checksum
+    registered = await ResearchDatasetReleaseRepository(db_session).require_usable(release.release_id)
+    assert registered.release_checksum == release.release_checksum
 
 
 @pytest.mark.asyncio

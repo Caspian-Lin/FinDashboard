@@ -6,6 +6,7 @@ import json
 import zipfile
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -44,8 +45,9 @@ async def _fixture(root: Path) -> tuple[Path, ResearchDatasetRelease, tuple[Bund
     return source, release, calendar
 
 
-@pytest.mark.asyncio
-async def test_group_roundtrip_keeps_release_checksums_and_known_bar_gaps(tmp_path: Path) -> None:
+async def _group_fixture(
+    tmp_path: Path,
+) -> tuple[Path, ResearchDatasetRelease, ResearchDatasetRelease, tuple[BundleCalendarDay, ...]]:
     source, bars, calendar = await _fixture(tmp_path)
     first = bars.instruments[0]
     artifact = source / bars.release_id / first.artifact_path
@@ -80,6 +82,12 @@ async def test_group_roundtrip_keeps_release_checksums_and_known_bar_gaps(tmp_pa
     )
     metrics = replace(metrics, release_checksum=_release_checksum(metrics))
     _write_manifest(metrics_root, metrics)
+    return source, bars, metrics, calendar
+
+
+@pytest.mark.asyncio
+async def test_group_roundtrip_keeps_release_checksums_and_known_bar_gaps(tmp_path: Path) -> None:
+    source, bars, metrics, calendar = await _group_fixture(tmp_path)
     archive = tmp_path / "portable.zip"
     preview = export_release_bundle(archive, source, [bars, metrics], calendar)
     assert inspect_release_bundle(archive).summary() == preview.summary()
@@ -88,14 +96,16 @@ async def test_group_roundtrip_keeps_release_checksums_and_known_bar_gaps(tmp_pa
     result = unpack_release_bundle(archive, target)
     assert [r.release_checksum for r in result.releases] == [bars.release_checksum, metrics.release_checksum]
     assert result.calendar == calendar
-    assert result.releases[0].instruments[0].suspended_sessions == item.suspended_sessions
+    assert result.releases[0].instruments[0].suspended_sessions > 0
     for release in result.releases:
         manifest = f"{release.release_id}/manifest.json"
         assert (target / manifest).read_bytes() == (source / manifest).read_bytes()
 
 
 @pytest.mark.asyncio
-async def test_bad_digest_extra_file_and_quota_fail_closed(tmp_path: Path) -> None:
+async def test_bad_digest_extra_file_and_quota_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source, release, calendar = await _fixture(tmp_path)
     clean = tmp_path / "portable.zip"
     export_release_bundle(clean, source, [release], calendar)
@@ -112,6 +122,11 @@ async def test_bad_digest_extra_file_and_quota_fail_closed(tmp_path: Path) -> No
             output.writestr(name, data)
     target = tmp_path / "target"
     target.mkdir()
+    with monkeypatch.context() as disk:
+        disk.setattr("finboard_data.release_bundle.shutil.disk_usage", lambda _: SimpleNamespace(free=0))
+        with pytest.raises(ReleaseBundleError, match="bundle_insufficient_disk"):
+            unpack_release_bundle(clean, target)
+    assert not list(target.iterdir())
     assert inspect_release_bundle(corrupted).releases[0].release_id == release.release_id
     with pytest.raises(ReleaseBundleError, match="bundle_file_checksum_mismatch"):
         unpack_release_bundle(corrupted, target)
