@@ -7,6 +7,7 @@
   --text: oklch(95% 0.016 75);
   --muted: oklch(76% 0.024 72);
   --border: oklch(37% 0.027 70);
+  --finboard-frame-border: var(--border);
   --accent: oklch(85% 0.095 80);
   --on-accent: oklch(24% 0.036 60);
   --service: oklch(85% 0.095 80);
@@ -32,7 +33,10 @@
   line-height: 1.5;
   color: var(--text);
   background: var(--background);
+  scrollbar-width: none;
 }
+
+:root::-webkit-scrollbar { display: none; }
 
 @media (prefers-color-scheme: light) {
   :root {
@@ -68,7 +72,6 @@ body {
 h1, h2, p { margin: 0; }
 
 h1 {
-  margin: 0.75rem 0 1.75rem;
   font-size: 2.65rem;
   line-height: 1.18;
   font-weight: 730;
@@ -84,12 +87,12 @@ p { color: var(--muted); max-width: 65ch; }
 
 .rail {
   position: sticky;
-  inset-block-start: 0;
+  inset-block-start: var(--finboard-titlebar-height, 0px);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2.9rem;
-  height: 100dvh;
+  height: calc(100dvh - var(--finboard-titlebar-height, 0px));
   padding: 1.28rem .6rem;
   background: var(--rail);
 }
@@ -151,19 +154,10 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: .75rem;
+  margin-block-end: 1.75rem;
 }
 
-.wordmark {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: .5rem .8rem;
-  color: var(--text);
-  font-size: 1.02rem;
-  font-weight: 710;
-}
-
-.wordmark span { color: var(--muted); font-size: .8rem; font-weight: 540; }
+.topbar button { flex-shrink: 0; }
 
 .dashboard {
   display: grid;
@@ -459,7 +453,8 @@ summary { cursor: pointer; font-weight: 650; }
   .rail-links a { min-width: 3.2rem; min-height: 2.8rem; padding: .35rem .3rem; }
   .brand-mark { inline-size: 2.7rem; block-size: 2.7rem; padding-block-end: .65rem; }
   main { padding: .9rem 1rem 2rem; }
-  h1 { margin-block-end: 1.15rem; font-size: 2.05rem; }
+  h1 { font-size: 2.05rem; }
+  .topbar { margin-block-end: 1.15rem; }
   .dashboard { grid-template-columns: minmax(0, 1fr); gap: .75rem; }
   .service, .workbench, .sample, .codex { grid-column: 1 / -1; }
   .command { grid-template-columns: minmax(0, 1fr); }

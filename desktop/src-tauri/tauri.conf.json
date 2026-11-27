@@ -17,11 +17,12 @@
         "height": 740,
         "minWidth": 640,
         "minHeight": 530,
+        "decorations": false,
         "dragDropEnabled": false
       }
     ],
     "security": {
-      "capabilities": ["management"],
+      "capabilities": ["management", "research-window"],
       "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src ipc: https://ipc.localhost; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
     }
   },

@@ -118,8 +118,11 @@ jobs:
       - name: Verify the bounded host operations and WebView origins
         working-directory: desktop/src-tauri
         run: cargo test --locked --target x86_64-pc-windows-msvc
-      - name: Check the management UI script
-        run: node --check desktop/ui/app.js
+      - name: Check the desktop UI scripts
+        run: |
+          node --check desktop/ui/app.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check desktop/ui/window-frame.js
       - name: Exercise the Windows desktop installer and recovery paths
         shell: powershell
         run: ./scripts/test_research_desktop_host.ps1

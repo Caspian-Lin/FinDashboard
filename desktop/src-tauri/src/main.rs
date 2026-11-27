@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod operator;
+mod window_frame;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -12,6 +13,7 @@ use tauri::{
     ipc::Channel, webview::NewWindowResponse, AppHandle, Manager, State, Url, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
 };
+use window_frame::WorkbenchPort;
 
 #[derive(Default)]
 struct Operations(Arc<AtomicBool>);
@@ -112,6 +114,7 @@ async fn desktop_open_workbench(
     app: AppHandle,
     window: WebviewWindow,
     operations: State<'_, Operations>,
+    workbench_port: State<'_, WorkbenchPort>,
 ) -> Result<(), String> {
     authorize(&window)?;
     let _permit = operations.acquire()?;
@@ -131,6 +134,9 @@ async fn desktop_open_workbench(
             .url()
             .is_ok_and(|url| is_workbench_origin(&url, port))
         {
+            if workbench.is_minimized().unwrap_or(false) {
+                workbench.unminimize().map_err(|_| "无法还原研究工作台。")?;
+            }
             return workbench
                 .set_focus()
                 .map_err(|_| "无法切换到研究工作台。".into());
@@ -138,26 +144,40 @@ async fn desktop_open_workbench(
         workbench.destroy().map_err(|_| "无法关闭旧研究工作台。")?;
     }
     let url = Url::parse(&format!("http://127.0.0.1:{port}/research")).map_err(|_| "端口无效。")?;
-    WebviewWindowBuilder::new(&app, "research", WebviewUrl::External(url))
+    let frame = window_frame::initialization("research", &url.origin().ascii_serialization());
+    workbench_port.set(port);
+    if WebviewWindowBuilder::new(&app, "research", WebviewUrl::External(url))
         .title("FinDashboard 研究工作台")
         .inner_size(1240.0, 800.0)
+        .decorations(false)
         .incognito(true)
+        .initialization_script(frame)
         .on_navigation(move |url| is_workbench_origin(url, port))
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()
-        .map_err(|_| "无法打开研究工作台，请检查 WebView2。".into())
-        .map(|_| ())
+        .is_err()
+    {
+        workbench_port.set(0);
+        return Err("无法打开研究工作台，请检查 WebView2。".into());
+    }
+    Ok(())
 }
 
 fn main() {
     tauri::Builder::default()
         .manage(Operations::default())
+        .manage(WorkbenchPort::default())
         .invoke_handler(tauri::generate_handler![
             desktop_operation,
-            desktop_open_workbench
+            desktop_open_workbench,
+            window_frame::desktop_window_action
         ])
         .setup(|app| {
             WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+                .initialization_script(window_frame::initialization(
+                    "management",
+                    "https://tauri.localhost",
+                ))
                 .on_navigation(is_management_page)
                 .on_new_window(|_, _| NewWindowResponse::Deny)
                 .build()?;

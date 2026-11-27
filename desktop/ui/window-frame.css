@@ -1,0 +1,104 @@
+:host {
+  position: fixed;
+  z-index: 2147483647;
+  inset: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: var(--finboard-titlebar-height);
+  border-block-end: 1px solid var(--finboard-frame-border, hsl(var(--border, 0 0% 24%)));
+  background: var(--rail, hsl(var(--card, 0 0% 11%)));
+  color: var(--text, hsl(var(--foreground, 0 0% 93%)));
+  font: 600 12px/1.25 "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  pointer-events: auto;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.drag {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  padding-inline: 14px;
+}
+
+.title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.error {
+  margin-inline: 8px;
+  color: var(--danger, hsl(var(--destructive, 0 72% 66%)));
+}
+
+.controls { display: flex; align-self: stretch; }
+
+button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  inline-size: 46px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:hover { background: var(--surface-raised, hsl(var(--accent, 0 0% 19%))); }
+button:active { background: color-mix(in srgb, currentColor 18%, transparent); }
+button:focus-visible { outline: 2px solid currentColor; outline-offset: -4px; }
+
+button::before, button::after { box-sizing: border-box; }
+
+button[data-action="minimize"]::before {
+  content: "";
+  width: 11px;
+  border-block-start: 1px solid currentColor;
+}
+
+button[data-action="toggle_maximize"]::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+}
+
+button[data-maximized="true"]::before {
+  width: 9px;
+  height: 9px;
+  transform: translate(-1px, 1px);
+}
+
+button[data-maximized="true"]::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 6px);
+  left: calc(50% - 2px);
+  width: 8px;
+  height: 8px;
+  border-block-start: 1px solid currentColor;
+  border-inline-end: 1px solid currentColor;
+  border-start-end-radius: 1px;
+}
+
+button[data-action="close"]:hover {
+  background: oklch(50% 0.175 26);
+  color: oklch(98% 0.01 28);
+}
+
+button[data-action="close"]:active { background: oklch(44% 0.16 26); }
+
+button[data-action="close"]::before, button[data-action="close"]::after {
+  content: "";
+  grid-area: 1 / 1;
+  width: 13px;
+  border-block-start: 1px solid currentColor;
+  transform: rotate(45deg);
+}
+
+button[data-action="close"]::after { transform: rotate(-45deg); }
