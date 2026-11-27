@@ -14,6 +14,8 @@
 - LogCapture 断言：python logging 对象无 `.warning` 属性可用（用 `caplog.records` / `caplog.text`）。
 - job `phase` 文案是被测试锁定的隐性契约：收短只准去明细、必须保留具名标记。
 
+- 冻结输入对照先比首决策前后，再核对批取用时的直接等待。2026-11-28 #475 的暖机样本里，六个预取批都已就绪，批首落库间隔仍长于其余槽位。首决策前的大幅耗时变化要单独检查发布缓存和预建负载。
+
 ## 类型与 lint
 
 - CI mypy 也查 `tests/`，改测试文件须本地跑 `uv run mypy .`（本地单文件 mypy 上下文与 CI 全仓不同，type:ignore 判定可能不一致——用真身 + cast 替代鸭子类型假身）。

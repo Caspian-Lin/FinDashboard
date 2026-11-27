@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncGenerator
 from datetime import date
 from typing import Any, cast
 
 import pytest
 
+import finboard_backtest.research_run.frozen_loader as frozen_loader_module
 import finboard_backtest.research_run.signal_engine as signal_engine
 from finboard_backtest.research_run.contracts import (
     ResearchRunInterruptedError,
@@ -23,6 +25,7 @@ from finboard_backtest.research_run.signal_engine import (
     DecisionLoadContext,
     iter_decision_load_contexts,
 )
+from finboard_backtest.research_run.stage_timing import collect_stage_timings
 
 from .test_issue_306_load_probe import (
     _build_release,
@@ -84,6 +87,32 @@ async def _make_stream(
 
 
 class TestDecisionLoadPrefetch:
+    async def test_frozen_market_metadata_is_built_once_and_batch_timings_are_observable(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        builds = 0
+        original = frozen_loader_module._build_candidates_and_lots
+
+        def build(*args: Any, **kwargs: Any) -> Any:
+            nonlocal builds
+            builds += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(frozen_loader_module, "_build_candidates_and_lots", build)
+        with collect_stage_timings() as timings:
+            _, _, stream = await _make_stream(tmp_path)
+            decisions = [item async for item in stream]
+        expected = _month_end_decisions()
+        assert [item.context.business_date for item in decisions] == expected
+        assert builds == 1
+        assert decisions[0].context.lot_info == decisions[1].context.lot_info
+        assert decisions[0].context.lot_info is not decisions[1].context.lot_info
+        measured = timings.as_dict()
+        assert "decision_batch_foreground_load" in measured
+        assert "decision_batch_background_load" in measured
+        assert "decision_batch_consumer" in measured
+        assert "decision_batch_wait_at_join" in measured or "decision_batch_ready_at_join" in measured
+
     async def test_cancel_during_precompute_abandons_pool(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -266,6 +295,46 @@ class TestDecisionLoadPrefetch:
         assert any(
             set(decisions[4:]).issubset(set(batch)) for batch in released_daily
         )
+
+    async def test_aclose_unwinds_prefetch_when_covariance_thread_is_blocked(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        started = asyncio.Event()
+        released = asyncio.Event()
+        resume_thread = threading.Event()
+        loop = asyncio.get_running_loop()
+        real_covariance = signal_engine._timed_covariance
+        calls = 0
+        lock = threading.Lock()
+
+        def block_first_background_estimate(price_series: Any, stage: str) -> Any:
+            nonlocal calls
+            with lock:
+                calls += 1
+                block = calls == 5
+            if not block:
+                return real_covariance(price_series, stage)
+            loop.call_soon_threadsafe(started.set)
+            try:
+                if not resume_thread.wait(timeout=5):
+                    raise TimeoutError("测试未释放阻塞的协方差线程")
+                return real_covariance(price_series, stage)
+            finally:
+                loop.call_soon_threadsafe(released.set)
+
+        monkeypatch.setattr(signal_engine, "_timed_covariance", block_first_background_estimate)
+        _, _, stream = await _make_stream(tmp_path)
+        try:
+            await stream.__anext__()
+            await asyncio.wait_for(started.wait(), timeout=2)
+            await asyncio.wait_for(stream.aclose(), timeout=2)
+            assert _prefetch_tasks() == []
+            assert not released.is_set()
+        finally:
+            resume_thread.set()
+            await stream.aclose()
+            if started.is_set():
+                await asyncio.wait_for(released.wait(), timeout=2)
 
     async def test_skip_prefix_crossing_chunk_prefetches_only_suffix(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch

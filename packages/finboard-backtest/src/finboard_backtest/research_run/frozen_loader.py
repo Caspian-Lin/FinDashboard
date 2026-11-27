@@ -655,15 +655,12 @@ class FrozenInputLoader:
         default=None, init=False, repr=False
     )
     _price_precompute_built: bool = field(default=False, init=False, repr=False)
-    # #470 后半场:stub-only 装载的发布级候选池 / 执行元数据缓存(与期次
-    # 无关,loader 实例内一次构建;只服务 :meth:`load_resume_stub`,全量
-    # ``load_context`` 逐期重建的历史行为不变)。
-    _stub_candidates: tuple[UniverseCandidate, ...] | None = field(
-        default=None, init=False, repr=False
-    )
-    _stub_lot_info: dict[str, AssetLotInfo] | None = field(
-        default=None, init=False, repr=False
-    )
+    # 发布和显式标的域冻结后,所有期次共用候选与执行元数据值。
+    _market_metadata: tuple[
+        tuple[FrozenArtifactRef, tuple[str, ...]],
+        tuple[UniverseCandidate, ...],
+        dict[str, AssetLotInfo],
+    ] | None = field(default=None, init=False, repr=False)
     # Run-scoped series record cache.  The projection pass and concurrent
     # decision loads must address the same immutable record even when an
     # injected provider does not memoize its own results.
@@ -796,14 +793,8 @@ class FrozenInputLoader:
             self._price_precompute_built = True
             return
         self._price_precompute_built = True
-        candidates, _ = _build_candidates_and_lots(
-            _declared_domain_instruments(
-                manifest,
-                list(
-                    self.release_provider_factory(release_ref.artifact_id).release.instruments
-                ),
-            )
-        )
+        provider = self.release_provider_factory(release_ref.artifact_id)
+        candidates, _ = self._market_inputs(manifest, release_ref, provider)
         symbols = tuple(item.symbol for item in candidates)
         if not symbols:
             self._price_precompute_built = True
@@ -817,6 +808,22 @@ class FrozenInputLoader:
             progress=progress,
             process_pool=process_pool,
         )
+
+    def _market_inputs(
+        self,
+        manifest: ResearchRunManifest,
+        release_ref: FrozenArtifactRef,
+        provider: FrozenReleaseProvider,
+    ) -> tuple[tuple[UniverseCandidate, ...], dict[str, AssetLotInfo]]:
+        key = (release_ref, tuple(manifest.strategy_spec.universe.explicit_symbols))
+        cached = self._market_metadata
+        if cached is None or cached[0] != key:
+            candidates, lots = _build_candidates_and_lots(
+                _declared_domain_instruments(manifest, provider.release.instruments)
+            )
+            cached = (key, candidates, lots)
+            self._market_metadata = cached
+        return cached[1], cached[2]
 
     async def load_context(
         self,
@@ -844,10 +851,7 @@ class FrozenInputLoader:
             raise ValueError("execution_at 必须晚于 decision_at")
         release_ref = self._bars_release_ref(manifest)
         provider = self.release_provider_factory(release_ref.artifact_id)
-        release = provider.release
-        included_candidates, lot_info_by_symbol = _build_candidates_and_lots(
-            _declared_domain_instruments(manifest, list(release.instruments))
-        )
+        included_candidates, lot_info_by_symbol = self._market_inputs(manifest, release_ref, provider)
         # issue #454:矩阵未预建时(直接调用 load_context 的路径),首次构建即按
         # 执行价基携带 open 平行序列——此后 close 查询先行触发构建会把 next_open
         # run 的矩阵建成 close-only,执行价只能逐标的回退全历史读取。
@@ -921,7 +925,7 @@ class FrozenInputLoader:
             features=features,
             prices=prices,
             execution_prices=execution_prices,
-            lot_info=lot_info_by_symbol,
+            lot_info=dict(lot_info_by_symbol),
             input_artifact_ids=artifact_ids,
             included_symbols=tuple(item.symbol for item in included_candidates),
             research_release_missing_symbols=research_missing,
@@ -966,16 +970,8 @@ class FrozenInputLoader:
             raise ValueError("execution_at 必须晚于 decision_at")
         release_ref = self._bars_release_ref(manifest)
         provider = self.release_provider_factory(release_ref.artifact_id)
-        if self._stub_lot_info is None:
-            # 候选池 / 执行元数据只取决于发布 instruments 与声明域,与决策
-            # 期次无关 —— stub 路径按 loader 实例一次构建(全量 load_context
-            # 逐期重建的历史行为不变)。
-            release = provider.release
-            self._stub_candidates, self._stub_lot_info = _build_candidates_and_lots(
-                _declared_domain_instruments(manifest, list(release.instruments))
-            )
-        candidates = self._stub_candidates or ()
-        lot_info = dict(self._stub_lot_info or {})
+        candidates, frozen_lots = self._market_inputs(manifest, release_ref, provider)
+        lot_info = dict(frozen_lots)
         if symbols is not None:
             # 收窄只作用于价格装载域:lot_info 是逐成交乘数查询,同样只被
             # ``symbols`` 内的标的消费(fail-closed:缺键 → 重放抛错 →
@@ -1034,9 +1030,7 @@ class FrozenInputLoader:
             return
         release_ref = self._bars_release_ref(manifest)
         provider = self.release_provider_factory(release_ref.artifact_id)
-        included_candidates, _ = _build_candidates_and_lots(
-            _declared_domain_instruments(manifest, list(provider.release.instruments))
-        )
+        included_candidates, _ = self._market_inputs(manifest, release_ref, provider)
         # issue #336:next_open 执行价基需要 open 平行序列,矩阵预建时一并
         # 读取(next_close 不付这份数据成本)。
         include_open = _wants_execution_open(manifest)
@@ -1121,9 +1115,7 @@ class FrozenInputLoader:
 
         bars_ref = self._bars_release_ref(manifest)
         bars_provider = self.release_provider_factory(bars_ref.artifact_id)
-        candidates, _ = _build_candidates_and_lots(
-            _declared_domain_instruments(manifest, list(bars_provider.release.instruments))
-        )
+        candidates, _ = self._market_inputs(manifest, bars_ref, bars_provider)
         ordered = sorted(decision_ats)
         daily_releases = [
             release_ref

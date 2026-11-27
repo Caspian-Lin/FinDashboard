@@ -1560,6 +1560,12 @@ async def _compute_period_features(
             f"(通常发布起点历史不足): {exc}{hint}"
         )
 
+    if price_precompute is not None:
+        # 成功查表时无需再按发布逐标的重建范围。
+        values = price_precompute.feature_values(decision_at, release_id)
+        if values:
+            return values
+        # 空集回落原路径,保持「数据不足」的具名报错。
     explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
     if explicit_symbols:
         symbols_argument: tuple[str, ...] | None = tuple(explicit_symbols)
@@ -1574,13 +1580,6 @@ async def _compute_period_features(
             for inst in provider.release.instruments
             if not is_benchmark_only_instrument(inst)
         )
-    if price_precompute is not None:
-        # issue #450 追续:预计算查表 + FeatureValue 构造(逐值等值于快照
-        # 路径;顺序同为 scoped 标的序 x 特征构造序)。
-        values = price_precompute.feature_values(decision_at, release_id)
-        if values:
-            return values
-        # 空集回落原路径:沿用「数据不足」的具名报错语义(fail-closed 不变)。
     if close_histories:
         # issue #450 追续:close 矩阵已构建时直接切片算价格特征,跳过进程池
         # 逐标的整文件重读(全市场 x 多期的主要加载成本);矩阵缺失标的在
@@ -2415,9 +2414,12 @@ async def iter_decision_load_contexts(
             timing=manifest.strategy_spec.execution_model.timing,
             trading_days_loader=trading_days_loader,
         )
+        phase_started = perf_counter()
         context = await loader.load_context(
             manifest, decision_at=decision_at, execution_at=execution_at
         )
+        record_stage_timing("decision_frozen_input_context", phase_started)
+        phase_started = perf_counter()
         if schedule is not None:
             period_features = await _compute_period_features(
                 provider,
@@ -2431,6 +2433,8 @@ async def iter_decision_load_contexts(
             features = (*period_features, *context.features)
         else:
             features = context.features
+        record_stage_timing("decision_price_features", phase_started)
+        phase_started = perf_counter()
         # issue #380:信号引擎特征截面统一收窄到发布可交易域(逐期重算已在
         # 源头收窄,这里对快照 / 研究发布观测兜底,single_shot 同样覆盖)。
         features = _exclude_benchmark_only_features(features, provider, manifest)
@@ -2469,6 +2473,8 @@ async def iter_decision_load_contexts(
         # issue #396:执行日全天停牌的标的不可撮合,不产出新信号(卖出由
         # 组合管线按停牌拒单 fail-visible 处理,持仓保留)。
         signalable -= context.execution_suspended
+        record_stage_timing("decision_universe_evaluation", phase_started)
+        phase_started = perf_counter()
         price_series = await _load_price_series(
             provider,
             tuple(signalable),
@@ -2478,6 +2484,7 @@ async def iter_decision_load_contexts(
         signalable = frozenset(
             symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
         )
+        record_stage_timing("decision_price_history", phase_started)
         record_stage_timing("decision_load_without_covariance", started)
         return DecisionLoadContext(
             context=context,
@@ -2501,6 +2508,8 @@ async def iter_decision_load_contexts(
     async def _load_chunk(
         chunk_start: int,
         chunk: Sequence[tuple[datetime, str | None]],
+        *,
+        background: bool = False,
     ) -> list[DecisionLoadContext]:
         """加载并释放一个决策批次,供当前批或单个预取任务使用。
 
@@ -2514,6 +2523,7 @@ async def iter_decision_load_contexts(
             return []
         results: list[DecisionLoadContext | BaseException] = []
         loaded: list[DecisionLoadContext] = []
+        started = perf_counter()
         try:
             # gather 也必须位于 finally 内:预取 task 在任一子任务尚未完成时
             # 被取消,仍需释放本批已占用的 price/daily 预计算槽位。
@@ -2539,6 +2549,10 @@ async def iter_decision_load_contexts(
                 loaded.append(result)
             return loaded
         finally:
+            record_stage_timing(
+                "decision_batch_background_load" if background else "decision_batch_foreground_load",
+                started,
+            )
             # issue #463:每批上下文构建完即释放对应预计算槽位。预取批次
             # 也必须在 task 内完成释放,否则「当前批 + 下一批」之外会继续
             # 持有全市场 daily / price feature 大数组。
@@ -2555,6 +2569,8 @@ async def iter_decision_load_contexts(
     ) -> list[DecisionLoadContext]:
         """取得预取结果,并在等待被取消时显式收口子任务。"""
 
+        started = perf_counter()
+        stage = "decision_batch_ready_at_join" if task.done() else "decision_batch_wait_at_join"
         try:
             return await task
         except BaseException:
@@ -2563,6 +2579,8 @@ async def iter_decision_load_contexts(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
             raise
+        finally:
+            record_stage_timing(stage, started)
 
     # #470 后半场:前缀期已由种子覆盖 —— produced 从 skip 起报(加载帧的
     # k 保持「已完成期数」语义:种子前缀 + 本流已加载期)。
@@ -2604,17 +2622,23 @@ async def iter_decision_load_contexts(
                 ]
                 if next_chunk and prefetch_task is None:
                     prefetch_task = asyncio.create_task(
-                        _load_chunk(next_start, next_chunk),
+                        _load_chunk(next_start, next_chunk, background=True),
                         name="research_run.decision_load_prefetch",
                     )
             # 保持期序,每期交给下游后立即释放本批对它的引用。
             loaded.reverse()
-            while loaded:
-                yield loaded.pop()
+            consumer_started = perf_counter()
+            try:
+                while loaded:
+                    yield loaded.pop()
+            finally:
+                record_stage_timing("decision_batch_consumer", consumer_started)
     finally:
         # issue #475:消费者提前关闭 / 下游抛错时,预取任务必须显式
         # cancel + await;否则其 gather 子任务可能继续读盘并把半批对象
         # 留在事件循环中,形成 task 泄漏和额外内存驻留。
+        # to_thread 已开始的原生估计可在异步包装关闭后完成。等待该线程退出
+        # 会让 stall watchdog 无法及时结束加载段。
         if prefetch_task is not None:
             task = prefetch_task
             prefetch_task = None
