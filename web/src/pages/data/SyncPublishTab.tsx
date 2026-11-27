@@ -1,11 +1,10 @@
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
-import { CircleDashed, FolderClock, HardDriveDownload, ListTodo, Settings2, UploadCloud } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { FolderClock, HardDriveDownload, ListTodo, Settings2, UploadCloud } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { LoadingState, ErrorState } from "@/components/ui/states";
+import { BackfillRequestCard } from "@/components/data/BackfillRequestCard";
 import { CoverageBar } from "@/components/data/CoverageBar";
 import { StatusPill } from "@/components/data/StatusPill";
 import { useT } from "@/i18n";
@@ -23,7 +22,7 @@ interface EntryLink {
   icon: ReactNode;
 }
 
-/** 同步与发布(第一阶段):只读状态面板 + 既有入口链接 + #511 接入占位。 */
+/** 同步与发布状态、操作入口和共享补数。 */
 export function SyncPublishTab({
   entries,
   params,
@@ -88,11 +87,11 @@ export function SyncPublishTab({
       <ReleaseBundlePanel entries={entries} onImported={reload} />
       <Alert>
         <FolderClock className="h-4 w-4" />
-        <AlertTitle>{tl({ zh: "第一阶段:只读状态面板", en: "Phase 1: read-only status" })}</AlertTitle>
+        <AlertTitle>{tl({ zh: "同步与补数", en: "Sync and backfill" })}</AlertTitle>
         <AlertDescription>
           {tl({
-            zh: "本页只展示同步/发布现状与既有入口;保存设置与执行仍然分离,补数请求的预览→提交交互在 #511 落地后接入(第二阶段)。",
-            en: "This page only shows sync/publish status and existing entry points. Saving settings and running them stay separate; the backfill preview→submit flow lands with #511 (phase 2).",
+            zh: "查看同步和发布状态，按缺口补数。预检通过后显式提交，补齐的数据可生成新的共享发布。",
+            en: "Check sync and publish status, then preview and explicitly submit a request to fill gaps. Completed backfills can create new shared releases.",
           })}
         </AlertDescription>
       </Alert>
@@ -172,65 +171,7 @@ export function SyncPublishTab({
         </Card>
       </div>
 
-      {/*
-        TODO(#511) 第二阶段接入位:
-        - 范围预检 POST /api/data/backfills/preview(scope → 候选发布/理由/交集/缺口/受影响策略)
-        - 显式提交 POST /api/data/backfills(幂等键 + 配额预占 + publish 开关)
-        - 进度/取消/重试读 background_jobs(复用任务中心轮询)
-        第一阶段不接任何未实现接口:按钮禁用,只保留 #511 的说明与 topic 预填参数。
-      */}
-      <Card className="border-dashed">
-        <CardHeader>
-          <CardTitle className="flex flex-wrap items-center gap-2 text-base">
-            <CircleDashed className="h-4 w-4" aria-hidden="true" />
-            {tl({ zh: "补数请求 · 接入位", en: "Backfill request · entry point" })}
-            <Badge variant="outline">#511</Badge>
-          </CardTitle>
-          <CardDescription>
-            {tl({
-              zh: "范围预检 → 候选发布 → 显式提交 → 进度/取消/重试。第一阶段只保留占位,不提交任何请求。",
-              en: "Scope precheck → candidate releases → explicit submit → progress/cancel/retry. Phase 1 keeps a placeholder and submits nothing.",
-            })}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            {tl({
-              zh: "接入后:本区按课题范围预填(scope),预览新发布 ID / 版本 / 标的数,用户显式确认后才提交;默认 publish=true 但可按请求关闭。",
-              en: "Once wired: prefilled from the topic scope, previewing new release IDs / versions / symbol counts; nothing runs until the user explicitly confirms. publish=true by default but opt-out per request.",
-            })}
-          </p>
-          {topicId ? (
-            <p className="rounded-md border border-border bg-muted/30 p-2 font-mono text-xs">
-              {tl({ zh: "预填课题", en: "Prefilled topic" })}: {topicId}
-              <Link
-                className="ml-3 text-primary underline underline-offset-2"
-                to={dataHref({ tab: "overview", topic: topicId })}
-              >
-                {tl({ zh: "查看课题数据范围", en: "View topic data scope" })}
-              </Link>
-            </p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {tl({
-                zh: "从课题详情页进入时会带上 ?topic=RT-... 作为范围预填。",
-                en: "Arriving from a topic detail page carries ?topic=RT-... as the scope prefill.",
-              })}
-            </p>
-          )}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button disabled aria-disabled="true" title={tl({ zh: "第二阶段接入 #511 后可用", en: "Available after #511 lands in phase 2" })}>
-              {tl({ zh: "范围预检(待接入)", en: "Scope precheck (pending)" })}
-            </Button>
-            <Button variant="outline" disabled aria-disabled="true">
-              {tl({ zh: "提交补数请求(待接入)", en: "Submit backfill (pending)" })}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              {tl({ zh: "第二阶段 #511", en: "Phase 2 · #511" })}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
+      <BackfillRequestCard key={topicId ?? "global"} topicId={topicId} />
     </div>
   );
 }

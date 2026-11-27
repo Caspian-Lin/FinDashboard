@@ -38,7 +38,7 @@ test("home, keyboard skip, edition boundaries, and old URLs", async ({ page }, i
   }
 
   await page.goto(`/research/workbench?topic=${topicId}#handoff`);
-  await expect(page).toHaveURL(`**/research/agent-connect?topic=${topicId}#handoff`);
+  await expect(page).toHaveURL(`/research/agent-connect?topic=${topicId}#handoff`);
   await page.goto(`/research/data?tab=releases&release=${releaseId}#data`);
   await expect(page).toHaveURL(/\/data\?/);
   expect(new URL(page.url()).searchParams.get("release")).toBe(releaseId);
@@ -64,7 +64,7 @@ test("settings guides empty research instances and resumes after an import", asy
   await expect(page.getByText(/import --bundle/)).toBeVisible();
   await expect(page.getByText("未配置", { exact: true })).toBeVisible();
   await page.getByLabel("界面语言").selectOption("en");
-  await page.getByLabel("Theme").selectOption("light");
+  await page.getByRole("combobox", { name: /Theme/ }).selectOption("light");
   await expect(page.locator("html")).toHaveClass("light");
   await expect(page.getByRole("heading", { name: "System Diagnostics", exact: true })).toBeVisible();
   imported = true;
