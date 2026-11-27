@@ -63,6 +63,7 @@ from finboard_backtest.research_code import is_promoted_artifact, promotion_stat
 from finboard_backtest.validation.contracts import (
     AcceptanceThresholds,
     ExperimentStatus,
+    ResearchExperiment,
     RobustnessPlan,
     TrialRecord,
     TrialStatus,
@@ -238,6 +239,7 @@ class ValidationExperimentCreateIn(WorkspaceInput):
     strategy_params_space: dict[str, Any] | None = None
     supersedes_id: str | None = Field(default=None, max_length=32)
     notes: str = Field(default="", max_length=4000)
+    expected_preview_checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ValidationTrialIn(WorkspaceInput):
@@ -499,10 +501,9 @@ async def _execute_code_run(
     }
 
 
-async def _create_validation_experiment(
-    session: AsyncSession, payload: dict[str, Any]
-) -> dict[str, Any]:
-    data = ValidationExperimentCreateIn.model_validate(payload)
+async def _prepare_validation_experiment(
+    session: AsyncSession, data: ValidationExperimentCreateIn
+) -> ResearchExperiment:
     experiment = new_experiment(
         hypothesis=data.hypothesis,
         version_stamp=_build_version_stamp(data.version_stamp),
@@ -521,6 +522,31 @@ async def _create_validation_experiment(
         raise ResearchInvalidInputError(
             f"正式规格验证前置失败: {exc}", code="invalid_validation_experiment"
         ) from exc
+    return experiment
+
+
+def _validation_preview_checksum(experiment: ResearchExperiment) -> str:
+    return payload_checksum({
+        "version_stamp": experiment.version_stamp.as_dict(),
+        "hypothesis": experiment.hypothesis,
+        "plan": experiment.plan.as_dict(),
+        "thresholds": experiment.thresholds.as_dict(),
+        "robustness": experiment.robustness.as_dict(),
+        "strategy_params_space": experiment.strategy_params_space,
+        "supersedes_id": experiment.supersedes_id,
+        "notes": experiment.notes,
+    })
+
+
+async def _create_validation_experiment(
+    session: AsyncSession, payload: dict[str, Any]
+) -> dict[str, Any]:
+    data = ValidationExperimentCreateIn.model_validate(payload)
+    experiment = await _prepare_validation_experiment(session, data)
+    if data.expected_preview_checksum and data.expected_preview_checksum != _validation_preview_checksum(experiment):
+        raise ResearchPreconditionFailedError(
+            "实验冻结输入已变化,请重新预览", code="validation_preview_drift"
+        )
     await ResearchExperimentRepository(session).save(experiment)
     return {
         "experiment_id": experiment.experiment_id,
@@ -1186,6 +1212,42 @@ def _validated_action_payload(action: str, payload: dict[str, Any]) -> dict[str,
         ) from exc
 
 
+async def preview_topic_action(
+    session: AsyncSession,
+    *,
+    topic_id: str,
+    action: str,
+    goal_version: str,
+    payload: dict[str, Any],
+    ctx: ResearchOperationContext,
+) -> dict[str, Any]:
+    """Preview the formal spec gate without creating an experiment or consuming the holdout."""
+    if action != "validation_experiment.create":
+        raise ResearchInvalidInputError("此动作没有预检入口", code="unsupported_action_preview")
+    _require_action_scope(ctx, action)
+    topic = await _require_topic(session, topic_id)
+    _require_active_with_goal(topic, goal_version)
+    data = ValidationExperimentCreateIn.model_validate(_validated_action_payload(action, payload))
+    experiment = await _prepare_validation_experiment(session, data)
+    runner = experiment.version_stamp.selection_config.get("validation_trial_runner")
+    if not isinstance(runner, dict) or runner.get("kind") != "research_spec":
+        raise ResearchInvalidInputError("预览须选择冻结研究规格", code="formal_validation_required")
+    manifest = runner["frozen_manifest"]
+    return {
+        "preview_checksum": _validation_preview_checksum(experiment),
+        "version_checksum": experiment.version_stamp.checksum(),
+        "baseline_run_id": runner["baseline_run_id"],
+        "strategy_version": manifest.get("strategy_version"),
+        "dataset_releases": manifest["dataset_releases"],
+        "plan": experiment.plan.as_dict(),
+        "thresholds": experiment.thresholds.as_dict(),
+        "fee_config": manifest.get("fee_config", {}),
+        "portfolio_config": manifest.get("portfolio_config", {}),
+        "fee_policy_version": manifest.get("parameters", {}).get("fee_policy_version"),
+        "used_windows": runner["used_windows"],
+    }
+
+
 async def run_topic_action(
     session: AsyncSession,
     *,
@@ -1486,6 +1548,7 @@ __all__ = [
     "ValidationTrialIn",
     "ValidationUnsealIn",
     "list_topic_artifact_links",
+    "preview_topic_action",
     "run_topic_action",
     "unseal_preflight",
 ]

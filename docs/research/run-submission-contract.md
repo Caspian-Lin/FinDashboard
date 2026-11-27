@@ -22,6 +22,12 @@
 
 `finboard_run_queue` 可用 `preview_only=true` 执行同一预检。调用仍需既有 `research.run` 作用域。
 
+## 高级入口
+
+策略 Studio 可从具体已发布版本打开研究运行配置；修订版以原版本取回。组合页按当前输入计算三档可行性，参数改变会要求重新评估，正式运行继续检查冻结组合和费用。
+
+因子实验室通过 `POST /api/research/factors/features/preflight` 核对发布与决策时点，用户随后单独提交算快照的任务。探索回测用 `POST /api/backtest/preflight` 核对参数、行情源、基准及费用；确认时将摘要作为 `expected_preview_checksum` 传回原 `/api/backtest/run`。探索回测摘要覆盖规范化参数、撮合与基准口径、所选行情数据源和已解析选股版本；入队锁定选股版本，行情在执行时读取。正式实验使用冻结发布。MCP 相应工具使用 `preview_only=true`。
+
 ## 1. 分层与职责
 
 ```text

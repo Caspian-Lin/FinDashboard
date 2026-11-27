@@ -751,6 +751,49 @@ async def test_operation_id_is_unique_across_run_links_and_actions(
     assert await _count(engine, ResearchRunModel) == 1
 
 
+async def test_formal_experiment_preview_is_read_only_and_blocks_changed_inputs(
+    engine: AsyncEngine, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finboard_app import spec_validation
+
+    async def freeze(session: Any, experiment: Any) -> Any:
+        runner = experiment.version_stamp.selection_config["validation_trial_runner"]
+        stamp = replace(experiment.version_stamp, selection_config={
+            "validation_trial_runner": {
+                **runner,
+                "frozen_manifest": {"strategy_version": 2, "dataset_releases": []},
+            }
+        })
+        return replace(experiment, version_stamp=stamp)
+
+    monkeypatch.setattr(spec_validation, "freeze_spec_runner", freeze)
+    topic_id = (await _create_topic(engine))["topic_id"]
+    url = f"/api/research/topics/{topic_id}/actions"
+    payload = _validation_payload()
+    payload["version_stamp"]["selection_config"] = {"validation_trial_runner": {
+        "kind": "research_spec", "baseline_run_id": "RR-baseline", "used_windows": [],
+    }}
+    action = {"action": "validation_experiment.create", "goal_version": "v1", "payload": payload}
+    preview = await client.post(f"{url}/preview", json=action)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["strategy_version"] == 2
+    assert await _count(engine, ResearchExperimentModel) == 0
+    assert await _count(engine, ResearchTopicActionReceiptModel) == 0
+    assert await _count(engine, BackgroundJobModel) == 0
+
+    payload["expected_preview_checksum"] = preview.json()["preview_checksum"]
+    changed = {**action, "payload": {**payload, "hypothesis": "变更后的正式验证假设不可复用已确认的预览"}}
+    rejected = await client.post(url, json=changed)
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"]["code"] == "validation_preview_drift"
+
+    stored = await client.post(url, json=action)
+    assert stored.status_code == 201, stored.text
+    assert stored.json()["result"]["final_test_unsealed"] is False
+    assert await _count(engine, ResearchExperimentModel) == 1
+    assert await _count(engine, BackgroundJobModel) == 0
+
+
 async def test_validation_experiment_create_add_trial_and_unseal(
     engine: AsyncEngine,
 ) -> None:

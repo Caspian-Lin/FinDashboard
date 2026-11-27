@@ -378,8 +378,16 @@ class ResearchDatasetRepository:
         交易日的场景仍由逐期 SKIPPED 快照的 skip_reason 承载(配合引擎的
         selection_diagnostics 可见)。
         """
+        _, missing = await self.resolve_selection_batches(config)
+        return missing
+
+    async def resolve_selection_batches(
+        self, config: FactorSelectionConfig
+    ) -> tuple[dict[str, ResearchSyncBatchModel], tuple[str, ...]]:
+        """Resolve the published selection inputs using the same availability gate."""
         if not config.enabled or config.inputs_mode is not InputsMode.RESEARCH_DB:
-            return ()
+            return {}, ()
+        batches: dict[str, ResearchSyncBatchModel] = {}
         missing: list[str] = []
         for name in sorted(config.required_datasets):
             try:
@@ -387,14 +395,12 @@ class ResearchDatasetRepository:
             except ValueError:
                 missing.append(f"unknown_dataset:{name}")
                 continue
-            batch = await self._resolve_batch(
-                dataset,
-                config.source,
-                config.dataset_versions.get(name),
-            )
+            batch = await self._resolve_batch(dataset, config.source, config.dataset_versions.get(name))
             if batch is None:
                 missing.append(f"dataset_unpublished:{name}")
-        return tuple(missing)
+            else:
+                batches[name] = batch
+        return batches, tuple(missing)
 
     async def upsert_instrument_profiles(
         self,

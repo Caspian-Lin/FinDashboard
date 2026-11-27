@@ -442,15 +442,17 @@ function GenerateFeatureSnapshotDialog({
     enabled: open,
   });
   const selectedRelease = releasesQuery.data?.find((item) => item.release_id === releaseId);
+  const input = { dataset_release_id: releaseId, decision_at: `${decisionDate}T23:59:59+08:00` };
+  const preflight = useMutation({ mutationFn: factorLabApi.previewFeatureSnapshot });
+  const sameInput = preflight.variables?.dataset_release_id === input.dataset_release_id
+    && preflight.variables?.decision_at === input.decision_at;
+  const validated = sameInput ? preflight.data : undefined;
   const mutation = useMutation({
     mutationFn: () => {
       if (!releaseId || !decisionDate) {
         throw new Error(tl({ zh: "请选择数据发布和决策日", en: "Select a dataset release and a decision date" }));
       }
-      return factorLabApi.startFeatureSnapshotJob({
-        dataset_release_id: releaseId,
-        decision_at: `${decisionDate}T23:59:59+08:00`,
-      });
+      return factorLabApi.startFeatureSnapshotJob(input);
     },
     onSuccess: (job) => setJobId(job.job_id),
   });
@@ -485,6 +487,7 @@ function GenerateFeatureSnapshotDialog({
   }, [onGenerated, onOpenChange, snapshotQuery.data]);
 
   const resetMutation = mutation.reset;
+  const resetPreflight = preflight.reset;
 
   React.useEffect(() => {
     if (!open) {
@@ -493,6 +496,7 @@ function GenerateFeatureSnapshotDialog({
       setJobId(null);
       handledSnapshotId.current = null;
       resetMutation();
+      resetPreflight();
       return;
     }
     const first = releasesQuery.data?.[0];
@@ -500,7 +504,7 @@ function GenerateFeatureSnapshotDialog({
       setReleaseId(first.release_id);
       setDecisionDate(first.end_date);
     }
-  }, [open, releaseId, releasesQuery.data, resetMutation]);
+  }, [open, releaseId, releasesQuery.data, resetMutation, resetPreflight]);
 
   const valid =
     !!selectedRelease &&
@@ -603,6 +607,21 @@ function GenerateFeatureSnapshotDialog({
           </div>
         )}
 
+        {validated && (
+          <div className="space-y-2 rounded-md border p-3 text-sm">
+            <p className="font-medium">{tl({ zh: "已核对冻结发布与决策时点", en: "Frozen releases and decision time verified" })}</p>
+            <p className="tabular-nums">{validated.decision_at}</p>
+            {validated.releases.map((release) => (
+              <p key={release.release_id} className="break-all">
+                <Link to={`/data?release=${encodeURIComponent(release.release_id)}`} className="text-primary underline">{release.release_id}</Link>
+                {" · "}{release.version}{" · "}{release.symbol_count}
+              </p>
+            ))}
+          </div>
+        )}
+        {sameInput && preflight.isError && (
+          <p className="text-sm text-destructive" role="alert">{preflight.error.message}</p>
+        )}
         {mutation.isError && (
           <Alert variant="destructive">
             <AlertTitle>{tl({ zh: "快照生成失败", en: "Snapshot generation failed" })}</AlertTitle>
@@ -620,7 +639,10 @@ function GenerateFeatureSnapshotDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             {tl({ zh: "取消", en: "Cancel" })}
           </Button>
-          <Button onClick={() => mutation.mutate()} disabled={!valid || busy}>
+          <Button variant="outline" onClick={() => preflight.mutate(input)} disabled={!valid || busy || preflight.isPending}>
+            {preflight.isPending ? tl({ zh: "正在预检…", en: "Checking…" }) : tl({ zh: "预检发布与日期", en: "Preview Release and Date" })}
+          </Button>
+          <Button onClick={() => mutation.mutate()} disabled={!valid || !validated || busy || preflight.isPending}>
             <Sparkles className="mr-2 h-4 w-4" />
             {busy
               ? tl({ zh: "计算并发布中…", en: "Computing and publishing…" })

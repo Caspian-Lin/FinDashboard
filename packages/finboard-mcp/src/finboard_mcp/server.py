@@ -188,6 +188,10 @@ finboard_topic_write(operation="append") 追加轮次 + finboard_memory_remember
   workspace-contract.md。
 - finboard_run_queue 的 preview_only=true 预览生效输入。提交时可附
   expected_manifest_checksum 验证输入一致。
+- 探索回测和特征快照可通过 finboard_backtest_run / finboard_feature_snapshot_job_start
+  的 preview_only=true 核对参数、来源与窗口。正式规格实验用
+  finboard_topic_action(action="validation_experiment.create",preview_only=true);
+  登记时可附 expected_preview_checksum,揭盲走原一次性动作。
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部

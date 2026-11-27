@@ -475,6 +475,58 @@ class TestBulkDownloadEnqueueContract:
         assert idem == f"bulk_download:a_share:akshare:2024-01-01:all:sub:{digest}"
 
 
+def test_backtest_preflight_normalizes_inputs_without_enqueueing(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finboard_api.deps import get_db_session
+    from finboard_persistence import ResearchDatasetRepository
+
+    session = AsyncMock()
+    app.dependency_overrides[get_db_session] = lambda: session
+    monkeypatch.setattr(ResearchDatasetRepository, "resolve_selection_batches", AsyncMock(return_value=({}, ())))
+    enqueue = AsyncMock()
+    monkeypatch.setattr("finboard_api.job_helpers.enqueue_job", enqueue)
+    body = {"strategy": "ma_cross", "symbols": ["510300.SH"], "start": "2024-01-01", "end": "2024-01-31"}
+
+    preview = client.post("/api/backtest/preflight", json=body)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["request"]["params"]["short_window"] is not None
+    assert preview.json()["benchmark"]["equal_weight_universe"]
+    enqueue.assert_not_awaited()
+
+    checksum = preview.json()["preview_checksum"]
+    changed = {**body, "capital": "300000"}
+    rejected = client.post("/api/backtest/run", json=changed, params={"expected_preview_checksum": checksum})
+    assert rejected.status_code == 409, rejected.text
+    enqueue.assert_not_awaited()
+
+
+def test_backtest_preflight_rejects_new_default_selection_batch(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finboard_api.deps import get_db_session
+    from finboard_persistence import ResearchDatasetRepository
+
+    app.dependency_overrides[get_db_session] = lambda: AsyncMock()
+    batches = AsyncMock(side_effect=[
+        ({"daily_metrics": SimpleNamespace(dataset_version="batch-v1")}, ()),
+        ({"daily_metrics": SimpleNamespace(dataset_version="batch-v2")}, ()),
+    ])
+    monkeypatch.setattr(ResearchDatasetRepository, "resolve_selection_batches", batches)
+    enqueue = AsyncMock()
+    monkeypatch.setattr("finboard_api.job_helpers.enqueue_job", enqueue)
+    body = {"strategy": "ma_cross", "symbols": ["510300.SH"], "start": "2024-01-01", "end": "2024-01-31",
+            "selection": {"enabled": True}}
+    preview = client.post("/api/backtest/preflight", json=body)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["request"]["selection"]["dataset_versions"] == {"daily_metrics": "batch-v1"}
+    checksum = preview.json()["preview_checksum"]
+    rejected = client.post("/api/backtest/run", json=body, params={"expected_preview_checksum": checksum})
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"]["code"] == "exploratory_preflight_drift"
+    enqueue.assert_not_awaited()
+
+
 class TestBacktestRoutes:
     """Backtest 路由测试。"""
 

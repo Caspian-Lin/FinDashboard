@@ -48,6 +48,7 @@ import {
   api,
   DEFAULT_FACTOR_SELECTION,
   type BacktestHistoryItem,
+  type BacktestRunRequest,
   type BacktestResult,
   type FactorSelectionInput,
   isJobRunning,
@@ -231,22 +232,18 @@ export default function Backtest() {
 
   const candidateList = useMemo(() => listData?.items ?? [], [listData]);
 
+  const backtestPreview = useMutation({
+    mutationFn: (body: BacktestRunRequest) => api.previewBacktest(body),
+    onError: (error) => {
+      setConfigOpen(true);
+      setStrategyErrors(strategyFieldErrorsFrom(error));
+    },
+  });
   const runBacktest = useMutation({
-    mutationFn: (normalizedParams: StrategyParams) =>
-      api.runBacktest({
-        strategy,
-        symbols: selectedSymbols,
-        start,
-        end,
-        capital,
-        params: normalizedParams,
-        selection,
-        commission_rate: commissionRate,
-        commission_min: commissionMin,
-        stamp_tax_rate: stampTaxRate,
-        slippage_bps: slippageBps,
-      }),
+    mutationFn: ({ body, checksum }: { body: BacktestRunRequest; checksum: string }) =>
+      api.runBacktest(body, checksum),
     onSuccess: (job) => {
+      backtestPreview.reset();
       setStrategyErrors({});
       // 清空旧结果,进入"运行中"态;真正的 BacktestResult 在任务完成后由 detailQuery 注入。
       setActiveResult(null);
@@ -393,9 +390,20 @@ export default function Backtest() {
       setConfigOpen(true);
       return;
     }
-    runBacktest.mutate(
-      normalizeStrategyParams(strategyDefinition, strategyParams),
-    );
+    runBacktest.reset();
+    backtestPreview.mutate({
+      strategy,
+      symbols: selectedSymbols,
+      start,
+      end,
+      capital,
+      params: normalizeStrategyParams(strategyDefinition, strategyParams),
+      selection,
+      commission_rate: commissionRate,
+      commission_min: commissionMin,
+      stamp_tax_rate: stampTaxRate,
+      slippage_bps: slippageBps,
+    });
   };
 
   // 配置摘要(折叠态也可见):策略名 / 标的数 / 区间 / 资金
@@ -434,18 +442,21 @@ export default function Backtest() {
         <Button
           size="sm"
           onClick={startBacktest}
-          disabled={backtestRunning || selectedSymbols.length === 0}
+          disabled={backtestRunning || backtestPreview.isPending || selectedSymbols.length === 0}
         >
           {backtestRunning
             ? tl({
                 zh: `回测中…${backtestJob?.phase ? `（${backtestJob.phase}）` : ""}`,
                 en: `Running…${backtestJob?.phase ? ` (${backtestJob.phase})` : ""}`,
               })
-            : tl({ zh: "运行回测", en: "Run backtest" })}
+            : backtestPreview.isPending
+              ? tl({ zh: "预检中…", en: "Checking…" })
+              : tl({ zh: "预检探索回测", en: "Preview Exploratory Backtest" })}
         </Button>
       </div>
-      {(runBacktest.error || backtestFailed) && (
+      {(backtestPreview.error || runBacktest.error || backtestFailed) && (
         <div className="space-y-1 px-5 pb-4">
+          {backtestPreview.error && <p role="alert" className="text-sm text-destructive">{backtestPreview.error.message}</p>}
           {runBacktest.error && (
             <p className="text-sm text-destructive">{(runBacktest.error as Error).message}</p>
           )}
@@ -923,6 +934,50 @@ export default function Backtest() {
           )}
         </div>
       </div>
+
+      <Dialog open={!!backtestPreview.data} onOpenChange={(open) => {
+        if (!open && !runBacktest.isPending) backtestPreview.reset();
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{tl({ zh: "核对探索回测输入", en: "Review Exploratory Backtest Inputs" })}</DialogTitle>
+            <DialogDescription>{tl({
+              zh: "按所选数据源与历史窗口纸面撮合。预检锁定选股批次与运行参数，行情源在任务执行时读取。",
+              en: "Paper matching uses this source and historical window. Preflight pins selection batches and parameters. Bars are read when the job runs.",
+            })}</DialogDescription>
+          </DialogHeader>
+          {backtestPreview.data && (
+            <dl className="space-y-2 text-sm">
+              <div><dt className="text-muted-foreground">{tl({ zh: "策略与口径", en: "Strategy and rules" })}</dt>
+                <dd>{strategyName} · {backtestPreview.data.matching.matching_model_version} / {backtestPreview.data.matching.asset_rules_version}</dd></div>
+              <div><dt className="text-muted-foreground">{tl({ zh: "数据来源与窗口", en: "Source and window" })}</dt>
+                <dd>{backtestPreview.data.provider_name} · {backtestPreview.data.request.start} – {backtestPreview.data.request.end}</dd></div>
+              {Object.keys(backtestPreview.data.request.selection.dataset_versions).length > 0 && (
+                <div><dt className="text-muted-foreground">{tl({ zh: "选股数据版本", en: "Selection data versions" })}</dt>
+                  <dd className="break-words">{Object.entries(backtestPreview.data.request.selection.dataset_versions)
+                    .map(([name, version]) => `${name} · ${version}`).join(" / ")}</dd></div>
+              )}
+              <div><dt className="text-muted-foreground">{tl({ zh: "基准（配置）", en: "Configured benchmark" })}</dt>
+                <dd>{backtestPreview.data.benchmark.symbol ?? tl({ zh: "等权候选池", en: "Equal-weight candidate pool" })}</dd></div>
+              <div><dt className="text-muted-foreground">{tl({ zh: "佣金率 / 最低佣金 / 卖出税 / 滑点", en: "Commission rate / minimum / sell tax / slippage" })}</dt>
+                <dd className="tabular-nums">{backtestPreview.data.request.commission_rate} / {backtestPreview.data.request.commission_min} / {backtestPreview.data.request.stamp_tax_rate} / {backtestPreview.data.request.slippage_bps} bps</dd></div>
+            </dl>
+          )}
+          {runBacktest.error && <p className="text-sm text-destructive" role="alert">{runBacktest.error.message}</p>}
+          <DialogFooter>
+            <Button variant="outline" disabled={runBacktest.isPending} onClick={() => backtestPreview.reset()}>
+              {tl({ zh: "返回修改", en: "Back to Configuration" })}
+            </Button>
+            <Button disabled={runBacktest.isPending || runBacktest.isError} onClick={() => {
+              if (backtestPreview.variables && backtestPreview.data) {
+                runBacktest.mutate({ body: backtestPreview.variables, checksum: backtestPreview.data.preview_checksum });
+              }
+            }}>
+              {tl({ zh: "确认启动探索回测", en: "Start Exploratory Backtest" })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 删除二次确认:取消不发请求 */}
       <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>

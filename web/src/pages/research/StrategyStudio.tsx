@@ -837,6 +837,11 @@ export default function StrategyStudio() {
                             </TableCell>
                             <TableCell className="py-1.5 text-xs text-muted-foreground">
                               {formatDateTime(v.created_at)}
+                              {v.published && (
+                                <Link className="mt-1 block text-primary underline" to={`/research/runs?configure=1&strategy=${encodeURIComponent(v.strategy_id)}&version=${v.version}`}>
+                                  {tl({ zh: "用此版本配置运行", en: "Configure a Run with This Version" })}
+                                </Link>
+                              )}
                             </TableCell>
                           </TableRow>
                         ))}

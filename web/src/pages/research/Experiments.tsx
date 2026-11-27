@@ -1,5 +1,6 @@
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { oosLabel } from "@/lib/research-semantics";
+import FormalExperimentDialog from "@/components/research/FormalExperimentDialog";
 import { ValidationEvidence } from "@/components/research/ValidationEvidence";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -842,8 +843,10 @@ export default function Experiments() {
   const [outcomeFilter, setOutcomeFilter] = React.useState("all");
   const [statusFilter, setStatusFilter] = React.useState<string>("all");
   const selectedId = params.get("experiment");
+  const sourceTopicId = params.get("topic");
   const setSelectedId = (id: string | null) => setParams(id ? { experiment: id } : {});
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [formalOpen, setFormalOpen] = React.useState(false);
   const [rejectOpen, setRejectOpen] = React.useState(false);
   const [rejectReason, setRejectReason] = React.useState("");
   const [deleteOpen, setDeleteOpen] = React.useState(false);
@@ -981,7 +984,11 @@ export default function Experiments() {
                   )}
                 />
               </Button>
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Button size="sm" onClick={() => setFormalOpen(true)}>
+                <Plus className="h-4 w-4" />
+                {tl({ zh: "正式规格验证", en: "Formal Strategy Validation" })}
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
                 <Plus className="h-4 w-4" />
                 {tl({ zh: "创建验证实验", en: "Create validation experiment" })}
               </Button>
@@ -1120,6 +1127,9 @@ export default function Experiments() {
                   <ScrollArea className="max-h-[560px] pr-3">
                     <div className="space-y-5">
                       <ExperimentOutcome detail={detail} />
+                      {sourceTopicId && <Link className="text-sm text-primary underline" to={`/research/topics?topic=${encodeURIComponent(sourceTopicId)}`}>
+                        {tl({ zh: "回原课题执行与复核", en: "Return to the Topic to Execute and Review" })}
+                      </Link>}
                       <div>
                         <p className="text-xs font-medium text-muted-foreground">
                           {tl({ zh: "假设", en: "Hypothesis" })}
@@ -1315,6 +1325,10 @@ export default function Experiments() {
         </div>
       </div>
 
+      {formalOpen && <FormalExperimentDialog onClose={() => setFormalOpen(false)} onCreated={(id, topicId) => {
+        setFormalOpen(false);
+        setParams({ experiment: id, topic: topicId });
+      }} />}
       <CreateExperimentDialog open={createOpen} onOpenChange={setCreateOpen} />
 
       <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>

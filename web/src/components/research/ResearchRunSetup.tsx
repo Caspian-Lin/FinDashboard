@@ -44,6 +44,7 @@ function createRunOperationId() {
 }
 
 interface ResearchRunSetupProps {
+  initialVersion?: { strategyId: string; version: number };
   onStart: (payload: ResearchRunQueueIn) => void;
   onCancel: () => void;
   onRepreview: () => void;
@@ -51,10 +52,10 @@ interface ResearchRunSetupProps {
   error?: Error | null;
 }
 
-export default function ResearchRunSetup({ onStart, onCancel, onRepreview, pending, error }: ResearchRunSetupProps) {
+export default function ResearchRunSetup({ onStart, onCancel, onRepreview, pending, error, initialVersion }: ResearchRunSetupProps) {
   const { tl } = useT();
   const fields = useId();
-  const [strategyKey, setStrategyKey] = useState("");
+  const [strategyKey, setStrategyKey] = useState(initialVersion ? `${initialVersion.strategyId}@${initialVersion.version}` : "");
   const [snapshotIds, setSnapshotIds] = useState<string[]>([]);
   const [seriesIds, setSeriesIds] = useState<string[]>([]);
   const [capitalInput, setCapitalInput] = useState("100000");
@@ -69,7 +70,14 @@ export default function ResearchRunSetup({ onStart, onCancel, onRepreview, pendi
   const [slippage, setSlippage] = useState("");
   const [idempotencyKey] = useState(createRunOperationId);
   const strategies = useQuery({ queryKey: ["spec-list", "run-setup"], queryFn: () => strategySpecApi.list(100, true) });
-  const published = strategies.data?.filter((item) => item.published) ?? [];
+  const listed = strategies.data?.filter((item) => item.published) ?? [];
+  const inList = listed.some((item) => item.strategy_id === initialVersion?.strategyId && item.version === initialVersion.version);
+  const linked = useQuery({
+    queryKey: ["spec-version", initialVersion?.strategyId, initialVersion?.version],
+    queryFn: () => strategySpecApi.version(initialVersion!.strategyId, initialVersion!.version),
+    enabled: !!initialVersion && !inList,
+  });
+  const published = linked.data?.published && !inList ? [linked.data, ...listed] : listed;
   const selected = published.find((item) => `${item.strategy_id}@${item.version}` === strategyKey);
   const validation = object(selected?.spec.validation_plan);
   const releaseIds = strings(validation.dataset_release_ids);
@@ -174,7 +182,8 @@ export default function ResearchRunSetup({ onStart, onCancel, onRepreview, pendi
     }}>
       <div className="space-y-2">
         <Label htmlFor={`${fields}-strategy`}>{tl({ zh: "已发布策略版本", en: "Published strategy version" })}</Label>
-        {strategies.isPending && <LoadingState rows={1} />}
+        {(strategies.isPending || linked.isLoading) && <LoadingState rows={1} />}
+        {linked.isError && <ErrorState message={linked.error.message} onRetry={() => void linked.refetch()} />}
         {strategies.isError && <ErrorState onRetry={() => void strategies.refetch()} />}
         {strategies.isSuccess && !published.length && (
           <BlockedState title={tl({ zh: "请先发布策略版本", en: "Publish a strategy version first" })} />

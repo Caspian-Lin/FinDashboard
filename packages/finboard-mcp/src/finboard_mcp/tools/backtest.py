@@ -502,6 +502,7 @@ async def backtest_run(
     queue_payload: dict[str, Any] | None = None,
     run_async: bool | None = None,
     requested_by: str | None = None,
+    preview_only: bool = False,
 ) -> ToolEnvelope:
     """运行回测 —— 双形态(issue #174):
 
@@ -520,6 +521,8 @@ async def backtest_run(
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
         if strategy_spec is not None:
+            if preview_only:
+                raise McpToolError("invalid_argument", "正式规格预检请使用 finboard_run_queue(preview_only=true)")
             if strategy is not None:
                 raise McpToolError(
                     "invalid_argument",
@@ -531,6 +534,24 @@ async def backtest_run(
                 "invalid_argument",
                 "strategy/symbols/start/end 必填(strategy_spec 形态除外)",
             )
+
+        if preview_only:
+            from finboard_app.backtest_preflight import describe_backtest_inputs
+            from finboard_app.selection_schema import FactorSelectionParams
+
+            try:
+                request = {
+                    "strategy": strategy, "symbols": symbols, "start": start, "end": end,
+                    "capital": str(capital), "adjust": adjust, "params": params or {},
+                    "selection": FactorSelectionParams.model_validate(selection or {}).model_dump(mode="json"),
+                    "commission_rate": str(commission_rate), "commission_min": str(commission_min),
+                    "stamp_tax_rate": str(stamp_tax_rate), "slippage_bps": str(slippage_bps),
+                    "benchmark": {"symbol": benchmark_symbol} if benchmark_symbol is not None else None,
+                }
+                async with app.session_maker() as session:
+                    return await describe_backtest_inputs(session, request, app.settings.data_provider)
+            except (ValueError, ArithmeticError) as exc:
+                raise McpToolError("invalid_argument", str(exc)) from exc
 
         # issue #189:strategy 形态可异步 —— 显式 run_async 或按估算规模自动切换。
         decision = _resolve_async_mode(
@@ -936,7 +957,7 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_backtest_run",
         description=(
-            "运行回测,双形态(二选一,互斥):"
+            "运行回测,双形态(二选一,互斥)。strategy 形态 preview_only=true 仅预检参数和数据:"
             "(1) strategy 形态:事件驱动回测(纸面撮合,不发真实订单),默认同步"
             "返回 metrics/equity_curve/fills/selection_snapshots 并落库 —— 同步"
             "形态适用于小规模(数只标的 x 短区间,总工作量 ≲ 阈值);run_async=true"
@@ -1000,6 +1021,7 @@ def register(mcp: MCPServer) -> None:
         queue_payload: dict[str, Any] | None = None,
         run_async: bool | None = None,
         requested_by: str | None = None,
+        preview_only: bool = False,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await backtest_run(
@@ -1024,6 +1046,7 @@ def register(mcp: MCPServer) -> None:
             queue_payload=queue_payload,
             run_async=run_async,
             requested_by=requested_by,
+            preview_only=preview_only,
         )
 
     @mcp.tool(

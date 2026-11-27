@@ -319,10 +319,12 @@ function CreateResearchRunDialog({
   open,
   onOpenChange,
   onCreated,
+  initialVersion,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (run: ResearchRunSummary) => void;
+  initialVersion?: { strategyId: string; version: number };
 }) {
   const { tl } = useT();
   const queryClient = useQueryClient();
@@ -352,6 +354,7 @@ function CreateResearchRunDialog({
         </DialogHeader>
         {open && (
           <ResearchRunSetup
+            initialVersion={initialVersion}
             onStart={(payload) => queueMutation.mutate(payload)}
             pending={queueMutation.isPending}
             error={queueMutation.error}
@@ -376,7 +379,21 @@ export default function ResearchRuns() {
   };
   const [cancelOpen, setCancelOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
+  const strategyId = searchParams.get("strategy");
+  const strategyVersion = Number(searchParams.get("version"));
+  const initialVersion = strategyId && Number.isInteger(strategyVersion) && strategyVersion > 0
+    ? { strategyId, version: strategyVersion } : undefined;
+  const createOpen = searchParams.get("configure") === "1";
+  function setCreateOpen(open: boolean) {
+    const next = new URLSearchParams(searchParams);
+    if (open) next.set("configure", "1");
+    else {
+      next.delete("configure");
+      next.delete("strategy");
+      next.delete("version");
+    }
+    setSearchParams(next, { replace: true });
+  }
   const [idempotencyKey, setIdempotencyKey] = useState("");
   const [requestedBy, setRequestedBy] = useState("");
   const [lineageOpen, setLineageOpen] = useState(false);
@@ -1336,6 +1353,7 @@ export default function ResearchRuns() {
       </Dialog>
       <CreateResearchRunDialog
         open={createOpen}
+        initialVersion={initialVersion}
         onOpenChange={setCreateOpen}
         onCreated={(run) => setSelectedId(run.run_id)}
       />

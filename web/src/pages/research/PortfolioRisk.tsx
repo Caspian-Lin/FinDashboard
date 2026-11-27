@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
@@ -944,7 +945,11 @@ function FeasibilityTab({
   sharedLots: LotRow[];
 }) {
   const { tl } = useT();
-  const [lotRows, setLotRows] = useState<LotRow[]>([]);
+  const [editedLots, setEditedLots] = useState<LotRow[] | null>(null);
+  const lotRows = editedLots ?? sharedLots;
+  const setLotRows = (update: LotRow[] | ((current: LotRow[]) => LotRow[])) => {
+    setEditedLots((current) => typeof update === "function" ? update(current ?? sharedLots) : update);
+  };
 
   const mutate = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
@@ -989,13 +994,15 @@ function FeasibilityTab({
     );
   };
 
+  const inputs = { weights, lot_info: parsedLots, prices };
   const handleCompute = () => {
     if (weights.length === 0 || parsedLots.length === 0) return;
-    mutate.mutate({ weights, lot_info: parsedLots, prices });
+    mutate.mutate(inputs);
   };
 
   const hasWeights = weights.length > 0;
-  const tiers = mutate.data ?? [];
+  const current = JSON.stringify(mutate.variables) === JSON.stringify(inputs);
+  const tiers = current ? mutate.data ?? [] : [];
 
   return (
     <div className="space-y-4">
@@ -1099,7 +1106,10 @@ function FeasibilityTab({
         </CardContent>
       </Card>
 
-      {mutate.isError && (
+      {!current && mutate.isSuccess && (
+        <p className="text-sm text-warning">{tl({ zh: "输入已变化，请重新评估可行性。", en: "Inputs changed. Evaluate feasibility again." })}</p>
+      )}
+      {current && mutate.isError && (
         <ErrorState
           title={tl({ zh: "可行性评估失败", en: "Feasibility assessment failed" })}
           message={
@@ -1113,7 +1123,7 @@ function FeasibilityTab({
         />
       )}
 
-      {mutate.isSuccess && tiers.length === 0 && (
+      {current && mutate.isSuccess && tiers.length === 0 && (
         <EmptyState
           icon={<Layers className="h-8 w-8" />}
           title={tl({ zh: "无可行性档位", en: "No feasible tiers" })}
@@ -1129,6 +1139,12 @@ function FeasibilityTab({
           {tiers.map((t) => (
             <FeasibilityCard key={t.tier} tier={t} />
           ))}
+        </div>
+      )}
+      {tiers.length > 0 && (
+        <div className="space-y-2 rounded-md border bg-card p-3 text-sm">
+          <p>{tl({ zh: "这是用当前输入计算的可行性预览。正式运行将在冻结规格上重新校验组合与费用约束。", en: "Feasibility reflects these inputs. A formal run validates portfolio constraints and fees against its frozen specification." })}</p>
+          <Link className="text-primary underline" to="/research/runs?configure=1">{tl({ zh: "配置正式研究运行", en: "Configure a Formal Research Run" })}</Link>
         </div>
       )}
     </div>

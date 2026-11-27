@@ -28,6 +28,12 @@ IS逐trial提交，失败计预算，续跑复用持久化trial与确定性子ru
 
 错误契约：REST缺引用404、参数/窗口/覆盖422、载荷413；MCP not_found/invalid_argument/payload_too_large。研究读投影SQL在加载前估计，单决策也不豁免。所有能力仅研究域；对应phase1_doc.md §3.4 3–14的离线等价验证，不声称券商或实盘验收。
 
+## Web 登记与预检（#522）
+
+从「正式实验」或原课题打开「正式规格验证」，选择已完成基线和目标课题。填训练、验证及最终测试区间，并声明此前额外用过的区间。服务端根据基线补入其决策区间，校验发布、快照／序列覆盖、费用、基准和已用窗口，预览返回冻结版本及摘要。
+
+预检经 `POST /api/research/topics/{topic}/actions/preview`，登记经原 `/actions`。提交可用 `expected_preview_checksum` 对比服务端重算值。登记后从原课题另行确认一次性揭盲并通过任务回执跟踪。MCP `finboard_topic_action` 提供同源 `preview_only=true`。
+
 ## 课题内 OOS 展示与动作（#516）
 
 课题可经 `POST /api/research/topics/{id}/actions`（MCP `finboard_topic_action`）执行 `validation_experiment.create` / `add_trial` / `unseal`，服务端在同一事务写入不可变课题链接与 `topic.action.validation_experiment.*` 研究审计；动作要求课题 active 且 `goal_version` 匹配，创建与 trial 登记只写元数据，`unseal` 走既有一致性入队（执行器仍重放同一组 preflight）。
