@@ -2068,6 +2068,10 @@ context 含目标、最近生命周期、开放问题、最近轮次摘录、断
 
 ## finboard_topic_action（✅ #516：1 写，白名单）
 
+正式规格实验可先用 `action="validation_experiment.create"`、`preview_only=true` 读取冻结版本、发布、窗口、门槛和覆盖参数。登记实验时把返回的 `preview_checksum` 放入 payload 的 `expected_preview_checksum`；摘要变化需重新预览。预检和登记均不会揭盲。已登记实验从原课题显式提交一次性揭盲。
+
+探索回测与快照生成可分别用 `finboard_backtest_run`、`finboard_feature_snapshot_job_start` 的 `preview_only=true` 核对生效输入；原工具仍接受直接提交。
+
 课题内**显式执行**入口，与 REST `POST /api/research/topics/{id}/actions` 同一实现。
 工具级作用域 `research.write`；运行类动作在服务端再按 `research.run` 强制。
 `payload` 按 action 校验，未知字段拒绝（`extra="forbid"`），**没有任何代码字段**。

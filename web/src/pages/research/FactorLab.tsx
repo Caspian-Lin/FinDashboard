@@ -504,7 +504,7 @@ function GenerateFeatureSnapshotDialog({
       setReleaseId(first.release_id);
       setDecisionDate(first.end_date);
     }
-  }, [open, releaseId, releasesQuery.data, resetMutation]);
+  }, [open, releaseId, releasesQuery.data, resetMutation, resetPreflight]);
 
   const valid =
     !!selectedRelease &&

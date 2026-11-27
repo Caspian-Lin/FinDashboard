@@ -11,6 +11,7 @@ const factorLabApiMock = vi.hoisted(() => ({
   catalog: vi.fn(),
   predefined: vi.fn(),
   createFeatureSnapshot: vi.fn(),
+  previewFeatureSnapshot: vi.fn(),
   startFeatureSnapshotJob: vi.fn(),
   features: vi.fn(),
   featureDetail: vi.fn(),
