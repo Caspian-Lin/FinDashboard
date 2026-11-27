@@ -18,8 +18,8 @@ const FALLBACK: Language = "zh";
 const STORAGE_KEY = "finboard-lang";
 
 export const DOCUMENT_TITLES: Record<Language, string> = {
-  zh: "FinDashboard — 交易控制台",
-  en: "FinDashboard — Trading Console",
+  zh: "FinDashboard 工作台",
+  en: "FinDashboard Workspace",
 };
 
 export function documentLang(lang: Language): string {

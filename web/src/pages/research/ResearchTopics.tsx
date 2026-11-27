@@ -1329,6 +1329,9 @@ export default function ResearchTopics() {
           <Link to="/research/docs">正式研究资料</Link>
         </Button>
         <Button variant="outline" asChild>
+          <Link to="/research/tools">高级研究工具</Link>
+        </Button>
+        <Button variant="outline" asChild>
           <Link
             to={`/research/agent-connect${topicId ? `?topic=${encodeURIComponent(topicId)}` : ""}`}
           >

@@ -3,7 +3,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import AgentConnect from "./AgentConnect";
 import { LegacyWorkbenchRedirect } from "./LegacyWorkbenchRedirect";
-import { navGroups } from "@/components/layout/nav-config";
+import { availableResearchTools } from "@/components/layout/nav-config";
 
 function renderPage(initialEntry = "/research/agent-connect") {
   return render(
@@ -55,7 +55,7 @@ describe("AgentConnect 外部 Agent 接入页(#520)", () => {
 
 describe("旧研究工作台路由迁移(#520)", () => {
   it("导航与首页入口只保留 /research/agent-connect", () => {
-    const targets = navGroups.flatMap((group) => group.items.map((item) => item.to));
+    const targets = availableResearchTools(false).map((item) => item.to);
     expect(targets).toContain("/research/agent-connect");
     expect(targets).not.toContain("/research/workbench");
   });

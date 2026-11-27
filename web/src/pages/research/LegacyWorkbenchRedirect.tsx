@@ -7,6 +7,6 @@ import { Navigate, useLocation } from "react-router-dom";
  * 404 或丢参数:整个 query string 原样带过去,由新接入页继续交接。
  */
 export function LegacyWorkbenchRedirect() {
-  const { search } = useLocation();
-  return <Navigate to={`/research/agent-connect${search}`} replace />;
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: "/research/agent-connect", search, hash }} replace />;
 }

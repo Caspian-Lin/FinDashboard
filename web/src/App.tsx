@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
+import { EditionUnavailable } from "@/pages/EditionUnavailable";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { Skeleton } from "@/components/ui/skeleton";
 import { legacyResearchDataTarget } from "@/lib/data-links";
@@ -14,6 +15,8 @@ const StrategyExplanationPage = React.lazy(() => import("@/pages/research/Strate
 const DataBase = React.lazy(() => import("@/pages/data/DataBase"));
 
 /* Research domain (lazy) */
+const ResearchTools = React.lazy(() => import("@/pages/research/ResearchTools"));
+const ResearchPreferences = React.lazy(() => import("@/pages/ResearchPreferences"));
 const ResearchHome = React.lazy(() => import("@/pages/research/ResearchHome"));
 const FactorLab = React.lazy(() => import("@/pages/research/FactorLab"));
 const StrategyStudio = React.lazy(() => import("@/pages/research/StrategyStudio"));
@@ -59,8 +62,13 @@ function PageLoader() {
  * 保留;不 404、不丢深链。
  */
 export function LegacyResearchDataRedirect() {
-  const { search } = useLocation();
-  return <Navigate to={legacyResearchDataTarget(search)} replace />;
+  const { search, hash } = useLocation();
+  return <Navigate to={legacyResearchDataTarget(search) + hash} replace />;
+}
+
+export function LegacyStrategyPresetsRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: "/backtest", search, hash }} replace />;
 }
 
 export default function App() {
@@ -78,36 +86,35 @@ export default function App() {
             <Route path="/research/topics" element={<ResearchTopics />} />
             <Route path="/research/strategy-explanation" element={<StrategyExplanationPage />} />
             <Route path="/research" element={<ResearchHome />} />
+            <Route path="/research/tools" element={<ResearchTools />} />
             <Route path="/research/factors" element={<FactorLab />} />
             <Route path="/research/strategy" element={<StrategyStudio />} />
             <Route path="/research/experiments" element={<Experiments />} />
             <Route path="/research/runs" element={<ResearchRuns />} />
             <Route path="/research/portfolio" element={<PortfolioRisk />} />
-            {!RESEARCH_EDITION && <Route path="/research/simulation" element={<Simulation />} />}
+            <Route
+              path="/research/simulation"
+              element={RESEARCH_EDITION ? <EditionUnavailable capability="simulation" /> : <Simulation />}
+            />
             <Route path="/research/agent-connect" element={<AgentConnect />} />
             {/* 旧内置工作台永久跳转到外部 Agent 接入页,保全 ?topic= 等参数 */}
             <Route path="/research/workbench" element={<LegacyWorkbenchRedirect />} />
             <Route path="/research/docs" element={<ResearchDocs />} />
             <Route path="/research/reports" element={<Reports />} />
 
-            {/* Live Trading */}
-            {RESEARCH_EDITION ? (
-              <Route path="/" element={<Navigate to="/research/agent-connect" replace />} />
-            ) : (
-              <>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/positions" element={<Positions />} />
-                <Route path="/orders" element={<Orders />} />
-                <Route path="/fills" element={<Fills />} />
-                <Route path="/control" element={<Control />} />
-                <Route path="/settings" element={<Settings />} />
-              </>
-            )}
+            {/* Deployment-specific entries. Research fallbacks never mount live components. */}
+            <Route path="/" element={<ResearchHome workspace={!RESEARCH_EDITION} />} />
+            <Route path="/settings" element={RESEARCH_EDITION ? <ResearchPreferences /> : <Settings />} />
+            <Route path="/live" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Dashboard />} />
+            <Route path="/positions" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Positions />} />
+            <Route path="/orders" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Orders />} />
+            <Route path="/fills" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Fills />} />
+            <Route path="/control" element={RESEARCH_EDITION ? <EditionUnavailable capability="live" /> : <Control />} />
 
             {/* Tools */}
             <Route path="/backtest" element={<Backtest />} />
             {/* 策略预设已并入回测页的预设库面板 */}
-            <Route path="/strategies" element={<Navigate to="/backtest" replace />} />
+            <Route path="/strategies" element={<LegacyStrategyPresetsRedirect />} />
             <Route path="/jobs" element={<Jobs />} />
 
             {/* 404 */}
