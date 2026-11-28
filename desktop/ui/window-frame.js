@@ -51,6 +51,7 @@ function mountWindowFrame({ window: kind, origin, recovery, recoveryAppearance, 
         :root[data-finboard-window="research"] [data-finboard-workbench-help] {
           width: 32px;
           padding-inline: 0;
+          font-size: 0;
         }
         :root[data-finboard-window="research"] [data-finboard-workbench-help] > span {
           display: none;
@@ -128,9 +129,17 @@ function mountWindowFrame({ window: kind, origin, recovery, recoveryAppearance, 
     if (kind === "research") {
       function bindCaptionRow() {
         // Old research images keep working while the user rolls the service forward.
-        const row = document.querySelector("[data-finboard-workbench-header], #root header, .workbench-unavailable > .topbar");
+        const row = document.querySelector("[data-finboard-workbench-header]")
+          ?? document.querySelector("#root header, .workbench-unavailable > .topbar");
         if (!row) return false;
         row.dataset.finboardCaptionRow = "";
+        if (!row.hasAttribute("data-finboard-workbench-header") && row.closest("#root")) {
+          const toolbar = row.lastElementChild;
+          toolbar?.setAttribute("data-finboard-workbench-toolbar", "");
+          if (toolbar?.children.length > 1) {
+            toolbar.firstElementChild.setAttribute("data-finboard-workbench-help", "");
+          }
+        }
         return true;
       }
       if (!bindCaptionRow()) {
