@@ -4,13 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>FinDashboard 研究工作台</title>
+  <title data-l10n="unavailableTitle">FinDashboard 研究工作台暂不可用</title>
+  <script src="preferences.js"></script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body class="workbench-unavailable">
+  <header class="topbar">
+    <span class="brand">
+      <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>FinDashboard</span>
+    </span>
+  </header>
   <main>
-    <h1>研究服务暂不可用</h1>
-    <p>服务恢复后，可从启动器重新打开研究工作台。</p>
+    <section class="recovery section-body">
+      <svg class="icon" aria-hidden="true" width="20" height="20"><use href="icons.svg#alert"></use></svg>
+      <h1 data-l10n="unavailableHeading">研究服务暂不可用</h1>
+      <p data-l10n="unavailableDetail">请在研究管理台恢复服务，再打开工作台。</p>
+    </section>
   </main>
 </body>
 </html>

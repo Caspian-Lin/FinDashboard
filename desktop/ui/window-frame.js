@@ -65,36 +65,51 @@ function mountWindowFrame({ window: kind, origin, recovery, stylesheet }) {
     shadow.adoptedStyleSheets = [chrome];
     shadow.innerHTML = `
       <span class="error" role="status" hidden></span>
-      <div class="controls" role="group" aria-label="窗口控制">
-        <button type="button" data-action="minimize" aria-label="最小化" title="最小化"></button>
-        <button type="button" data-action="toggle_maximize" aria-label="最大化" title="最大化"></button>
-        <button type="button" data-action="close" aria-label="关闭" title="关闭"></button>
+      <div class="controls" role="group">
+        <button type="button" data-action="minimize"></button>
+        <button type="button" data-action="toggle_maximize"></button>
+        <button type="button" data-action="close"></button>
       </div>`;
+    const controls = shadow.querySelector(".controls");
     const maximize = shadow.querySelector('[data-action="toggle_maximize"]');
     const error = shadow.querySelector(".error");
+    const buttons = [...shadow.querySelectorAll("button")];
+    const copy = {
+      zh: { group: "窗口控制", minimize: "最小化", toggle_maximize: "最大化", restore: "还原", close: "关闭", error: "窗口操作未完成" },
+      en: { group: "Window controls", minimize: "Minimize", toggle_maximize: "Maximize", restore: "Restore", close: "Close", error: "Window action failed" },
+    };
+
+    function localize() {
+      const labels = document.documentElement.lang.toLowerCase().startsWith("en") ? copy.en : copy.zh;
+      controls.setAttribute("aria-label", labels.group);
+      for (const button of buttons) {
+        const action = button === maximize && button.dataset.maximized === "true"
+          ? "restore" : button.dataset.action;
+        button.setAttribute("aria-label", labels[action]);
+        button.title = labels[action];
+      }
+      error.textContent = labels.error;
+    }
 
     async function perform(action) {
       try {
         const maximized = await core.invoke("desktop_window_action", { action });
         if (typeof maximized === "boolean") {
-          const label = maximized ? "还原" : "最大化";
           maximize.dataset.maximized = String(maximized);
-          maximize.setAttribute("aria-label", label);
-          maximize.title = label;
+          localize();
         }
         error.hidden = true;
       } catch {
-        error.textContent = "窗口操作未完成";
         error.hidden = false;
       }
     }
 
-    for (const button of shadow.querySelectorAll("button")) {
+    for (const button of buttons) {
       button.addEventListener("click", () => perform(button.dataset.action));
     }
     // 窗口控制独立于页面弹层。点击窗口按钮时保留内容区焦点。
     frame.addEventListener("pointerdown", (event) => event.stopPropagation());
-    shadow.querySelector(".controls").addEventListener("mousedown", (event) => {
+    controls.addEventListener("mousedown", (event) => {
       if (event.button === 0) event.preventDefault();
     });
     const header = kind === "research" ? "#root > .h-screen > div > header" : ".topbar";
@@ -109,7 +124,11 @@ function mountWindowFrame({ window: kind, origin, recovery, stylesheet }) {
       resizeTimer = setTimeout(() => perform("is_maximized"), 90);
     });
 
-    document.body.prepend(frame);
+    localize();
+    new MutationObserver(localize).observe(document.documentElement, { attributeFilter: ["lang"] });
+    const skipLink = document.querySelector(".skip-link");
+    if (skipLink) skipLink.after(frame);
+    else document.body.prepend(frame);
     perform("is_maximized");
   }
 

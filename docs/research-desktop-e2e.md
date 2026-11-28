@@ -23,7 +23,7 @@ python -m scripts.smoke_research_desktop --run-isolated `
 
 ### 固定预览候选
 
-从同一个 Actions 执行下载 `research-desktop-pr-msi`。其中的 `desktop-pr-candidate.json` 记录实际检出的提交和 Git 树、来源 PR 提交、执行编号及重试次数，以及镜像身份、MSI 和离线资源的字节数与 SHA-256。比较 Git 树可确认预览内容对应准备验收的里程碑版本。里程碑内容变化后使用重新构建的候选。
+从同一个 Actions 执行下载 `research-desktop-pr-msi`，安装包文件名包含 `Preview` 和 Windows Installer 的产品版本。`desktop-pr-candidate.json` 记录实际检出的提交和 Git 树、来源 PR 提交、执行编号及重试次数、镜像身份、MSI 产品版本，以及 MSI 和离线资源的字节数与 SHA-256。比较 Git 树可确认预览内容对应准备验收的里程碑版本。里程碑内容变化后使用重新构建的候选。安装后，在管理台导航下方核对版本。
 
 ```powershell
 $candidate = Get-Content -Raw -LiteralPath .\desktop-pr-candidate.json | ConvertFrom-Json

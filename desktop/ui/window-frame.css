@@ -18,7 +18,7 @@
   inset-block-start: calc(100% + 4px);
   inset-inline-end: 8px;
   padding: 5px 8px;
-  border-radius: 5px;
+  border-radius: var(--radius, 2px);
   background: var(--surface, hsl(var(--card, 0 0% 11%)));
   color: var(--danger, hsl(var(--destructive, 0 72% 66%)));
   white-space: nowrap;
@@ -29,7 +29,7 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   height: 100%;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: var(--radius, 2px);
   background: var(--finboard-window-controls-surface, hsl(var(--card, 0 0% 11%)));
 }
 
@@ -46,7 +46,7 @@ button {
 
 button:hover { background: var(--surface-raised, hsl(var(--accent, 0 0% 19%))); }
 button:active { background: color-mix(in srgb, currentColor 18%, transparent); }
-button:focus-visible { outline: 2px solid currentColor; outline-offset: -4px; }
+button:focus-visible { outline: 2px solid hsl(var(--ring, 207 100% 50%)); outline-offset: -4px; }
 
 button::before, button::after { box-sizing: border-box; }
 

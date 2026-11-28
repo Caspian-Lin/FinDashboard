@@ -11,9 +11,10 @@ const page = readFileSync(path.join(ui, 'index.html'), 'utf8');
 function element(id) {
   return {
     id, value: '', dataset: {}, handlers: {},
-    setAttribute() {}, focus() {},
+    setAttribute() {}, removeAttribute() {}, focus() {},
     select() { this.selected = true; },
     replaceChildren(...children) { this.children = children; },
+    append(value) { this.textContent = (this.textContent ?? '') + value; },
     addEventListener(type, listener) { this.handlers[type] = listener; },
   };
 }
@@ -33,10 +34,11 @@ async function loadWorkbench({
   vm.runInNewContext(source, {
     document: {
       querySelectorAll(selector) { return selector === '[id]' ? Array.from(nodes.values()) : []; },
-      createElement: element,
+      createElement: element, createTextNode: (text) => text,
     },
     window: {
       addEventListener() {},
+      finboardDesktopPreferences: { text: (copy) => copy.zh, refreshCopy() {} },
       __TAURI__: { core: {
         Channel: class {},
         invoke: async (command, args) => {
