@@ -4,155 +4,188 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>FinDashboard 研究版</title>
+  <title data-l10n="appTitle">FinDashboard 研究管理台</title>
+  <script src="preferences.js"></script>
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <nav class="rail" aria-label="本机管理">
-    <a class="brand-mark" href="#overview" aria-label="FinDashboard 研究版"><i></i><i></i><i></i></a>
-    <div class="rail-links">
-      <a href="#overview" aria-current="location"><span class="icon" aria-hidden="true">◈</span>概览</a>
-      <a href="#diagnostics"><span class="icon" aria-hidden="true">›_</span>诊断</a>
-      <a href="#maintenance" id="maintenance-link"><span class="icon" aria-hidden="true">⚙&#xfe0e;</span>维护</a>
+  <a class="skip-link" href="#overview" data-l10n="skip">跳到主要内容</a>
+  <header class="topbar">
+    <a class="brand" href="#overview">
+      <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>FinDashboard</span>
+      <span class="brand-context" data-l10n="managerBrand">管理台</span>
+    </a>
+    <div class="toolbar" aria-label="显示偏好" data-l10n-label="appearance" role="group">
+      <select id="desktop-language" aria-label="界面语言" data-l10n-label="language">
+        <option value="zh">中文</option>
+        <option value="en">EN</option>
+      </select>
+      <button id="desktop-theme" type="button" class="icon-button" aria-label="切换到浅色主题">
+        <span class="theme-light-icon"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#sun"></use></svg></span>
+        <span class="theme-dark-icon"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#moon"></use></svg></span>
+      </button>
     </div>
+  </header>
+  <nav class="rail" aria-label="本机管理" data-l10n-label="management">
+    <div class="rail-links">
+      <a href="#overview" aria-current="location"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#overview"></use></svg><span data-l10n="overview">概览</span></a>
+      <a href="#data"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#database"></use></svg><span data-l10n="data">数据源</span></a>
+      <a href="#agents"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#agent"></use></svg><span data-l10n="agents">Agent 接入</span></a>
+      <a href="#diagnostics"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#activity"></use></svg><span data-l10n="diagnostics">运行诊断</span></a>
+      <a href="#maintenance" id="maintenance-link"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#settings"></use></svg><span data-l10n="maintenance">维护</span></a>
+    </div>
+    <p id="desktop-version" class="desktop-version" hidden></p>
   </nav>
-  <main id="overview">
-    <header class="topbar">
-      <h1>研究控制台</h1>
-      <button id="refresh" type="button" class="quiet"><span class="icon" aria-hidden="true">↻</span>刷新状态</button>
-    </header>
+  <main id="overview" tabindex="-1">
+    <div class="page-heading">
+      <h1 data-l10n="pageTitle">研究管理台</h1>
+      <button id="refresh" type="button" class="quiet"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#refresh"></use></svg><span data-l10n="refresh">刷新状态</span></button>
+    </div>
 
-    <div class="dashboard">
+    <div id="service-board" class="service-board" data-service-ready="false">
       <section class="panel service" aria-labelledby="service-title">
         <div class="panel-heading">
-          <span class="panel-icon power" aria-hidden="true"></span>
-          <span id="service-state" class="state" data-tone="neutral" aria-live="polite">检查中</span>
+          <h2 id="service-title" data-l10n="service">研究服务</h2>
+          <span id="service-state" class="state" data-tone="neutral" aria-live="polite" data-l10n="checking">检查中</span>
         </div>
-        <h2 id="service-title">研究服务</h2>
-        <p id="service-detail">正在检查 Docker Desktop 和研究服务。</p>
+        <p id="service-detail" data-l10n="checkDetail">正在检查 Docker Desktop 和研究服务。</p>
         <form id="service-form" class="actions">
-          <label class="field"><span>本机端口</span><input id="port" type="number" min="1024" max="65535" step="1" value="8276" required></label>
-          <button id="start" class="primary" type="submit">安装并启动</button>
-          <button id="stop" type="button" class="quiet">停止</button>
+          <label class="field"><span data-l10n="port">本机端口</span><input id="port" type="number" min="1024" max="65535" step="1" value="8276" required></label>
+          <button id="start" class="requires-attention" type="submit" data-l10n="install">安装并启动</button>
+          <button id="stop" type="button" data-l10n="stop">停止</button>
         </form>
       </section>
 
       <section class="panel workbench" aria-labelledby="workbench-title">
-        <span class="panel-icon" aria-hidden="true"><span class="signal-mark"></span></span>
-        <div class="panel-copy">
-          <h2 id="workbench-title">研究工作台</h2>
-          <p>查看课题、策略与冻结运行。</p>
-        </div>
+        <h2 id="workbench-title" data-l10n="workbench">研究工作台</h2>
+        <p data-l10n="workbenchDetail">查看课题、策略与冻结运行。</p>
         <div class="actions">
-          <button id="open-workbench" class="workbench-action" type="button">在应用内打开</button>
-          <button id="open-workbench-alternate" type="button">在浏览器中打开</button>
-          <button id="copy-workbench-address" type="button">复制地址</button>
-          <button id="open-release-bundles" type="button">冻结发布包</button>
+          <button id="open-workbench" class="ready-action" type="button" data-l10n="openInApp">在应用内打开</button>
+          <details class="workbench-options">
+            <summary data-l10n="workbenchOptions">打开方式与地址</summary>
+            <div class="workbench-options-content">
+              <button id="open-workbench-alternate" type="button" data-l10n="openBrowser">在浏览器中打开</button>
+              <button id="copy-workbench-address" type="button" data-l10n="copyAddress">复制地址</button>
+              <label class="field">
+                <span data-l10n="defaultOpen">默认打开方式</span>
+                <select id="workbench-target">
+                  <option value="in_app" data-l10n="inApp">应用内</option>
+                  <option value="browser" data-l10n="browser">系统默认浏览器</option>
+                </select>
+              </label>
+            </div>
+          </details>
         </div>
-        <label class="field workbench-preference">
-          <span>默认打开方式</span>
-          <select id="workbench-target">
-            <option value="in_app">应用内</option>
-            <option value="browser">系统默认浏览器</option>
-          </select>
-        </label>
-        <p id="workbench-status" role="status">启动研究服务后可打开工作台。</p>
-        <input id="workbench-address" aria-label="研究工作台地址" readonly hidden>
-      </section>
-
-      <section class="panel sample" aria-labelledby="sample-title">
-        <div class="panel-heading feature-heading">
-          <span class="panel-icon" aria-hidden="true">↓</span>
-          <h2 id="sample-title">合成样例</h2>
-        </div>
-        <p>离线导入随包样例，在「数据基座」查看发布。</p>
-        <button id="import" type="button">导入样例</button>
-      </section>
-
-      <section class="panel codex" aria-labelledby="harness-title">
-        <div class="panel-heading feature-heading">
-          <span class="panel-icon code-icon" aria-hidden="true">›_</span>
-          <h2 id="harness-title">Agent 接入</h2>
-        </div>
-        <p id="harness-state" aria-live="polite">服务就绪后可接入客户端。</p>
-        <p id="scopes" class="scope" hidden></p>
-        <div class="actions">
-          <label class="field"><span>客户端</span><select id="harness"><option value="codex">Codex CLI</option><option value="dsh">DeepSeek Harness</option><option value="opencode">OpenCode</option></select></label>
-          <label class="field" id="harness-profile-field" hidden><span>DSH profile</span><select id="harness-profile"></select></label>
-          <label class="field"><span>授权预设</span><select id="preset"><option value="readonly">只读</option><option value="topic-writer">课题与研究运行</option></select></label>
-          <button id="attach" type="button">接入并验连</button>
-          <button id="detach" type="button">撤销接入</button>
-        </div>
-        <div id="workspace-actions" class="actions" hidden>
-          <button id="workspace-open" type="button">打开工作区</button>
-          <button id="workspace-copy" type="button">复制工作区路径</button>
-          <input id="workspace-address" aria-label="客户端工作区路径" readonly hidden>
-        </div>
-      </section>
-
-      <section class="panel generic-panel" aria-labelledby="generic-title">
-        <h2 id="generic-title">通用 MCP 客户端</h2>
-        <form id="generic-form" class="actions">
-          <label class="field"><span>客户端名称</span><input id="generic-name" maxlength="32" pattern="[a-z0-9][a-z0-9_\-]{0,31}" placeholder="research-tool" required></label>
-          <label class="field"><span>授权预设</span><select id="generic-preset"><option value="readonly">只读</option><option value="topic-writer">课题与研究运行</option></select></label>
-          <button id="generic-issue" type="submit">签发接入配置</button>
-        </form>
-        <p id="generic-state" role="status">签发后的配置可复制一次。同名重新签发会撤销旧凭据。</p>
-        <div id="generic-current" class="actions" hidden>
-          <label class="field"><span>已签发客户端</span><select id="generic-list"></select></label>
-          <button id="generic-revoke" type="button">撤销所选凭据</button>
-        </div>
-        <div id="generic-connection" class="connection-result" hidden>
-          <label class="field"><span>本次签发的接入配置</span><textarea id="generic-config" rows="4" readonly></textarea></label>
-          <div class="actions">
-            <button id="generic-copy" type="button">复制配置</button>
-            <button id="generic-close" type="button">完成</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel source-panel" aria-labelledby="source-title">
-        <h2 id="source-title">Tushare 数据源</h2>
-        <form id="source-form" class="actions">
-          <label class="field"><span>Tushare Token</span><input id="source-token" type="password" autocomplete="off" spellcheck="false" maxlength="256" required></label>
-          <button id="source-save" type="submit">保存并重启研究服务</button>
-          <button id="source-probe" type="button">检查权限</button>
-        </form>
-        <p id="source-state" role="status">服务就绪后可检查权限。</p>
-        <details id="source-details" class="source-details" hidden>
-          <summary>接口检查结果</summary>
-          <dl id="source-capabilities" class="source-capabilities"></dl>
-        </details>
+        <p id="workbench-status" role="status" data-l10n="workbenchStopped">启动研究服务后可打开工作台。</p>
+        <input id="workbench-address" aria-label="研究工作台地址" data-l10n-label="workbenchAddress" readonly hidden>
       </section>
     </div>
 
-    <section class="diagnostics" id="diagnostics" aria-labelledby="diagnostic-title">
-      <div class="section-heading"><h2 id="diagnostic-title">运行诊断</h2><span id="result-meta" class="scope"></span></div>
-      <progress id="running-progress" aria-label="操作进行中" hidden></progress>
-      <p id="result-status" role="status">执行操作后可在这里查看诊断。</p>
-      <details id="diagnostic-details" class="diagnostic-details" hidden>
-        <summary>日志与命令</summary>
-        <pre id="log" aria-label="脱敏操作日志" tabindex="0" hidden></pre>
-        <div id="command" class="command" hidden>
-          <input aria-label="等价 PowerShell 命令" id="command-text" readonly>
-          <button id="copy" type="button">复制命令</button>
+    <section class="section" id="data" aria-labelledby="data-title">
+      <h2 id="data-title" data-l10n="dataTitle">数据与发布</h2>
+      <div class="section-body">
+        <div class="setting-row sample">
+          <div>
+            <h3 id="sample-title" data-l10n="sample">合成样例</h3>
+            <p data-l10n="sampleDetail">离线导入随包样例，在「数据基座」查看发布。</p>
+          </div>
+          <div class="actions inline-actions">
+            <button id="import" type="button" data-l10n="sampleImport">导入样例</button>
+            <button id="open-release-bundles" type="button" data-l10n="bundles">冻结发布包</button>
+          </div>
         </div>
-      </details>
+        <section class="setting-row wrap-row" aria-labelledby="source-title">
+          <div><h3 id="source-title" data-l10n="source">Tushare 数据源</h3><p id="source-state" role="status" data-l10n="sourceWaiting">服务就绪后可检查权限。</p></div>
+          <form id="source-form" class="actions">
+            <label class="field"><span data-l10n="sourceToken">Tushare Token</span><input id="source-token" type="password" autocomplete="off" spellcheck="false" maxlength="256" required></label>
+            <button id="source-save" type="submit" data-l10n="sourceSave">保存并重启研究服务</button>
+            <button id="source-probe" type="button" data-l10n="sourceProbe">检查权限</button>
+          </form>
+          <details id="source-details" class="source-details" hidden>
+            <summary data-l10n="sourceDetails">接口检查结果</summary>
+            <dl id="source-capabilities" class="source-capabilities"></dl>
+          </details>
+        </section>
+      </div>
     </section>
 
-    <details class="maintenance" id="maintenance">
-      <summary>安装维护与卸载</summary>
-      <p>保留数据模式会移除本实例服务和 Codex 接入，保存数据库、研究文件及恢复配置。</p>
+    <section class="section" id="agents" aria-labelledby="agents-title">
+      <h2 id="agents-title" data-l10n="agents">Agent 接入</h2>
+      <div class="section-body">
+        <section class="setting-row wrap-row" aria-labelledby="harness-title">
+          <div><h3 id="harness-title" data-l10n="harnessTitle">研究客户端</h3>
+            <p id="harness-state" aria-live="polite" data-l10n="harnessWaiting">服务就绪后可接入客户端。</p>
+            <p id="scopes" class="scope" hidden></p>
+          </div>
+          <div class="actions">
+            <label class="field"><span data-l10n="client">客户端</span><select id="harness"><option value="codex">Codex CLI</option><option value="dsh">DeepSeek Harness</option><option value="opencode">OpenCode</option></select></label>
+            <label class="field" id="harness-profile-field" hidden><span data-l10n="dshProfile">DSH 配置</span><select id="harness-profile"></select></label>
+            <label class="field"><span data-l10n="preset">授权预设</span><select id="preset"><option value="readonly" data-l10n="readonly">只读</option><option value="topic-writer" data-l10n="topicWriter">课题与研究运行</option></select></label>
+            <button id="attach" type="button" data-l10n="attach">接入并验连</button>
+            <button id="detach" type="button" data-l10n="detach">撤销接入</button>
+          </div>
+          <div id="workspace-actions" class="actions" hidden>
+            <button id="workspace-open" type="button" data-l10n="workspaceOpen">打开工作区</button>
+            <button id="workspace-copy" type="button" data-l10n="workspaceCopy">复制工作区路径</button>
+            <input id="workspace-address" aria-label="客户端工作区路径" data-l10n-label="workspaceAddress" readonly hidden>
+          </div>
+        </section>
+
+        <details class="generic-panel" aria-labelledby="generic-title">
+          <summary id="generic-title" data-l10n="generic">通用 MCP 客户端</summary>
+          <div class="generic-content">
+            <form id="generic-form" class="actions">
+              <label class="field"><span data-l10n="clientName">客户端名称</span><input id="generic-name" maxlength="32" pattern="[a-z0-9][a-z0-9_\-]{0,31}" placeholder="research-tool" required></label>
+              <label class="field"><span data-l10n="preset">授权预设</span><select id="generic-preset"><option value="readonly" data-l10n="readonly">只读</option><option value="topic-writer" data-l10n="topicWriter">课题与研究运行</option></select></label>
+              <button id="generic-issue" type="submit" data-l10n="genericIssue">签发接入配置</button>
+            </form>
+            <p id="generic-state" role="status" data-l10n="genericHint">签发后的配置可复制一次。同名重新签发会撤销旧凭据。</p>
+            <div id="generic-current" class="actions" hidden>
+              <label class="field"><span data-l10n="genericList">已签发客户端</span><select id="generic-list"></select></label>
+              <button id="generic-revoke" type="button" data-l10n="genericRevoke">撤销所选凭据</button>
+            </div>
+            <div id="generic-connection" class="connection-result" hidden>
+              <label class="field"><span data-l10n="genericConfiguration">本次签发的接入配置</span><textarea id="generic-config" rows="4" readonly></textarea></label>
+              <div class="actions">
+                <button id="generic-copy" type="button" data-l10n="genericCopy">复制配置</button>
+                <button id="generic-close" type="button" data-l10n="done">完成</button>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="section" id="diagnostics" aria-labelledby="diagnostic-title">
+      <div class="section-heading"><h2 id="diagnostic-title" data-l10n="diagnostics">运行诊断</h2><span id="result-meta" class="scope"></span></div>
+      <div class="diagnostics section-body">
+        <progress id="running-progress" aria-label="操作进行中" data-l10n-label="operationProgress" hidden></progress>
+        <p id="result-status" role="status" data-l10n="diagnosticHint">执行操作后可在这里查看诊断。</p>
+        <details id="diagnostic-details" class="diagnostic-details" hidden>
+          <summary data-l10n="diagnosticLog">日志与命令</summary>
+          <pre id="log" aria-label="脱敏操作日志" data-l10n-label="diagnosticLogLabel" tabindex="0" hidden></pre>
+          <div id="command" class="command" hidden>
+            <input aria-label="等价 PowerShell 命令" data-l10n-label="command" id="command-text" readonly>
+            <button id="copy" type="button" data-l10n="commandCopy">复制命令</button>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <details class="maintenance section-body" id="maintenance">
+      <summary data-l10n="maintenanceTitle">安装维护与卸载</summary>
+      <p data-l10n="preserveHint">保留数据模式会移除本实例服务和客户端接入，保存数据库、研究文件及恢复配置。</p>
       <div class="actions">
-        <button id="preserve" type="button">卸载并保留研究数据</button>
-        <button id="show-purge" type="button" class="danger" aria-controls="purge-form" aria-expanded="false">彻底卸载…</button>
+        <button id="preserve" type="button" data-l10n="preserve">卸载并保留研究数据</button>
+        <button id="show-purge" type="button" class="danger" aria-controls="purge-form" aria-expanded="false" data-l10n="purge">彻底卸载…</button>
       </div>
       <form id="purge-form" hidden>
-        <p>此操作会删除本实例的数据库卷、研究卷、配置、凭据和日志。请先完成所需备份。</p>
+        <p data-l10n="purgeHint">此操作会删除本实例的数据库卷、研究卷、配置、凭据和日志。请先完成所需备份。</p>
         <p id="purge-scope" class="scope"></p>
-        <label class="field"><span>输入 <code>DELETE-THIS-INSTANCE</code> 确认</span><input id="confirmation" type="text" autocomplete="off" spellcheck="false" required></label>
-        <div class="actions"><button id="purge" type="submit" class="danger">删除本实例和研究数据</button><button id="cancel-purge" type="button">取消</button></div>
+        <label class="field"><span><span data-l10n="purgeConfirmation">输入确认文字</span> <code>DELETE-THIS-INSTANCE</code></span><input id="confirmation" type="text" autocomplete="off" spellcheck="false" required></label>
+        <div class="actions"><button id="purge" type="submit" class="danger" data-l10n="purgeConfirm">删除本实例和研究数据</button><button id="cancel-purge" type="button" data-l10n="cancel">取消</button></div>
       </form>
     </details>
   </main>

@@ -4,5 +4,5 @@
   "description": "本机管理界面的固定主机操作",
   "local": true,
   "webviews": ["management"],
-  "permissions": ["allow-desktop-operation", "allow-desktop-open-workbench", "allow-desktop-window-action"]
+  "permissions": ["allow-desktop-operation", "allow-desktop-open-workbench", "allow-desktop-window-action", "core:app:allow-version"]
 }

@@ -155,6 +155,7 @@ async fn desktop_open_workbench(
     operations: State<'_, Operations>,
     workbench_port: State<'_, WorkbenchPort>,
     action: WorkbenchAction,
+    appearance: Option<window_frame::DesktopAppearance>,
 ) -> Result<Option<String>, String> {
     authorize(&window)?;
     let _permit = operations.acquire()?;
@@ -176,7 +177,13 @@ async fn desktop_open_workbench(
         WorkbenchAction::InApp => {}
         WorkbenchAction::ReleaseBundles => url = release_bundles_url(url),
     }
-    show_workbench(&app, &workbench_port, url, navigate)?;
+    show_workbench(
+        &app,
+        &workbench_port,
+        url,
+        navigate,
+        appearance.unwrap_or_default(),
+    )?;
     Ok(None)
 }
 
@@ -185,6 +192,7 @@ fn show_workbench(
     workbench_port: &WorkbenchPort,
     url: Url,
     navigate: bool,
+    appearance: window_frame::DesktopAppearance,
 ) -> Result<(), String> {
     let port = url.port().ok_or("端口无效。")?;
     if let Some(workbench) = app.get_webview_window("research") {
@@ -211,7 +219,11 @@ fn show_workbench(
         }
         workbench.destroy().map_err(|_| "无法关闭旧研究工作台。")?;
     }
-    let frame = window_frame::initialization("research", &url.origin().ascii_serialization());
+    let frame = window_frame::initialization(
+        "research",
+        &url.origin().ascii_serialization(),
+        Some(appearance),
+    );
     let builder = WebviewWindowBuilder::new(app, "research", WebviewUrl::External(url))
         .title("FinDashboard 研究工作台")
         .inner_size(1240.0, 800.0)
@@ -248,6 +260,7 @@ fn main() {
                 .initialization_script(window_frame::initialization(
                     "management",
                     "https://tauri.localhost",
+                    None,
                 ))
                 .on_navigation(is_management_page)
                 .on_new_window(|_, _| NewWindowResponse::Deny)

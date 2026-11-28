@@ -19,11 +19,38 @@ impl WorkbenchPort {
     }
 }
 
-pub(crate) fn initialization(window: &str, origin: &str) -> String {
+#[derive(Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DesktopTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DesktopLanguage {
+    #[default]
+    Zh,
+    En,
+}
+
+#[derive(Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct DesktopAppearance {
+    theme: DesktopTheme,
+    language: DesktopLanguage,
+}
+
+pub(crate) fn initialization(
+    window: &str,
+    origin: &str,
+    appearance: Option<DesktopAppearance>,
+) -> String {
     let args = serde_json::json!({
         "window": window,
         "origin": origin,
         "recovery": (window == "research").then_some(WORKBENCH_UNAVAILABLE),
+        "recoveryAppearance": appearance,
         "stylesheet": include_str!("../../ui/window-frame.css"),
     });
     format!("({})({args});", include_str!("../../ui/window-frame.js"))
@@ -82,6 +109,24 @@ pub(crate) async fn desktop_window_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_appearance_only_accepts_desktop_themes_and_languages() {
+        let prefs: DesktopAppearance =
+            serde_json::from_str(r#"{"theme":"light","language":"en"}"#).unwrap();
+        assert_eq!(prefs.theme, DesktopTheme::Light);
+        assert_eq!(prefs.language, DesktopLanguage::En);
+        assert_eq!(DesktopAppearance::default().theme, DesktopTheme::Dark);
+        assert_eq!(DesktopAppearance::default().language, DesktopLanguage::Zh);
+        assert!(
+            serde_json::from_str::<DesktopAppearance>(r#"{"theme":"custom","language":"en"}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<DesktopAppearance>(r#"{"theme":"light","language":"fr"}"#)
+                .is_err()
+        );
+    }
 
     #[test]
     fn caption_actions_require_the_calling_window_and_active_origin() {

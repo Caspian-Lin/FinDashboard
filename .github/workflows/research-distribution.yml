@@ -130,6 +130,8 @@ jobs:
         run: |
           node --check desktop/ui/app.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check desktop/ui/preferences.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --check desktop/ui/window-frame.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test desktop/tests/*.test.cjs
@@ -177,6 +179,15 @@ jobs:
           $msi = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/$profile/bundle/msi/*.msi)
           if ($msi.Count -ne 1) { throw 'Expected one x64 MSI.' }
           if ($hasPayload) {
+            $version = (Get-Content -Raw -LiteralPath src-tauri/tauri.offline.conf.json | ConvertFrom-Json).version
+            if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid preview product version.' }
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            $database = $installer.OpenDatabase($msi[0].FullName, 0)
+            $view = $database.OpenView("SELECT Value FROM Property WHERE Property = 'ProductVersion'")
+            $view.Execute()
+            $productVersion = $view.Fetch().StringData(1)
+            $view.Close()
+            if ($productVersion -cne $version) { throw "MSI ProductVersion $productVersion does not match $version." }
             $installRoot = Join-Path $env:RUNNER_TEMP "finboard-preview-${env:GITHUB_RUN_ID}-${env:GITHUB_RUN_ATTEMPT}"
             $installLog = "$installRoot.log"
             $installArgs = '/a "' + $msi[0].FullName + '" TARGETDIR="' + $installRoot + '" /qn /l*v "' + $installLog + '"'
@@ -199,7 +210,7 @@ jobs:
                 bytes = (Get-Item -LiteralPath $original).Length; sha256 = $expected.ToLowerInvariant()
               }
             }
-            $out = 'FinDashboard-research-offline-windows-amd64-pr.msi'
+            $out = "FinDashboard-Research-Preview-$productVersion-windows-amd64.msi"
             Copy-Item -LiteralPath $msi[0].FullName -Destination $out
             $sha = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash.ToLowerInvariant()
             "$sha  $out" | Set-Content -Encoding ascii SHA256SUMS-desktop-pr
@@ -217,7 +228,7 @@ jobs:
               schema_version = 1; channel = $manifest.channel
               checkout_commit = $sourceCommit; source_tree = $sourceTree; pull_request_head = $env:FINBOARD_DESKTOP_PR_HEAD
               run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT
-              msi = @{file = $out; bytes = (Get-Item -LiteralPath $out).Length; sha256 = $sha}
+              msi = @{file = $out; version = $productVersion; bytes = (Get-Item -LiteralPath $out).Length; sha256 = $sha}
               starter_file = 'synthetic-starter-v1.zip'; installed_resources = $resources
               images = $manifest.images; administrative_install_verified = $true
             } | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 desktop-pr-candidate.json
@@ -227,7 +238,7 @@ jobs:
         with:
           name: research-desktop-pr-msi
           path: |
-            desktop/FinDashboard-research-offline-windows-amd64-pr.msi
+            desktop/FinDashboard-Research-Preview-*-windows-amd64.msi
             desktop/SHA256SUMS-desktop-pr
             desktop/desktop-pr-candidate.json
             desktop/synthetic-starter-v1.zip

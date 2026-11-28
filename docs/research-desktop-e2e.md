@@ -23,7 +23,9 @@ python -m scripts.smoke_research_desktop --run-isolated `
 
 ### 固定预览候选
 
-从同一个 Actions 执行下载 `research-desktop-pr-msi`。其中的 `desktop-pr-candidate.json` 记录实际检出的提交和 Git 树、来源 PR 提交、执行编号及重试次数，以及镜像身份、MSI 和离线资源的字节数与 SHA-256。比较 Git 树可确认预览内容对应准备验收的里程碑版本。里程碑内容变化后使用重新构建的候选。
+从同一个 Actions 执行下载 `research-desktop-pr-msi`，安装包文件名包含 `Preview` 和 Windows Installer 的产品版本。`desktop-pr-candidate.json` 记录实际检出的提交和 Git 树、来源 PR 提交、执行编号及重试次数、镜像身份、MSI 产品版本，以及 MSI 和离线资源的字节数与 SHA-256。比较 Git 树可确认预览内容对应准备验收的里程碑版本。里程碑内容变化后使用重新构建的候选。安装后，在管理台导航下方核对版本。
+
+升级预览版之前，在 Windows「已安装的应用」确认当前 `FinDashboard Research Preview` 产品及版本，再与候选版本比较。旧预览包曾共用同一个文件名，历史记录应按候选清单或 MSI 的 `ProductVersion` 区分。正式版和预览版使用各自的安装产品、数据卷与端口。
 
 ```powershell
 $candidate = Get-Content -Raw -LiteralPath .\desktop-pr-candidate.json | ConvertFrom-Json
@@ -41,7 +43,7 @@ $candidate | Select-Object checkout_commit, source_tree, run_id, run_attempt, im
 
 Actions 的 WiX 与 MSI 管理安装只验证打包、布局和资源一致性。记录 `administrative_install_verified` 时，将资源验证和图形验收分别记账。执行 #567 的预览构建已通过 Windows 原生测试、WiX 与 MSI 管理安装，后续图形验收按所选候选重新留证。[预览工作流](https://github.com/Caspian-Lin/FinDashboard/actions/runs/46041518329)
 
-Windows CI 另用 MSI 管理安装验证安装布局与镜像归档 checksum。Rust 回归测试用实际 Windows PowerShell 验证含空格的安装路径可解析 `$PSScriptRoot`。本机面板可在系统深色和浅色外观、默认尺寸及最窄窗口下复测。用 Tab 检查焦点、状态刷新、诊断展开与卸载确认，检查日志和复制命令是否可读。
+Windows CI 另用 MSI 管理安装验证安装布局与镜像归档 checksum。Rust 回归测试用实际 Windows PowerShell 验证含空格的安装路径可解析 `$PSScriptRoot`。在默认尺寸和最窄窗口分别检查管理台的深色、浅色和中英文。关闭后重开，核对管理台恢复所选偏好，应用内与外部浏览器工作台各自保留原偏好。用 Tab 检查焦点、状态刷新、诊断展开与卸载确认，检查日志和复制命令是否可读。
 
 在启动器和研究工作台分别验证右上角的最小化、最大化与还原和关闭按钮，以及在现有页面顶栏留白处拖动窗口。工作台关闭后应能从启动器重新打开。缩短研究窗口，确认弹层不会盖住窗口按钮，窗口操作也不会关闭弹层。断开研究服务后重载工作台，确认本机错误页面仍显示同一组按钮。在最窄窗口用滚轮和键盘访问底部维护区。
 
