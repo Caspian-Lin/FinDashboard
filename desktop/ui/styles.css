@@ -99,6 +99,15 @@ a { color: inherit; text-decoration: none; }
   font-weight: 650;
 }
 
+.brand-context {
+  padding-inline-start: .6rem;
+  border-inline-start: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  font-size: .875rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .brand-mark {
   display: flex;
   align-items: flex-end;

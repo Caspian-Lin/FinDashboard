@@ -4,6 +4,7 @@
   const root = document.documentElement;
   const english = {
     "appTitle": "FinDashboard Research Manager",
+    "managerBrand": "Manager",
     "skip": "Skip to main content",
     "appearance": "Appearance preferences",
     "language": "Interface language",
