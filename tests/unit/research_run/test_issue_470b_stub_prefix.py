@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -91,6 +91,7 @@ from .test_issue_314_checkpoint_resume import (
     _artifact_fingerprint,
     _plain_snapshot,
     _signal_setup,
+    _user_factor_snapshot,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -378,7 +379,7 @@ def _non_u_signal_setup(
 
 
 class TestStubPrefixResumeEndToEnd:
-    @pytest.mark.parametrize("fallback", [None, "missing_stage", "copied_decision"])
+    @pytest.mark.parametrize("fallback", [None, "missing_stage", "copied_decision", "copied_proxy"])
     async def test_resume_equals_fresh_and_prefix_not_rebuilt(
         self, monkeypatch: pytest.MonkeyPatch, fallback: str | None
     ) -> None:
@@ -428,6 +429,17 @@ class TestStubPrefixResumeEndToEnd:
             def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
                 return True
 
+        class CopyingProxy:
+            def __init__(self, adapter: SignalEnginePipelineAdapter) -> None:
+                self.adapter = adapter
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.adapter, name)
+
+            async def decisions(self, manifest: ResearchRunManifest) -> AsyncIterator[DecisionBundle]:
+                async for decision in self.adapter.decisions(manifest):
+                    yield replace(decision)
+
         adapter_class = CopyingAdapter if fallback == "copied_decision" else SignalEnginePipelineAdapter
         resumed_adapter = adapter_class(
             manifest=manifest,
@@ -437,10 +449,12 @@ class TestStubPrefixResumeEndToEnd:
         contexts_before = counters.load_context
         covariance_before = counters.covariance
         stubs_before = counters.load_stub
-        resumed = await coordinator.execute(manifest, resumed_adapter)
+        resumed = await coordinator.execute(
+            manifest, CopyingProxy(resumed_adapter) if fallback == "copied_proxy" else resumed_adapter,
+        )
         assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
         assert resumed.timing is not None
-        expected_reuse = {None: 2, "missing_stage": 1, "copied_decision": 0}
+        expected_reuse = {None: 2, "missing_stage": 1, "copied_decision": 0, "copied_proxy": 0}
         assert resumed.timing["resume_checkpoints_reused"] == expected_reuse[fallback]
         # 续跑段:stub 前缀 2 期只走 load_resume_stub,完整装载只剩 1 期
         # (load_context / 协方差各 1 次)—— 前缀零重算的直接计数证据。
@@ -601,6 +615,68 @@ class TestStubPrefixResumeEndToEnd:
         assert resumed.result is not None
         assert resumed.result.factor_screen is not None
         assert resumed.result.factor_screen["n_periods"] == 3
+
+    @pytest.mark.slow
+    @pytest.mark.timeout(900)
+    async def test_user_factor_long_prefix_matches_uninterrupted_run(self) -> None:
+        """272 期检查点 + 第 273 期续跑,保持 u_ screen 和阶段证据。"""
+        count = 273
+        snapshot_ids = tuple(f"user-factor-{index:03d}" for index in range(count))
+        snapshots = {
+            snapshot_id: replace(
+                _user_factor_snapshot(DECISION_AT + timedelta(days=index)),
+                snapshot_id=snapshot_id,
+            )
+            for index, snapshot_id in enumerate(snapshot_ids)
+        }
+        manifest = _signal_manifest(
+            _signal_spec(rank_threshold=0.5),
+            run_id="RR-470-user-factor-long-prefix",
+            idempotency_key="470-user-factor-long-prefix",
+            snapshot_ids=snapshot_ids,
+        )
+        factory = _factory_for(_closes_provider(n_days=count + 40))
+
+        async def snapshot_provider(snapshot_id: str) -> Any:
+            return snapshots.get(snapshot_id)
+
+        store = InMemoryResearchRunStore()
+        coordinator = ResearchRunCoordinator(store)
+        interrupted = await coordinator.execute(
+            manifest,
+            _InterruptAfterKSignalAdapter(
+                k=count - 1, manifest=manifest,
+                release_provider_factory=factory, snapshot_provider=snapshot_provider,
+            ),
+        )
+        assert interrupted.status is ResearchRunStatus.INTERRUPTED
+        assert len(await store.list_artifact_digests(manifest.run_id)) == (count - 1) * 13
+        resumed = await coordinator.execute(
+            manifest,
+            SignalEnginePipelineAdapter(
+                manifest=manifest, release_provider_factory=factory, snapshot_provider=snapshot_provider,
+            ),
+        )
+        control_manifest = replace(
+            manifest, run_id="RR-470-user-factor-long-control",
+            idempotency_key="470-user-factor-long-control",
+        )
+        control = await coordinator.execute(
+            control_manifest,
+            SignalEnginePipelineAdapter(
+                manifest=control_manifest, release_provider_factory=factory,
+                snapshot_provider=snapshot_provider,
+            ),
+        )
+        assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
+        assert control.status is ResearchRunStatus.COMPLETED, control.error_summary
+        assert resumed.result is not None
+        assert resumed.result.factor_screen is not None
+        assert resumed.result.factor_screen["n_periods"] == count
+        assert resumed.result_checksum == control.result_checksum
+        assert _artifact_fingerprint(await store.list_artifacts(manifest.run_id)) == (
+            _artifact_fingerprint(await store.list_artifacts(control_manifest.run_id))
+        )
 
     @pytest.mark.parametrize("changed", ["features_date", "orders_date", "feature_integer", "feature_iso", "feature_extra"])
     async def test_resume_detects_checksum_consistent_payload_drift(self, changed: str) -> None:

@@ -24,12 +24,20 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from contextlib import aclosing
-from dataclasses import dataclass, field, fields
+import copyreg
+import json
+import pickle
+import tempfile
+import zlib
+from collections import deque
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, aclosing
+from dataclasses import dataclass, field, fields, replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import NamedTuple, cast
+from hashlib import sha256
+from types import MappingProxyType
+from typing import BinaryIO, NamedTuple, cast
 
 import structlog
 
@@ -55,6 +63,7 @@ from finboard_backtest.research_run.contracts import (
     RiskExitOutcome,
     TargetPosition,
     UniverseCandidate,
+    canonical_json_normalized,
     stable_checksum_normalized,
 )
 
@@ -98,6 +107,171 @@ class DecisionCheckpoint:
     decision: DecisionBundle
     # 只有候选池与特征恢复后能逐字节往返时才提供。保留轻量证据,释放原载荷。
     stages: dict[ResearchRunStage, CheckpointStage] | None = None
+    feature_payload: bytes | None = field(default=None, repr=False)
+
+
+class _DeferredFeatures(NamedTuple):
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeLedgerSeed:
+    business_date: date
+    decision_at: datetime
+    fills: tuple[ResearchFill, ...]
+    positions: tuple[ResearchPosition, ...]
+    ledger: LedgerSnapshot
+    risk_state: ResearchRiskState
+
+
+def _restore_mapping_proxy(values: dict[object, object]) -> Mapping[object, object]:
+    return MappingProxyType(values)
+
+
+def _reduce_mapping_proxy(
+    value: Mapping[object, object],
+) -> tuple[Callable[[dict[object, object]], Mapping[object, object]], tuple[dict[object, object]]]:
+    return _restore_mapping_proxy, (dict(value),)
+
+
+def _reduce_feature_value(
+    value: FeatureValue,
+) -> tuple[type[FeatureValue], tuple[str, str, float | None, tuple[str, ...], datetime]]:
+    return FeatureValue, (
+        value.symbol, value.feature_id, value.value, value.source_artifact_ids, value.available_at,
+    )
+
+
+def _reduce_universe_candidate(
+    value: UniverseCandidate,
+) -> tuple[type[UniverseCandidate], tuple[str, bool, tuple[str, ...], str, str]]:
+    return UniverseCandidate, (
+        value.symbol, value.included, value.reasons, value.asset_class, value.market,
+    )
+
+
+class ResumeCheckpointSpool:
+    """在协调器与组合管线之间保存已验证的重决策前缀。
+
+    内存只保留账本种子与当前重决策。临时文件只由当前进程打开,
+    仅回读自己已校验并重建的对象。内容不参与任何产物或 checksum。
+    普通因子的精确特征截面可从重放记录中剥离。需要持久化时仍用原字节重建。
+    """
+
+    def __init__(self, *, compact_features: bool = True) -> None:
+        self.compact_features = compact_features
+        self._file: BinaryIO | None = None
+        self._feature_file: BinaryIO | None = None
+        self._files = ExitStack()
+        self.seeds: list[ResumeLedgerSeed] = []
+        self.has_user_features = False
+        self.current: DecisionCheckpoint | None = None
+        self._current_features: _DeferredFeatures | None = None
+
+    def __len__(self) -> int:
+        return len(self.seeds)
+
+    def _open_file(self) -> BinaryIO:
+        return cast(
+            BinaryIO,
+            self._files.enter_context(tempfile.TemporaryFile(mode="w+b")),
+        )
+
+    def append(self, checkpoint: DecisionCheckpoint) -> None:
+        from finboard_data.factor_lab import is_user_factor_name
+
+        file = self._file
+        if file is None:
+            file = self._open_file()
+            self._file = file
+        decision = checkpoint.decision
+        features = None
+        if checkpoint.feature_payload is not None and checkpoint.stages is not None:
+            feature_file = self._feature_file
+            if feature_file is None:
+                feature_file = self._open_file()
+                self._feature_file = feature_file
+            compressed = zlib.compress(checkpoint.feature_payload, level=1)
+            features = _DeferredFeatures(feature_file.tell(), len(compressed))
+            feature_file.write(compressed)
+            checkpoint = DecisionCheckpoint(replace(decision, features=()), checkpoint.stages)
+        writer = pickle.Pickler(file, protocol=pickle.HIGHEST_PROTOCOL)
+        writer.dispatch_table = {
+            **copyreg.dispatch_table,
+            MappingProxyType: _reduce_mapping_proxy,
+            # 截面内单期数万项,避免 slots dataclass 逐个扫描字段并重建状态。
+            FeatureValue: _reduce_feature_value,
+            UniverseCandidate: _reduce_universe_candidate,
+        }
+        writer.dump((checkpoint, features))
+        self.seeds.append(ResumeLedgerSeed(
+            decision.business_date, decision.decision_at, decision.fills,
+            decision.positions, decision.ledger, decision.risk_state,
+        ))
+        if not self.has_user_features:
+            self.has_user_features = any(
+                is_user_factor_name(feature.feature_id) for feature in decision.features
+            )
+
+    def restore_current_features(self, decision: DecisionBundle) -> DecisionBundle:
+        checkpoint = self.current
+        features = self._current_features
+        file = self._feature_file
+        if checkpoint is None or checkpoint.decision is not decision or features is None:
+            return decision
+        if file is None or checkpoint.stages is None:
+            raise ValueError("临时断点缺失特征截面来源")
+        file.seek(features.offset)
+        payload = zlib.decompress(file.read(features.length))
+        if sha256(payload).hexdigest() != checkpoint.stages[ResearchRunStage.FEATURES].checksum:
+            raise ValueError("临时断点特征截面校验和不一致")
+        values = _mapping(json.loads(payload), "断点特征")
+        return replace(decision, features=_rebuild_features(values, "断点特征", None))
+
+    def replay(self, *, defer_features: bool = False) -> Iterator[DecisionBundle]:
+        if self._file is None:
+            return
+        self._file.seek(0)
+        try:
+            for _ in range(len(self)):
+                checkpoint, features = pickle.load(self._file)
+                if not isinstance(checkpoint, DecisionCheckpoint):
+                    raise ValueError("临时断点文件记录类型错误")
+                self.current = checkpoint
+                self._current_features = features
+                if not defer_features and features is not None:
+                    checkpoint = replace(
+                        checkpoint, decision=self.restore_current_features(checkpoint.decision)
+                    )
+                    self.current = checkpoint
+                    self._current_features = None
+                yield checkpoint.decision
+                self.current = None
+                self._current_features = None
+                del checkpoint
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        self.current = None
+        self._current_features = None
+        self.seeds.clear()
+        self.has_user_features = False
+        self._file = None
+        self._feature_file = None
+        self._files.close()
+
+
+def replay_resume_bundles(
+    source: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
+    *,
+    defer_features: bool = False,
+) -> Iterator[DecisionBundle]:
+    if isinstance(source, ResumeCheckpointSpool):
+        return source.replay(defer_features=defer_features)
+    pending = deque(source)
+    return (pending.popleft() for _ in range(len(pending)))
 
 
 def decision_artifact_index(run_id: str, artifact_id: str) -> int | None:
@@ -188,6 +362,7 @@ async def iter_decision_checkpoints(
     artifacts: AsyncIterator[ResearchArtifact],
     *,
     reuse_sections: bool = False,
+    capture_feature_payload: bool = False,
 ) -> AsyncGenerator[DecisionCheckpoint, None]:
     """``completed_decision_prefix`` 的流式形态(#470 前半场)。
 
@@ -229,7 +404,9 @@ async def iter_decision_checkpoints(
         if len(current) != _DECISION_ARTIFACT_STAGE_COUNT:
             continue
         try:
-            _verify_stage_checksums(run_id, index, current)
+            feature_payload = _verify_stage_checksums(
+                run_id, index, current, capture_feature_payload=capture_feature_payload,
+            )
             layout = _SectionLayout() if reuse_sections else None
             bundle = rebuild_decision(run_id, index, current, _layout=layout)
         except Exception as exc:
@@ -255,7 +432,7 @@ async def iter_decision_checkpoints(
                 for stage, row in current.items()
             }
         current = {}
-        yield DecisionCheckpoint(bundle, stages)
+        yield DecisionCheckpoint(bundle, stages, feature_payload if stages is not None else None)
         index += 1
     if current:
         _truncate_incomplete(index)
@@ -265,16 +442,25 @@ def _verify_stage_checksums(
     run_id: str,
     index: int,
     by_stage: dict[ResearchRunStage, ResearchArtifact],
-) -> None:
+    *,
+    capture_feature_payload: bool = False,
+) -> bytes | None:
     """逐 artifact 复验载荷校验和(存储损坏的读回防线)。"""
 
+    feature_payload = None
     for stage, artifact in sorted(by_stage.items(), key=lambda item: item[0].value):
         # 存储返回 JSON 规范化对象,直接复验原 canonical 字节,省掉全截面的递归拷贝。
-        if stable_checksum_normalized(artifact.payload) != artifact.checksum:
+        if capture_feature_payload and stage is ResearchRunStage.FEATURES:
+            feature_payload = canonical_json_normalized(artifact.payload).encode("utf-8")
+            checksum = sha256(feature_payload).hexdigest()
+        else:
+            checksum = stable_checksum_normalized(artifact.payload)
+        if checksum != artifact.checksum:
             raise ValueError(
                 f"artifact {artifact.artifact_id}(run={run_id}"
                 f" decision#{index} stage={stage.value})载荷校验和不一致"
             )
+    return feature_payload
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +579,6 @@ def rebuild_decision(
     orders = stage_payload(ResearchRunStage.ORDERS)
     fills = stage_payload(ResearchRunStage.FILLS)
     ledger_stage = stage_payload(ResearchRunStage.LEDGER)
-    feature_metadata = _FeatureMetadata()
-
     return DecisionBundle(
         business_date=_as_date(
             _field(universe, "business_date", f"{label} universe"),
@@ -410,12 +594,7 @@ def rebuild_decision(
                 _require_list(_field(universe, "candidates", f"{label} universe"), label)
             )
         ),
-        features=tuple(
-            _rebuild_feature(item, f"{label} features[{position}]", feature_metadata, _layout)
-            for position, item in enumerate(
-                _require_list(_field(features, "features", f"{label} features"), label)
-            )
-        ),
+        features=_rebuild_features(features, label, _layout),
         signals=tuple(
             _rebuild_signal(item, f"{label} signals[{position}]")
             for position, item in enumerate(
@@ -564,6 +743,18 @@ class _FeatureMetadata:
     names: dict[str, str] = field(default_factory=dict)
     sources: dict[tuple[str, ...], tuple[str, ...]] = field(default_factory=dict)
     timestamps: dict[str, datetime] = field(default_factory=dict)
+
+
+def _rebuild_features(
+    payload: dict[str, JsonValue], label: str, layout: _SectionLayout | None,
+) -> tuple[FeatureValue, ...]:
+    metadata = _FeatureMetadata()
+    return tuple(
+        _rebuild_feature(item, f"{label} features[{position}]", metadata, layout)
+        for position, item in enumerate(
+            _require_list(_field(payload, "features", f"{label} features"), label)
+        )
+    )
 
 
 def _rebuild_feature(

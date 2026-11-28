@@ -574,6 +574,8 @@ def register(mcp: MCPServer) -> None:
             "了新发布即 conflict(要求重新预览),不静默换最新发布;解析出的"
             " research_window 写进 parameters 并随 manifest 冻结。两个字段必须"
             "成对出现;不声明则行为与旧入口完全一致\n"
+            '- "parameters.covariance_policy_version"(可选): lazy_effective_v2 '
+            "为新提交显式选择按需估计与生效矩阵摘要;省略沿用历史契约\n"
             '- "factor_snapshot_ids": 冻结特征快照 snapshot_id 列表'
             "(finboard_feature_snapshot_list 查询);single_shot 必填(决策时点"
             "只能来自快照,缺快照入队即拒 #203);multi_period 声明决策日历后价格"

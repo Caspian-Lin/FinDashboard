@@ -96,6 +96,7 @@ from finboard_backtest.research_run.contracts import (
     JsonValue,
     parse_decision_schedule,
     stable_checksum,
+    validate_covariance_policy_version,
 )
 from finboard_backtest.research_run.signal_engine import (
     decision_schedule_dates_gate_error,
@@ -177,6 +178,16 @@ class ResearchRunSubmitInput(BaseModel):
         if self.data_scope is None and self.data_scope_resolution_id is not None:
             raise ValueError("data_scope_resolution_id 必须与 data_scope 一起声明")
         return self
+
+    @field_validator("parameters")
+    @classmethod
+    def _validate_covariance_policy(cls, value: dict[str, Any]) -> dict[str, Any]:
+        policy_key = "covariance_policy_version"
+        version = value.get(policy_key)
+        validate_covariance_policy_version(version)
+        if version is None and policy_key in value:
+            return {key: item for key, item in value.items() if key != policy_key}
+        return value
 
     @field_validator("parameters")
     @classmethod

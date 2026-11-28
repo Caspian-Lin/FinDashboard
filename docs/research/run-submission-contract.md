@@ -38,12 +38,18 @@ finboard-app  background_jobs.py         enqueue_job_core → (job_row, created)
 | `dataset_release_ids` | 必须与策略验证计划的 `dataset_release_ids` 完全一致 |
 | `factor_snapshot_ids` | single_shot 的决策时点来源；被 factor series 覆盖的因子除外 |
 | `factor_series_ids` | 内容寻址 `FS-` 序列；锚定发布必须 ⊆ 本次冻结清单 |
-| `parameters` | `decision_schedule` / legacy `rebalance_frequency` 二选一，形状同源 |
+| `parameters` | `decision_schedule` / legacy `rebalance_frequency` 二选一，形状同源。可选 `covariance_policy_version=lazy_effective_v2` |
 | `validation_config` / `execution_config` | 死分区：非空即拒 |
 | `portfolio_config` / `risk_config` / `fee_config` / `benchmark_config` | 分区键位不可混 |
 | `data_scope` + `data_scope_resolution_id` | 成对出现；提交期重算比对，漂移即 409 |
 | `code_version` / `initial_capital` / `requested_by` | 冻结进 manifest |
 | `actor_type` | `human` \| `agent`；`llm` 在 schema 层拒绝 |
+
+#477 的协方差政策对 REST 与 `finboard_run_queue` 共用。新提交可在请求的
+`parameters` 中显式声明 `"covariance_policy_version": "lazy_effective_v2"`。
+版本随 manifest 冻结。缺省或空值沿用首次协方差摘要契约。旧运行重放和中断续算
+从原 manifest 读取政策。新版仅在目标覆盖需要时计算首次协方差，输入摘要记录
+组合阶段采用的矩阵，各版本分别验证摘要，跨版本比较实际业务轨迹。
 
 **身份只来自服务端上下文**（`ResearchOperationContext`）：
 

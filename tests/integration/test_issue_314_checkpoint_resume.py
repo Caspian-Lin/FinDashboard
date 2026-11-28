@@ -30,6 +30,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from finboard_app.research_run_store import SqlAlchemyResearchRunStore
@@ -352,8 +353,10 @@ async def _drain_worker(worker: BackgroundWorker) -> None:
 
 
 class TestIssue314CheckpointResumeIntegration:
+    @pytest.mark.parametrize("delete_saved_features", [False, True])
     async def test_frozen_prefetch_and_resume_match_serial_artifacts(
-        self, engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        delete_saved_features: bool,
     ) -> None:
         """真实 Parquet + worker + PostgreSQL,中断跨批续跑后逐 stage 对照。"""
         from finboard_data import trading_calendar
@@ -415,11 +418,29 @@ class TestIssue314CheckpointResumeIntegration:
         assert interrupted.status is ResearchRunStatus.INTERRUPTED, interrupted.error_summary
         checkpoint = await store.list_artifacts(manifest.run_id)
         assert len(checkpoint) == prefix * _STAGE_COUNT
+        first_features_id = next(
+            row.artifact_id for row in checkpoint if row.stage is ResearchRunStage.FEATURES
+        )
 
         persisted_decision_ids: list[str | None] = []
         readback_progress: list[tuple[int, int | None, str]] = []
         append_artifacts = SqlAlchemyResearchRunStore.append_artifacts
+        match_checksums = SessionPerOperationResearchRunStore.checkpoint_checksums_match
         update_progress = BackgroundJobRepository.update_progress
+        missed = False
+
+        async def record_checksum_match(
+            store: SessionPerOperationResearchRunStore, run_id: str, checksums: dict[str, str],
+        ) -> bool:
+            nonlocal missed
+            if delete_saved_features and not missed:
+                missed = True
+                async with session_maker() as session, session.begin():
+                    await session.execute(
+                        text("DELETE FROM research_run_artifacts WHERE run_id=:run AND artifact_id=:id"),
+                        {"run": run_id, "id": first_features_id},
+                    )
+            return await match_checksums(store, run_id, checksums)
 
         async def record_append(
             store: SqlAlchemyResearchRunStore, artifacts: Sequence[ResearchArtifact]
@@ -436,6 +457,9 @@ class TestIssue314CheckpointResumeIntegration:
             return await update_progress(repo, job_id, **kwargs)
 
         monkeypatch.setattr(SqlAlchemyResearchRunStore, "append_artifacts", record_append)
+        monkeypatch.setattr(
+            SessionPerOperationResearchRunStore, "checkpoint_checksums_match", record_checksum_match,
+        )
         monkeypatch.setattr(BackgroundJobRepository, "update_progress", record_progress)
 
         def factory(run_manifest: ResearchRunManifest) -> ResearchStrategyAdapter:
@@ -450,9 +474,10 @@ class TestIssue314CheckpointResumeIntegration:
         assert recovered.status is ResearchRunStatus.COMPLETED, recovered.error_summary
         assert recovered.result_checksum == control.result_checksum
         assert recovered.timing is not None
-        assert recovered.timing["resume_checkpoints_reused"] == prefix
+        assert recovered.timing["resume_checkpoints_reused"] == prefix - int(delete_saved_features)
         assert readback_progress[0] == (0, None, "research_run:resume_readback 1")
-        assert persisted_decision_ids == [
+        fallback_writes = [f"{manifest.run_id}:D:00000000"] if delete_saved_features else []
+        assert persisted_decision_ids == fallback_writes + [
             f"{manifest.run_id}:D:{index:08d}" for index in range(prefix, len(selected))
         ]
         timing = cast(dict[str, Any], recovered.timing["decision_load_stages"])
@@ -464,9 +489,11 @@ class TestIssue314CheckpointResumeIntegration:
         assert len(resumed_rows) == len(selected) * _STAGE_COUNT + 1
         assert _artifact_fingerprint(resumed_rows) == _artifact_fingerprint(control_rows)
         assert [row.payload for row in resumed_rows] == [row.payload for row in control_rows]
-        assert [row.created_at for row in resumed_rows[:len(checkpoint)]] == [
-            row.created_at for row in checkpoint
-        ]
+        for resumed, original in zip(resumed_rows[:len(checkpoint)], checkpoint, strict=True):
+            if delete_saved_features and original.artifact_id == first_features_id:
+                assert resumed.created_at > original.created_at
+            else:
+                assert resumed.created_at == original.created_at
         async with session_maker() as session:
             job = await BackgroundJobRepository(session).get(job_id)
         assert job is not None

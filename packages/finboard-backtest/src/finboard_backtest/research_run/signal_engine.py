@@ -30,19 +30,21 @@ import contextlib
 import math
 import os
 import weakref
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
     Collection,
+    Iterator,
     Mapping,
     Sequence,
 )
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from functools import partial
 from itertools import pairwise
 from pathlib import Path
 from time import perf_counter
@@ -64,6 +66,11 @@ from finboard_backtest.factors.standardize import (
     winsorize,
 )
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
+from finboard_backtest.research_run.checkpoint_resume import (
+    ResumeCheckpointSpool,
+    ResumeLedgerSeed,
+    replay_resume_bundles,
+)
 from finboard_backtest.research_run.contracts import (
     REBALANCE_FREQUENCIES,
     DecisionBundle,
@@ -99,6 +106,7 @@ from finboard_backtest.research_run.frozen_loader import (
     SymbolCloseHistory,
 )
 from finboard_backtest.research_run.portfolio_pipeline import (
+    DeferredCovariance,
     PortfolioDecisionInput,
     PortfolioPipelineAdapter,
     _ResumeReplayStub,
@@ -130,6 +138,9 @@ from finboard_backtest.strategy_spec.universe_precheck import (
 )
 
 if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+
     from finboard_backtest.factor_lab import PriceFeatureProcessPool
     from finboard_backtest.portfolio import CovarianceEstimate
     from finboard_data.factor_lab import FeatureSnapshot
@@ -963,6 +974,48 @@ async def _next_execution_at(
 PSD_FLOOR_VARIANCE = 1e-12
 
 
+@dataclass(frozen=True, slots=True)
+class _CovariancePriceLayout:
+    estimable: tuple[str, ...]
+    short_history: tuple[str, ...]
+    window: int
+    min_points: int
+
+
+def _covariance_price_layout(
+    price_series: Mapping[str, Sequence[float]],
+) -> _CovariancePriceLayout | None:
+    """与实际估计共用覆盖判定,只依赖冻结价格序列长度。"""
+    from finboard_backtest.portfolio.covariance import MIN_OBS_FOR_FULL_COVARIANCE
+
+    symbols = sorted(symbol for symbol, values in price_series.items() if len(values) >= 2)
+    if len(symbols) < 2:
+        return None
+    min_points = MIN_OBS_FOR_FULL_COVARIANCE + 1
+    estimable = tuple(symbol for symbol in symbols if len(price_series[symbol]) >= min_points)
+    if len(estimable) < 2:
+        min_points = 3
+        estimable = tuple(symbol for symbol in symbols if len(price_series[symbol]) >= min_points)
+        if len(estimable) < 2:
+            return None
+    short_history = tuple(symbol for symbol in symbols if len(price_series[symbol]) < min_points)
+    window = min(len(price_series[symbol]) for symbol in estimable)
+    return _CovariancePriceLayout(estimable, short_history, window, min_points)
+
+
+def _covariance_returns(
+    price_series: Mapping[str, Sequence[float]], layout: _CovariancePriceLayout,
+) -> Iterator[tuple[str, npt.NDArray[np.float64]]]:
+    import numpy as np
+
+    for symbol in layout.estimable:
+        values = np.asarray(price_series[symbol][-layout.window:], dtype=np.float64)
+        previous = values[:-1]
+        # 零前价用零收益占位,保持最短共同窗口的各列等长。
+        safe_previous = np.where(previous == 0.0, 1.0, previous)
+        yield symbol, np.where(previous == 0.0, 0.0, values[1:] / safe_previous - 1.0)
+
+
 def _estimate_covariance(
     price_series: Mapping[str, Sequence[float]],
 ) -> CovarianceEstimate | None:
@@ -1007,38 +1060,18 @@ def _estimate_covariance(
     组合流水线按 fail_closed 拒绝(风险贡献硬约束启用时缺协方差必须失败)。
     """
     import numpy as np
-    import numpy.typing as npt
 
     from finboard_backtest.portfolio import estimate_covariance
-    from finboard_backtest.portfolio.covariance import MIN_OBS_FOR_FULL_COVARIANCE
 
-    symbols = sorted(symbol for symbol, values in price_series.items() if len(values) >= 2)
-    if len(symbols) < 2:
+    layout = _covariance_price_layout(price_series)
+    if layout is None:
         return None
-    min_points = MIN_OBS_FOR_FULL_COVARIANCE + 1
-    estimable = [symbol for symbol in symbols if len(price_series[symbol]) >= min_points]
-    short_history = [symbol for symbol in symbols if len(price_series[symbol]) < min_points]
-    if len(estimable) < 2:
-        # 可估计(≥30 期观测)标的不足:退化为旧的最短序列语义 —— 全部标的
-        # 按 ≥2 价点取最短公共窗口;仍不足 2 只可估计时返回 None。
-        estimable = [symbol for symbol in symbols if len(price_series[symbol]) >= 3]
-        short_history = [symbol for symbol in symbols if len(price_series[symbol]) < 3]
-        if len(estimable) < 2:
-            return None
-        min_points = 3
-    window = min(len(price_series[symbol]) for symbol in estimable)
+    window = layout.window
     n_obs = window - 1
-    if n_obs < 2:
-        return None
 
     returns_by_ticker: dict[str, npt.NDArray[np.float64]] = {}
     degenerate: list[str] = []
-    for symbol in estimable:
-        values = np.asarray(price_series[symbol][-window:], dtype=np.float64)
-        prev = values[:-1]
-        # 零前价跳点以 0.0 收益占位(旧实现按条件跳过 → ragged 长度不齐)。
-        safe_prev = np.where(prev == 0.0, 1.0, prev)
-        series_returns = np.where(prev == 0.0, 0.0, values[1:] / safe_prev - 1.0)
+    for symbol, series_returns in _covariance_returns(price_series, layout):
         if float(np.var(series_returns)) == 0.0:
             degenerate.append(symbol)
         returns_by_ticker[symbol] = series_returns
@@ -1054,7 +1087,7 @@ def _estimate_covariance(
     estimate = estimate_covariance(returns_by_ticker, min_observations=2)
     # 退化标的可能同时落在可估计组(价点足够但序列恒定):取并集去重,避免
     # tickers 出现重复行(builder 覆盖校验会把重复判为坏矩阵)。
-    imputed = sorted(set(short_history) | set(degenerate))
+    imputed = sorted(set(layout.short_history) | set(degenerate))
     if imputed:
         estimate = _impute_unestimable_assets(estimate, imputed)
         logger.warning(
@@ -1064,7 +1097,7 @@ def _estimate_covariance(
             n_observations=n_obs,
             window_points=window,
             imputed_variance=float(np.median(np.diag(estimate.matrix))),
-            min_points=min_points,
+            min_points=layout.min_points,
         )
     return estimate
 
@@ -1077,6 +1110,56 @@ def _timed_covariance(
         return _estimate_covariance(price_series)
     finally:
         record_stage_timing(stage, started)
+
+
+def _validate_skipped_covariance(
+    price_series: Mapping[str, Sequence[float]], layout: _CovariancePriceLayout,
+) -> None:
+    """复核被跳过的候选池输入,在诊断中注明没有候选池估计矩阵。"""
+    import numpy as np
+
+    started = perf_counter()
+    try:
+        degenerate: list[str] = []
+        # 极端波动回退原估计器处理,避免把样本方差尚可表示而其平方溢出的输入视作正常。
+        variance_limit = math.sqrt(np.finfo(np.float64).max) / len(layout.estimable) ** 2
+        for symbol, values in _covariance_returns(price_series, layout):
+            variance = float(np.var(values))
+            if not math.isfinite(variance) or variance >= variance_limit:
+                # 原估计器允许少量 NaN,共同观测不足或矩阵计算失败时抛出原异常。
+                _timed_covariance(price_series, "initial_covariance")
+                return
+            if variance == 0.0:
+                degenerate.append(symbol)
+        if degenerate:
+            logger.warning(
+                "research_run.covariance_degenerate_symbols",
+                count=len(degenerate), samples=degenerate[:10],
+                n_observations=layout.window - 1, scope="candidate_pool", estimated=False,
+            )
+        imputation_candidates = sorted(set(layout.short_history) | set(degenerate))
+        if imputation_candidates:
+            logger.warning(
+                "research_run.covariance_short_history_symbols",
+                count=len(imputation_candidates), samples=imputation_candidates[:10],
+                n_observations=layout.window - 1, window_points=layout.window,
+                min_points=layout.min_points, scope="candidate_pool", estimated=False,
+            )
+    finally:
+        record_stage_timing("skipped_candidate_covariance_validation", started)
+
+
+def _defer_candidate_covariance(
+    price_series: Mapping[str, Sequence[float]],
+) -> DeferredCovariance | None:
+    layout = _covariance_price_layout(price_series)
+    if layout is None:
+        return None
+    return DeferredCovariance(
+        frozenset((*layout.estimable, *layout.short_history)),
+        partial(_timed_covariance, price_series, "initial_covariance"),
+        partial(_validate_skipped_covariance, price_series, layout),
+    )
 
 
 def _impute_unestimable_assets(
@@ -1554,6 +1637,12 @@ async def _compute_period_features(
             f"(通常发布起点历史不足): {exc}{hint}"
         )
 
+    if price_precompute is not None:
+        # 成功查表时无需再按发布逐标的重建范围。
+        values = price_precompute.feature_values(decision_at, release_id)
+        if values:
+            return values
+        # 空集回落原路径,保持「数据不足」的具名报错。
     explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
     if explicit_symbols:
         symbols_argument: tuple[str, ...] | None = tuple(explicit_symbols)
@@ -1568,13 +1657,6 @@ async def _compute_period_features(
             for inst in provider.release.instruments
             if not is_benchmark_only_instrument(inst)
         )
-    if price_precompute is not None:
-        # issue #450 追续:预计算查表 + FeatureValue 构造(逐值等值于快照
-        # 路径;顺序同为 scoped 标的序 x 特征构造序)。
-        values = price_precompute.feature_values(decision_at, release_id)
-        if values:
-            return values
-        # 空集回落原路径:沿用「数据不足」的具名报错语义(fail-closed 不变)。
     if close_histories:
         # issue #450 追续:close 矩阵已构建时直接切片算价格特征,跳过进程池
         # 逐标的整文件重读(全市场 x 多期的主要加载成本);矩阵缺失标的在
@@ -1993,6 +2075,7 @@ class DecisionLoadContext:
     close_series_provider: (
         Callable[[Sequence[str]], Mapping[str, Sequence[float]]] | None
     ) = None
+    deferred_covariance: DeferredCovariance | None = None
 
 
 #: 加载期分块大小(issue #288):分块内的期次并发 gather,分块之间顺序推进,
@@ -2409,9 +2492,12 @@ async def iter_decision_load_contexts(
             timing=manifest.strategy_spec.execution_model.timing,
             trading_days_loader=trading_days_loader,
         )
+        phase_started = perf_counter()
         context = await loader.load_context(
             manifest, decision_at=decision_at, execution_at=execution_at
         )
+        record_stage_timing("decision_frozen_input_context", phase_started)
+        phase_started = perf_counter()
         if schedule is not None:
             period_features = await _compute_period_features(
                 provider,
@@ -2425,6 +2511,8 @@ async def iter_decision_load_contexts(
             features = (*period_features, *context.features)
         else:
             features = context.features
+        record_stage_timing("decision_price_features", phase_started)
+        phase_started = perf_counter()
         # issue #380:信号引擎特征截面统一收窄到发布可交易域(逐期重算已在
         # 源头收窄,这里对快照 / 研究发布观测兜底,single_shot 同样覆盖)。
         features = _exclude_benchmark_only_features(features, provider, manifest)
@@ -2463,6 +2551,8 @@ async def iter_decision_load_contexts(
         # issue #396:执行日全天停牌的标的不可撮合,不产出新信号(卖出由
         # 组合管线按停牌拒单 fail-visible 处理,持仓保留)。
         signalable -= context.execution_suspended
+        record_stage_timing("decision_universe_evaluation", phase_started)
+        phase_started = perf_counter()
         price_series = await _load_price_series(
             provider,
             tuple(signalable),
@@ -2472,7 +2562,14 @@ async def iter_decision_load_contexts(
         signalable = frozenset(
             symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
         )
+        record_stage_timing("decision_price_history", phase_started)
         record_stage_timing("decision_load_without_covariance", started)
+        covariance = None
+        deferred_covariance = None
+        if manifest.uses_lazy_effective_covariance:
+            deferred_covariance = _defer_candidate_covariance(price_series)
+        else:
+            covariance = await asyncio.to_thread(_timed_covariance, price_series, "initial_covariance")
         return DecisionLoadContext(
             context=context,
             candidates=candidates,
@@ -2482,9 +2579,8 @@ async def iter_decision_load_contexts(
             # 协方差估计是纯 CPU 段(numpy 矩阵运算),经 to_thread 卸载
             # (issue #286);price_series 为普通数据,线程间无共享可变态。
             # 分块 gather(issue #288)下各期的卸载调用互不共享状态,安全。
-            covariance=await asyncio.to_thread(
-                _timed_covariance, price_series, "initial_covariance"
-            ),
+            covariance=covariance,
+            deferred_covariance=deferred_covariance,
             snapshot_id=snapshot_id,
             # 2026-09-13 事故修复:组合阶段按需补齐目标标的覆盖(持仓掉出
             # 选股池 / 停牌);闭包只captured loader 引用与决策时点,矩阵是
@@ -2495,6 +2591,8 @@ async def iter_decision_load_contexts(
     async def _load_chunk(
         chunk_start: int,
         chunk: Sequence[tuple[datetime, str | None]],
+        *,
+        background: bool = False,
     ) -> list[DecisionLoadContext]:
         """加载并释放一个决策批次,供当前批或单个预取任务使用。
 
@@ -2508,6 +2606,7 @@ async def iter_decision_load_contexts(
             return []
         results: list[DecisionLoadContext | BaseException] = []
         loaded: list[DecisionLoadContext] = []
+        started = perf_counter()
         try:
             # gather 也必须位于 finally 内:预取 task 在任一子任务尚未完成时
             # 被取消,仍需释放本批已占用的 price/daily 预计算槽位。
@@ -2533,6 +2632,10 @@ async def iter_decision_load_contexts(
                 loaded.append(result)
             return loaded
         finally:
+            record_stage_timing(
+                "decision_batch_background_load" if background else "decision_batch_foreground_load",
+                started,
+            )
             # issue #463:每批上下文构建完即释放对应预计算槽位。预取批次
             # 也必须在 task 内完成释放,否则「当前批 + 下一批」之外会继续
             # 持有全市场 daily / price feature 大数组。
@@ -2549,6 +2652,8 @@ async def iter_decision_load_contexts(
     ) -> list[DecisionLoadContext]:
         """取得预取结果,并在等待被取消时显式收口子任务。"""
 
+        started = perf_counter()
+        stage = "decision_batch_ready_at_join" if task.done() else "decision_batch_wait_at_join"
         try:
             return await task
         except BaseException:
@@ -2557,6 +2662,8 @@ async def iter_decision_load_contexts(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
             raise
+        finally:
+            record_stage_timing(stage, started)
 
     # #470 后半场:前缀期已由种子覆盖 —— produced 从 skip 起报(加载帧的
     # k 保持「已完成期数」语义:种子前缀 + 本流已加载期)。
@@ -2598,17 +2705,23 @@ async def iter_decision_load_contexts(
                 ]
                 if next_chunk and prefetch_task is None:
                     prefetch_task = asyncio.create_task(
-                        _load_chunk(next_start, next_chunk),
+                        _load_chunk(next_start, next_chunk, background=True),
                         name="research_run.decision_load_prefetch",
                     )
             # 保持期序,每期交给下游后立即释放本批对它的引用。
             loaded.reverse()
-            while loaded:
-                yield loaded.pop()
+            consumer_started = perf_counter()
+            try:
+                while loaded:
+                    yield loaded.pop()
+            finally:
+                record_stage_timing("decision_batch_consumer", consumer_started)
     finally:
         # issue #475:消费者提前关闭 / 下游抛错时,预取任务必须显式
         # cancel + await;否则其 gather 子任务可能继续读盘并把半批对象
         # 留在事件循环中,形成 task 泄漏和额外内存驻留。
+        # to_thread 已开始的原生估计可在异步包装关闭后完成。等待该线程退出
+        # 会让 stall watchdog 无法及时结束加载段。
         if prefetch_task is not None:
             task = prefetch_task
             prefetch_task = None
@@ -2745,6 +2858,7 @@ async def iter_decision_inputs(
                 lot_info=loaded.context.lot_info,
                 input_artifact_ids=loaded.context.input_artifact_ids,
                 covariance=loaded.covariance,
+                deferred_covariance=loaded.deferred_covariance,
                 suspended_symbols=loaded.context.execution_suspended,
                 # 2026-09-13 事故修复:组合阶段协方差覆盖回退的 close 序列
                 # 来源(close 矩阵切片;None = 矩阵未启用,不启用回退)。
@@ -3013,7 +3127,7 @@ class SignalEnginePipelineAdapter:
         self._factor_screen: dict[str, Any] | None = None
         # issue #314:断点续算种子(coordinator 从 artifact 读回的已完成决策
         # 前缀,resume_from 接受后非空;decisions() 首次迭代时惰性消费)。
-        self._resume_bundles: tuple[DecisionBundle, ...] | None = None
+        self._resume_bundles: tuple[DecisionBundle, ...] | ResumeCheckpointSpool | None = None
         self._accepted_checkpoint: DecisionBundle | None = None
 
     @property
@@ -3037,12 +3151,27 @@ class SignalEnginePipelineAdapter:
         self._resume_bundles = tuple(completed)
         return True
 
+    def resume_from_checkpoint_spool(self, source: ResumeCheckpointSpool) -> bool:
+        if self._input_iterator is not None or self._resume_bundles is not None or not source:
+            return False
+        self._resume_bundles = source
+        return True
+
+    def can_defer_resume_features(self) -> bool:
+        """只为可能进入普通 stub 回放的前缀拆分临时特征截面。"""
+        return (
+            not self._cross_section_series_capture
+            and getattr(self.decisions, "__func__", None) is SignalEnginePipelineAdapter.decisions
+        )
+
     def is_accepted_checkpoint(self, decision: DecisionBundle) -> bool:
         """只确认组合管线接受的普通因子种子,在该期 yield 期间有效。"""
 
         return self._accepted_checkpoint is decision
 
-    async def _resume_all_completed(self, resume: tuple[DecisionBundle, ...]) -> bool:
+    async def _resume_all_completed(
+        self, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
+    ) -> bool:
         """全部决策均已落库时允许跳过整段加载(issue #314)。
 
         快速路径的两个前置:(1) 报告构建不依赖冻结输入 —— 引用用户因子
@@ -3053,13 +3182,7 @@ class SignalEnginePipelineAdapter:
         会在加载期以既有语义重现(fail-closed,不吞错)。
         """
 
-        from finboard_data.factor_lab import is_user_factor_name
-
-        if any(
-            is_user_factor_name(feature.feature_id)
-            for bundle in resume
-            for feature in bundle.features
-        ):
+        if self._resume_observed_user_features(resume):
             return False
         total = await self._resume_schedule_total()
         return total is not None and len(resume) == total
@@ -3166,7 +3289,7 @@ class SignalEnginePipelineAdapter:
         return _stream()
 
     def _resume_prefix_needs_full_load(
-        self, resume: tuple[DecisionBundle, ...]
+        self, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
     ) -> bool:
         """前缀是否必须走全量装载(#470 后半场消费审计结论,两道门)。
 
@@ -3190,8 +3313,14 @@ class SignalEnginePipelineAdapter:
         warning 具名记录,不静默。
         """
 
-        if self._cross_section_series_capture:
-            return True
+        return self._cross_section_series_capture or self._resume_observed_user_features(resume)
+
+    @staticmethod
+    def _resume_observed_user_features(
+        resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
+    ) -> bool:
+        if isinstance(resume, ResumeCheckpointSpool):
+            return resume.has_user_features
         from finboard_data.factor_lab import is_user_factor_name
 
         return any(
@@ -3201,7 +3330,7 @@ class SignalEnginePipelineAdapter:
         )
 
     def _iter_resume_stub_inputs(
-        self, resume: tuple[DecisionBundle, ...]
+        self, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool,
     ) -> AsyncIterator[_ResumeReplayStub]:
         """stub-only 前缀装载流 + business_date 登记(#470 后半场)。
 
@@ -3217,9 +3346,12 @@ class SignalEnginePipelineAdapter:
         错位 / 丢失失败日期)。
         """
 
+        decision_seeds: Sequence[DecisionBundle | ResumeLedgerSeed] = (
+            resume.seeds if isinstance(resume, ResumeCheckpointSpool) else resume
+        )
         symbols = frozenset(
             symbol
-            for bundle in resume
+            for bundle in decision_seeds
             for symbol in (
                 *(fill.symbol for fill in bundle.fills),
                 *(position.symbol for position in bundle.positions),
@@ -3253,7 +3385,7 @@ class SignalEnginePipelineAdapter:
         return _stream()
 
     async def _load(
-        self, *, resume: tuple[DecisionBundle, ...] | None = None
+        self, *, resume: tuple[DecisionBundle, ...] | ResumeCheckpointSpool | None = None,
     ) -> PortfolioPipelineAdapter:
         """装配管线与输入流;``resume`` 非空时按消费审计选择前缀装载方式。
 
@@ -3315,7 +3447,7 @@ class SignalEnginePipelineAdapter:
         manifest: ResearchRunManifest,
     ) -> AsyncIterator[DecisionBundle]:
         resume = self._resume_bundles
-        resume_all: deque[DecisionBundle] | None = None
+        resume_all: Iterator[DecisionBundle] | None = None
         pipeline: PortfolioPipelineAdapter | None = None
         pipeline_iter: AsyncIterator[DecisionBundle] | None = None
         accepted_checkpoints = 0
@@ -3329,7 +3461,7 @@ class SignalEnginePipelineAdapter:
                     # k/N phase(#308)随之不触发 —— 无加载即无加载进度,
                     # phase 直接进入决策执行段。
                     self._fast_path = True
-                    resume_all = deque(resume)
+                    resume_all = replay_resume_bundles(resume)
                 else:
                     # #470 后半场:续跑时主线输入流从第 len(resume) 期起产出
                     # (skip_prefix),前缀五字段改由 stub-only 装载流预取 ——
@@ -3343,10 +3475,14 @@ class SignalEnginePipelineAdapter:
                     # 不构建)。种子被拒时输入流已被预取消费,全量重算经流重建
                     # 从第 0 期重拉(fail-closed,代价 = 预计算重建,罕见路径)。
                     await pipeline.aprefetch_inputs(len(resume))
-                    if not pipeline.resume_from(resume):
+                    if not pipeline.resume_from(
+                        resume, defer_features=self._stub_prefix_periods == len(resume),
+                    ):
                         # 种子被拒(数量/时序与冻结输入不一致):整段回退全量
                         # 重算(#314 fail-closed 兜底,宁重算不漂移)。
                         self._resume_bundles = None
+                        if isinstance(resume, ResumeCheckpointSpool):
+                            resume.close()
                         await self._reset_input_stream()
                         pipeline = await self._load()
                     elif self._stub_prefix_periods == len(resume):
@@ -3358,14 +3494,14 @@ class SignalEnginePipelineAdapter:
                 resume = None
             collected: list[DecisionLedgerRecord] = []
             if resume_all is not None:
-                while resume_all:
-                    decision = resume_all.popleft()
+                for decision in resume_all:
                     yield decision
                     # issue #473:append 账本级记录 —— yield 出去的仍是完整
                     # bundle(coordinator 校验/持久化用),列表只留落库后的
                     # 账本投影(消费审计:equity 曲线只读 fills/positions/
                     # ledger.cash,candidates 不再钉住)。
                     collected.append(decision_ledger_record(decision))
+                    del decision
                 # 快速路径种子消费完毕,末个整前缀引用随之释放(#470)。
                 resume_all = None
             else:

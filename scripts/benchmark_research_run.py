@@ -109,6 +109,10 @@ class _InterruptAfter:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.adapter, name)
 
+    def can_defer_resume_features(self) -> bool:
+        supports = getattr(self.adapter, "can_defer_resume_features", None)
+        return bool(callable(supports) and supports())
+
     async def decisions(self, manifest: ResearchRunManifest) -> AsyncIterator[DecisionBundle]:
         source = self.adapter.decisions(manifest)
         produced = 0
