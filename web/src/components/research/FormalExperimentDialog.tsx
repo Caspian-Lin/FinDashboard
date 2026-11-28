@@ -244,7 +244,12 @@ export default function FormalExperimentDialog({
             </section>
           )}
           {(preview.error || save.error) && (
-            <p className="break-words text-sm text-destructive" role="alert">{(preview.error ?? save.error)?.message}</p>
+            <div className="break-words text-sm text-destructive" role="alert">
+              <p className="font-medium">{preview.error
+                ? tl({ zh: "正式验证预检失败", en: "Formal validation preflight failed" })
+                : tl({ zh: "实验登记失败，请重新预检", en: "Could not register the experiment. Preview it again." })}</p>
+              <p>{(preview.error ?? save.error)?.message}</p>
+            </div>
           )}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={save.isPending}>{tl({ zh: "取消", en: "Cancel" })}</Button>

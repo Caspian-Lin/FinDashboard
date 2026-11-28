@@ -178,7 +178,7 @@ function frozenRefs(value: unknown): FrozenRef[] {
  * 提升为可读卡片,dataset_release_ids 可跳数据页详情、快照可跳因子实验室。
  */
 function FrozenInputsCard({ manifest, result }: { manifest: Record<string, unknown>; result?: Record<string, unknown> | null }) {
-  const { tl } = useT();
+  const { lang, tl } = useT();
   const releases = frozenRefs(manifest.dataset_releases);
   const snapshots = frozenRefs(manifest.factor_snapshots);
   const benchmarkConfig = manifestRecord(manifest, "benchmark_config");
@@ -186,7 +186,7 @@ function FrozenInputsCard({ manifest, result }: { manifest: Record<string, unkno
     typeof benchmarkConfig?.symbol === "string" && benchmarkConfig.symbol !== ""
       ? benchmarkConfig.symbol
       : null;
-  const schedule = runSchedule({ manifest, result });
+  const schedule = runSchedule({ manifest, result }, lang);
   const executionMode = schedule.mode;
   const rebalanceFrequency = schedule.frequency;
   const specChecksum =
@@ -225,8 +225,14 @@ function FrozenInputsCard({ manifest, result }: { manifest: Record<string, unkno
               </span>
             )}
           </span>
-          {schedule.count !== null && <span>决策日历：{schedule.first} 至 {schedule.last}，{schedule.count} 次</span>}
-          {schedule.conflict && <span className="text-warning">决策日历与旧频率同时存在，请核对冻结输入</span>}
+          {schedule.count !== null && <span>{tl({
+            zh: `决策日历：${schedule.first} 至 ${schedule.last}，${schedule.count} 次`,
+            en: `Decision calendar: ${schedule.first} to ${schedule.last} (${schedule.count} decisions)`,
+          })}</span>}
+          {schedule.conflict && <span className="text-warning">{tl({
+            zh: "决策日历与旧频率同时存在，请核对冻结输入",
+            en: "Both a decision calendar and a legacy frequency are recorded. Check the frozen inputs.",
+          })}</span>}
           {benchmarkSymbol && (
             <span>
               {tl({ zh: "基准:", en: "Benchmark:" })}
@@ -701,7 +707,7 @@ export default function ResearchRuns() {
                   <Tabs value={activeTab} onValueChange={handleTabChange}>
                     <div className="mb-3 flex flex-wrap items-center gap-3">
                       <TabsList>
-                        <TabsTrigger value="explanation">策略说明书</TabsTrigger>
+                        <TabsTrigger value="explanation">{tl({ zh: "策略说明书", en: "Strategy explanation" })}</TabsTrigger>
                         <TabsTrigger value="overview">
                           {tl({ zh: "概览", en: "Overview" })}
                         </TabsTrigger>

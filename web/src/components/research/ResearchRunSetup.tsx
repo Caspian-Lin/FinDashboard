@@ -300,8 +300,20 @@ export default function ResearchRunSetup({ onStart, onCancel, onRepreview, pendi
             <Input type="number" min="0" max="10000" step="any" value={slippage} onChange={(event) => setSlippage(event.target.value)} disabled={pending} />)}
         </div>
       </details>
-      {currentPreview && preview.error && <p role="alert" className="break-words text-sm text-destructive">{preview.error.message}</p>}
-      {error && <p role="alert" className="break-words text-sm text-destructive">{error.message}</p>}
+      {currentPreview && preview.error && (
+        <div role="alert" className="break-words text-sm text-destructive">
+          <p className="font-medium">{tl({ zh: "研究预检失败", en: "Research preflight failed" })}</p>
+          <p>{preview.error.message}</p>
+        </div>
+      )}
+      {error && (
+        <div role="alert" className="break-words text-sm text-destructive">
+          <p className="font-medium">{previewRejected
+            ? tl({ zh: "冻结输入已变化，请重新预检", en: "Frozen inputs changed. Preview them again." })
+            : tl({ zh: "研究运行提交失败", en: "Could not queue the research run" })}</p>
+          <p>{error.message}</p>
+        </div>
+      )}
       {resolved && (
         <section className="space-y-2 rounded-lg border bg-card p-3 text-sm" aria-live="polite">
           <h3 className="font-semibold">{tl({ zh: "预检通过", en: "Preflight passed" })}</h3>

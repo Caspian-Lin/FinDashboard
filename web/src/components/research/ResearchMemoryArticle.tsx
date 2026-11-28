@@ -1,23 +1,32 @@
 import type { ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useT, type LocalizedText } from "@/i18n";
 import { Badge } from "@/components/ui/badge";
 import { ResearchTimestamp } from "./ResearchTimestamp";
 import type { Memory, MemoryDetail } from "@/lib/research-workspace";
 
-const TYPES: Record<string, string> = {
-  insight: "研究洞见",
-  hypothesis: "研究假设",
-  decision: "研究决策",
-  note: "研究笔记",
-  lesson: "经验记录",
-  context: "研究上下文",
+const TYPES: Record<string, LocalizedText> = {
+  insight: { zh: "研究洞见", en: "Research insight" },
+  hypothesis: { zh: "研究假设", en: "Research hypothesis" },
+  decision: { zh: "研究决策", en: "Research decision" },
+  note: { zh: "研究笔记", en: "Research note" },
+  lesson: { zh: "经验记录", en: "Lesson learned" },
+  context: { zh: "研究上下文", en: "Research context" },
 };
-const STATUSES: Record<string, string> = {
-  active: "未归档",
-  archived: "已归档",
-  forgotten: "已纠正/移除",
+const STATUSES: Record<string, LocalizedText> = {
+  active: { zh: "未归档", en: "Active" },
+  archived: { zh: "已归档", en: "Archived" },
+  forgotten: { zh: "已纠正/移除", en: "Corrected or removed" },
 };
+
+function DeferredMemoryImage({ alt }: { alt?: string }) {
+  const { tl } = useT();
+  return <span className="text-muted-foreground">{tl({
+    zh: `[图片：${alt || "未提供说明"}，未自动加载]`,
+    en: `[Image: ${alt || "no description"}. Loading disabled.]`,
+  })}</span>;
+}
 
 const markdown: Components = {
   h1: ({ children }) => <h3 className="mb-3 mt-5 text-lg font-semibold">{children}</h3>,
@@ -62,9 +71,7 @@ const markdown: Components = {
     <th className="border-b border-border px-3 py-2 font-semibold">{children}</th>
   ),
   td: ({ children }) => <td className="border-b border-border px-3 py-2 align-top">{children}</td>,
-  img: ({ alt }) => (
-    <span className="text-muted-foreground">[图片：{alt || "未提供说明"}，未自动加载]</span>
-  ),
+  img: DeferredMemoryImage,
 };
 
 type RecordMeta = Pick<
@@ -93,34 +100,37 @@ export function ResearchMemoryArticle({
   actions?: ReactNode;
   detail?: boolean;
 }) {
+  const { tl } = useT();
   const prefix = /^【([^】\n]{1,180})】\s*/.exec(content);
-  const title = prefix?.[1] ?? TYPES[memory.memory_type] ?? "研究记忆";
+  const title = prefix?.[1] ?? tl(TYPES[memory.memory_type] ?? { zh: "研究记忆", en: "Research memory" });
   const body = prefix ? content.slice(prefix[0].length) : content;
   return (
     <article
-      aria-label={`${detail ? "完整记忆" : "记忆摘录"} ${memory.memory_id}`}
+      aria-label={`${detail ? tl({ zh: "完整记忆", en: "Full memory" }) : tl({ zh: "记忆摘录", en: "Memory excerpt" })} ${memory.memory_id}`}
       className="grid min-w-0 gap-5 border-t border-border py-6 md:grid-cols-[13rem_minmax(0,1fr)] md:gap-8"
     >
       <aside className="min-w-0 space-y-3 text-xs text-muted-foreground">
-        <Badge variant="outline">{STATUSES[memory.status] ?? memory.status}</Badge>
+        <Badge variant="outline">{STATUSES[memory.status] ? tl(STATUSES[memory.status]) : memory.status}</Badge>
         <p className="break-all font-mono">{memory.memory_id}</p>
         <div>
-          <p className="mb-1">创建时间</p>
+          <p className="mb-1">{tl({ zh: "创建时间", en: "Created" })}</p>
           <ResearchTimestamp value={memory.created_at} />
         </div>
         {detail && memory.updated_at && memory.updated_at !== memory.created_at && (
           <div>
-            <p className="mb-1">更新时间</p>
+            <p className="mb-1">{tl({ zh: "更新时间", en: "Updated" })}</p>
             <ResearchTimestamp value={memory.updated_at} />
           </div>
         )}
-        <p className="break-all">来源：{memory.created_by}</p>
+        <p className="break-all">{tl({ zh: `来源：${memory.created_by}`, en: `Source: ${memory.created_by}` })}</p>
         <p>
-          {memory.confirmed_by ? `已由 ${memory.confirmed_by} 确认，仍不替代文档` : "未确认解释"}
+          {memory.confirmed_by
+            ? tl({ zh: `已由 ${memory.confirmed_by} 确认，仍不替代文档`, en: `Confirmed by ${memory.confirmed_by}. Refer to the research documents for the canonical conclusion.` })
+            : tl({ zh: "未确认解释", en: "Unconfirmed interpretation" })}
         </p>
         {detail && memory.confirmed_at && (
           <div>
-            <p className="mb-1">确认时间</p>
+            <p className="mb-1">{tl({ zh: "确认时间", en: "Confirmed" })}</p>
             <ResearchTimestamp value={memory.confirmed_at} />
           </div>
         )}
@@ -142,7 +152,7 @@ export function ResearchMemoryArticle({
           </ReactMarkdown>
           {excerpted && (
             <p className="mt-3 text-xs text-muted-foreground">
-              正文为前 1200 字摘录，完整记忆保留原文。
+              {tl({ zh: "正文为前 1200 字摘录，完整记忆保留原文。", en: "This excerpt shows the first 1,200 characters. Open the full memory for the original text." })}
             </p>
           )}
         </div>
