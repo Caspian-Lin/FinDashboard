@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod native_caption;
 mod operator;
 mod window_frame;
 
@@ -227,6 +229,7 @@ fn show_workbench(
     let builder = WebviewWindowBuilder::new(app, "research", WebviewUrl::External(url))
         .title("FinDashboard 研究工作台")
         .inner_size(1240.0, 800.0)
+        .min_inner_size(330.0, 240.0)
         .decorations(false)
         .use_https_scheme(true)
         .incognito(true)
@@ -238,10 +241,12 @@ fn show_workbench(
     let builder =
         with_local_webview_profile(builder).map_err(|_| "无法确定 WebView2 配置目录。")?;
     workbench_port.set(port);
-    if builder.build().is_err() {
+    let window = builder.build().map_err(|_| {
         workbench_port.set(0);
-        return Err("无法打开研究工作台，请检查 WebView2。".into());
-    }
+        "无法打开研究工作台，请检查 WebView2。"
+    })?;
+    #[cfg(windows)]
+    native_caption::attach(&window).map_err(|_| "无法初始化 Windows 窗口控制。")?;
     Ok(())
 }
 

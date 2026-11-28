@@ -2,7 +2,7 @@
   position: fixed;
   z-index: 2147483647;
   /* 留出 Windows 的拖边命中区，三键在最大化和普通窗口使用相同边距。 */
-  inset: var(--finboard-window-controls-inset) var(--finboard-window-controls-inset) auto auto;
+  inset: var(--finboard-window-controls-top) var(--finboard-window-controls-inset) auto auto;
   display: block;
   width: var(--finboard-window-controls-width);
   height: var(--finboard-window-controls-height);

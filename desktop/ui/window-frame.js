@@ -1,4 +1,4 @@
-function mountWindowFrame({ window: kind, origin, recovery, recoveryAppearance, stylesheet }) {
+function mountWindowFrame({ window: kind, origin, recovery, recoveryAppearance, researchCaption, stylesheet }) {
   if (window.top !== window) return;
   if (recovery && location.href === "chrome-error://chromewebdata/") {
     location.replace(recovery);
@@ -20,31 +20,40 @@ function mountWindowFrame({ window: kind, origin, recovery, recoveryAppearance, 
         --finboard-window-controls-width: calc(3 * var(--finboard-window-button-width));
         --finboard-window-controls-height: 34px;
         --finboard-window-controls-inset: 8px;
-        --finboard-window-controls-bottom: calc(var(--finboard-window-controls-inset) + var(--finboard-window-controls-height));
+        --finboard-window-controls-top: 8px;
+        --finboard-window-controls-bottom: calc(var(--finboard-window-controls-top) + var(--finboard-window-controls-height));
       }
-      :root[data-finboard-window="research"] #root > .h-screen > div > header {
-        padding-inline-end: calc(1rem + var(--finboard-window-controls-width) + var(--finboard-window-controls-inset));
+      :root[data-finboard-window="research"] {
+        --finboard-window-button-width: ${researchCaption.buttonWidth}px;
+        --finboard-window-controls-height: ${researchCaption.height}px;
+        --finboard-window-controls-top: ${researchCaption.top}px;
+        --finboard-window-controls-inset: ${researchCaption.end}px;
+        --finboard-window-drag-width: ${researchCaption.dragWidth}px;
       }
-      @media (max-width: 520px) {
-        :root[data-finboard-window="research"] #root > .h-screen > div > header {
-          height: auto;
-          flex-wrap: wrap;
-          gap: .25rem;
-          padding-block: .25rem;
-          padding-inline-end: 1rem;
+      :root[data-finboard-window="research"] header[data-finboard-caption-row] {
+        box-sizing: border-box;
+        padding-right: calc(var(--finboard-window-controls-inset) + var(--finboard-window-controls-width) + var(--finboard-window-drag-width));
+        gap: .25rem;
+      }
+      :root[data-finboard-window="research"] header[data-finboard-caption-row] > :first-child {
+        min-width: 0;
+      }
+      :root[data-finboard-window="research"] header[data-finboard-caption-row] > :first-child > div {
+        min-width: 0;
+      }
+      :root[data-finboard-window="research"] [data-finboard-workbench-toolbar] {
+        flex: none;
+      }
+      @media (max-width: 680px) {
+        :root[data-finboard-window="research"] header[data-finboard-caption-row] {
+          padding-left: .5rem;
         }
-        :root[data-finboard-window="research"] #root > .h-screen > div > header > :first-child {
-          min-width: 0;
-          max-width: calc(100% - var(--finboard-window-controls-width) - var(--finboard-window-controls-inset));
+        :root[data-finboard-window="research"] [data-finboard-workbench-help] {
+          width: 32px;
+          padding-inline: 0;
         }
-        :root[data-finboard-window="research"] #root > .h-screen > div > header > :first-child > div {
-          min-width: 0;
-          overflow: hidden;
-          white-space: nowrap;
-        }
-        :root[data-finboard-window="research"] #root > .h-screen > div > header > :last-child {
-          width: 100%;
-          justify-content: flex-end;
+        :root[data-finboard-window="research"] [data-finboard-workbench-help] > span {
+          display: none;
         }
       }
       :root[data-finboard-window="research"] body > .fixed.inset-y-0.h-full {
@@ -115,10 +124,26 @@ function mountWindowFrame({ window: kind, origin, recovery, recoveryAppearance, 
     controls.addEventListener("mousedown", (event) => {
       if (event.button === 0) event.preventDefault();
     });
-    const header = kind === "research" ? "#root > .h-screen > div > header" : ".topbar";
+    const header = kind === "research" ? "header[data-finboard-caption-row]" : ".topbar";
+    if (kind === "research") {
+      function bindCaptionRow() {
+        // Old research images keep working while the user rolls the service forward.
+        const row = document.querySelector("[data-finboard-workbench-header], #root header, .workbench-unavailable > .topbar");
+        if (!row) return false;
+        row.dataset.finboardCaptionRow = "";
+        return true;
+      }
+      if (!bindCaptionRow()) {
+        const observer = new MutationObserver(() => {
+          if (bindCaptionRow()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      }
+    }
     document.addEventListener("mousedown", (event) => {
       const target = event.target;
-      if (event.buttons !== 1 || !(target instanceof Element) || !target.matches(header)) return;
+      if (event.button !== 0 || !(target instanceof Element) || !target.closest(header)) return;
+      if (target.closest("a, button, input, select, textarea, summary, [contenteditable], [role='button']")) return;
       perform(event.detail === 2 ? "toggle_maximize" : "start_dragging");
     });
     let resizeTimer;

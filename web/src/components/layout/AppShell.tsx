@@ -228,7 +228,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Main Area */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Top Bar */}
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-4">
+        <header data-finboard-workbench-header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-4">
           <div className="flex items-center gap-3">
             {/* Mobile menu */}
             <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
@@ -261,7 +261,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div data-finboard-workbench-toolbar className="flex items-center gap-1">
             {isResearchWorkflowPath(location.pathname) && (
               <WorkflowHelpPopover next={workflowNextForPath(location.pathname)} />
             )}
