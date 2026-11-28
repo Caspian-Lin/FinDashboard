@@ -11,6 +11,7 @@ import {
   type TopicContext,
 } from "@/lib/research-workspace";
 import { fetchJSON } from "@/lib/api";
+import { LanguageProvider, useLanguage } from "@/i18n";
 
 vi.mock("@/lib/research-workspace", async () => {
   const actual = await vi.importActual<typeof import("@/lib/research-workspace")>(
@@ -39,6 +40,12 @@ vi.mock("@/lib/research-workspace", async () => {
   };
 });
 vi.mock("@/lib/api", () => ({ fetchJSON: vi.fn(() => Promise.resolve({ status: "missing" })) }));
+function TopicLanguageToggle() {
+  const { lang, setLanguage } = useLanguage();
+  return (
+    <button onClick={() => setLanguage(lang === "zh" ? "en" : "zh")}>Switch language</button>
+  );
+}
 function show(ui: ReactElement, route = "/research/topics") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const result = render(
@@ -330,6 +337,44 @@ describe("研究解释与课题的可核验界面", () => {
         1,
       ),
     );
+  });
+
+  it("切换英文后更新课题界面并保留已有正文和未识别的服务端诊断", async () => {
+    vi.mocked(workspaceApi.topic).mockResolvedValue(activeTopic);
+    vi.mocked(workspaceApi.entries).mockResolvedValue(emptyPage);
+    vi.mocked(workspaceApi.context).mockResolvedValue(contextPayload({
+      next_actions: [
+        { action: "check_refs", why: "1个引用断链、版本或checksum不符,需重新核验" },
+        { action: "review", why: "服务端原始诊断" },
+      ],
+    }));
+    localStorage.setItem("finboard-lang", "zh");
+    try {
+      show(
+        <LanguageProvider>
+          <TopicLanguageToggle />
+          <ResearchTopics />
+        </LanguageProvider>,
+        "/research/topics?topic=RT-draft",
+      );
+      expect(await screen.findByRole("heading", { name: "继续研究（跨客户端续接）" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+      expect(screen.getByRole("heading", { name: "Resume research across clients" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start research run" })).toBeEnabled();
+      expect(screen.getByRole("link", { name: "View topic audit" })).toHaveAttribute(
+        "href", "/research/audit?topic=RT-draft",
+      );
+      expect(screen.getByText(/Verify references with broken links, version mismatches, or checksum mismatches/)).toBeInTheDocument();
+      expect(screen.getByText(/服务端原始诊断/)).toBeInTheDocument();
+      expect(screen.getByText("结论摘录")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "New topic" }));
+      fireEvent.change(screen.getByLabelText("Topic title"), { target: { value: "已有中文标题" } });
+      fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+      expect(screen.getByLabelText("课题标题")).toHaveValue("已有中文标题");
+      expect(screen.getByRole("button", { name: "保存草稿" })).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem("finboard-lang");
+    }
   });
 
   it("版本冲突展示当前版本与变化字段，并允许重新加载", async () => {
