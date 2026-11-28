@@ -49,7 +49,7 @@ test("English topic creation and Agent handoff preserve authored text", async ({
   await page.getByRole("button", { name: "Activate topic", exact: true }).click();
   await expect(page.getByRole("button", { name: "Start research run", exact: true })).toBeVisible();
   await expect(page.getByText(title, { exact: true }).first()).toBeVisible();
-  await expect(page.getByText(criteria, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(`Current goal v1: ${criteria}`, { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/Beijing time/).first()).toBeVisible();
 
   await page.goto(`/research/workbench?topic=${topicId}#handoff`);
