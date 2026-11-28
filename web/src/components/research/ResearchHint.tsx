@@ -184,9 +184,15 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" className="gap-1.5">
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1.5"
+          aria-label={tl({ zh: "研究入口", en: "Research tools" })}
+          data-finboard-workbench-help
+        >
           <CircleHelp className="h-4 w-4" />
-          {tl({ zh: "研究入口", en: "Research tools" })}
+          <span>{tl({ zh: "研究入口", en: "Research tools" })}</span>
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="max-h-[min(34rem,75dvh)] w-[min(20rem,90vw)] overflow-y-auto">

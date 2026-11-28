@@ -1,5 +1,51 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { mockApi, preferences, releaseId, topicId } from "./fixtures";
+
+test("window controls reserve their strip only in the desktop workbench", async ({ page }, info) => {
+  test.skip(info.project.name !== "research", "The desktop workbench runs the research edition.");
+  await preferences(page, "en", "dark");
+  await mockApi(page);
+  const header = page.locator("[data-finboard-workbench-header]");
+  const toolbar = page.locator("[data-finboard-workbench-toolbar]");
+  const frame = page.locator("finboard-window-frame");
+
+  await page.goto("/research/strategy");
+  await expect(header).toHaveCSS("padding-right", "16px");
+  await expect(frame).toHaveCount(0);
+
+  const script = readFileSync(new URL("../../desktop/ui/window-frame.js", import.meta.url), "utf8");
+  const stylesheet = readFileSync(new URL("../../desktop/ui/window-frame.css", import.meta.url), "utf8");
+  await page.addInitScript({ content: `
+    window.__TAURI__ = { core: { invoke: async (_command, { action }) => {
+      if (action !== "is_maximized") document.documentElement.dataset.fixtureWindowAction = action;
+      return false;
+    } } };
+    (${script})({
+      window: "research", origin: location.origin, stylesheet: ${JSON.stringify(stylesheet)},
+      researchCaption: { buttonWidth: 44, height: 34, top: 11, end: 8, dragWidth: 48 },
+    });
+  ` });
+  await page.goto("/research/strategy");
+  await expect(header).toHaveCSS("padding-right", "188px");
+  await expect(frame.getByRole("button", { name: "Maximize" })).toBeVisible();
+
+  for (const width of [1020, 640, 330]) {
+    await page.setViewportSize({ width, height: 730 });
+    const [bar, tools, controls] = await Promise.all([
+      header.boundingBox(), toolbar.boundingBox(), frame.boundingBox(),
+    ]);
+    if (!bar || !tools || !controls) throw new Error("Missing desktop header bounds");
+    expect(tools.x + tools.width + 47).toBeLessThanOrEqual(controls.x);
+    expect(Math.abs(bar.y + bar.height / 2 - (controls.y + controls.height / 2))).toBeLessThanOrEqual(1);
+    expect(tools.x).toBeGreaterThanOrEqual(bar.x);
+  }
+
+  await header.dispatchEvent("mousedown", { button: 0, buttons: 1, detail: 1 });
+  await expect(page.locator("html")).toHaveAttribute("data-fixture-window-action", "start_dragging");
+  await toolbar.getByRole("button", { name: "Research tools" }).click();
+  await expect(toolbar.getByRole("button", { name: "Research tools" })).toHaveAttribute("aria-expanded", "true");
+});
 
 test("home, keyboard skip, edition boundaries, and old URLs", async ({ page }, info) => {
   const research = info.project.name === "research";

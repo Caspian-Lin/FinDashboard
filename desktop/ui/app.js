@@ -472,14 +472,6 @@ function closePurge() {
   reconcile();
 }
 
-function updateNavigation() {
-  const section = location.hash || '#overview';
-  for (const link of document.querySelectorAll('.rail-links a')) {
-    if (link.hash === section) link.setAttribute('aria-current', 'location');
-    else link.removeAttribute('aria-current');
-  }
-}
-
 ui.refresh.addEventListener('click', () => perform({ kind: 'status' }));
 ui.port.addEventListener('input', reconcile);
 ui.preset.addEventListener('change', reconcile);
@@ -611,9 +603,6 @@ ui.copy.addEventListener('click', async () => {
   }
 });
 
-ui['maintenance-link'].addEventListener('click', () => { ui.maintenance.open = true; });
-window.addEventListener('hashchange', updateNavigation);
-updateNavigation();
 reconcile();
 if (core) perform({ kind: 'status' });
 else setStatusUnknown();

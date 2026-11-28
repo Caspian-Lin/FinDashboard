@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="desktop-manager">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -28,19 +28,12 @@
       </button>
     </div>
   </header>
-  <nav class="rail" aria-label="本机管理" data-l10n-label="management">
-    <div class="rail-links">
-      <a href="#overview" aria-current="location"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#overview"></use></svg><span data-l10n="overview">概览</span></a>
-      <a href="#data"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#database"></use></svg><span data-l10n="data">数据源</span></a>
-      <a href="#agents"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#agent"></use></svg><span data-l10n="agents">Agent 接入</span></a>
-      <a href="#diagnostics"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#activity"></use></svg><span data-l10n="diagnostics">运行诊断</span></a>
-      <a href="#maintenance" id="maintenance-link"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#settings"></use></svg><span data-l10n="maintenance">维护</span></a>
-    </div>
-    <p id="desktop-version" class="desktop-version" hidden></p>
-  </nav>
   <main id="overview" tabindex="-1">
     <div class="page-heading">
-      <h1 data-l10n="pageTitle">研究管理台</h1>
+      <div>
+        <h1 data-l10n="pageTitle">研究管理台</h1>
+        <p id="desktop-version" class="desktop-version" hidden></p>
+      </div>
       <button id="refresh" type="button" class="quiet"><svg class="icon" aria-hidden="true" width="16" height="16"><use href="icons.svg#refresh"></use></svg><span data-l10n="refresh">刷新状态</span></button>
     </div>
 

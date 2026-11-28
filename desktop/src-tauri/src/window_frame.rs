@@ -5,6 +5,11 @@ use tauri::{State, Url, WebviewWindow};
 use crate::{is_management_page, is_workbench_origin};
 
 pub(crate) const WORKBENCH_UNAVAILABLE: &str = "https://tauri.localhost/workbench-unavailable.html";
+pub(crate) const RESEARCH_BUTTON_WIDTH: i32 = 44;
+pub(crate) const RESEARCH_CAPTION_HEIGHT: i32 = 34;
+pub(crate) const RESEARCH_CAPTION_TOP: i32 = 11;
+pub(crate) const RESEARCH_CAPTION_END: i32 = 8;
+pub(crate) const RESEARCH_DRAG_WIDTH: i32 = 48;
 
 #[derive(Default)]
 pub(crate) struct WorkbenchPort(AtomicU16);
@@ -51,6 +56,13 @@ pub(crate) fn initialization(
         "origin": origin,
         "recovery": (window == "research").then_some(WORKBENCH_UNAVAILABLE),
         "recoveryAppearance": appearance,
+        "researchCaption": {
+            "buttonWidth": RESEARCH_BUTTON_WIDTH,
+            "height": RESEARCH_CAPTION_HEIGHT,
+            "top": RESEARCH_CAPTION_TOP,
+            "end": RESEARCH_CAPTION_END,
+            "dragWidth": RESEARCH_DRAG_WIDTH,
+        },
         "stylesheet": include_str!("../../ui/window-frame.css"),
     });
     format!("({})({args});", include_str!("../../ui/window-frame.js"))
