@@ -976,6 +976,7 @@ export default function Experiments() {
                 className="h-8 w-8"
                 onClick={() => listQuery.refetch()}
                 disabled={listQuery.isFetching}
+                aria-label={tl({ zh: "刷新实验", en: "Refresh experiments" })}
               >
                 <RefreshCw
                   className={cn(
@@ -995,19 +996,31 @@ export default function Experiments() {
             </>
           }
           toolbar={
-            <div className="space-y-2"><Label>流程状态</Label><Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="h-8 w-full text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {STATUS_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {tl(opt.label)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Label>OOS 结论（当前列表）</Label><Select value={outcomeFilter} onValueChange={setOutcomeFilter}><SelectTrigger aria-label="OOS 结论筛选"><SelectValue /></SelectTrigger><SelectContent>{["all", "supported", "not_supported", "inconclusive", "unknown"].map(v => <SelectItem key={v} value={v}>{v === "all" ? "全部结论" : oosLabel(v, lang)}</SelectItem>)}</SelectContent></Select>
+            <div className="space-y-2">
+              <Label htmlFor="experiment-status">{tl({ zh: "流程状态", en: "Workflow status" })}</Label>
+              <Select value={statusFilter} onValueChange={setStatusFilter}>
+                <SelectTrigger id="experiment-status" className="h-8 w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STATUS_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>{tl(opt.label)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Label htmlFor="experiment-outcome">{tl({ zh: "OOS 结论（当前列表）", en: "OOS outcome (current list)" })}</Label>
+              <Select value={outcomeFilter} onValueChange={setOutcomeFilter}>
+                <SelectTrigger id="experiment-outcome" aria-label={tl({ zh: "OOS 结论筛选", en: "Filter by OOS outcome" })}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {["all", "supported", "not_supported", "inconclusive", "unknown"].map((value) => (
+                    <SelectItem key={value} value={value}>
+                      {value === "all" ? tl({ zh: "全部结论", en: "All outcomes" }) : oosLabel(value, lang)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           }
         >

@@ -4,7 +4,10 @@ const record = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
 /** Completed describes execution, never promotion or hypothesis support. */
-export function runSchedule(run: Pick<ResearchRunSummary, "manifest" | "result">) {
+export function runSchedule(
+  run: Pick<ResearchRunSummary, "manifest" | "result">,
+  lang: "zh" | "en" = "zh",
+) {
   const p = record(run.manifest?.parameters);
   const s = record(p.decision_schedule);
   const kinds = ["daily", "weekly", "monthly", "quarterly", "custom"];
@@ -51,12 +54,12 @@ export function runSchedule(run: Pick<ResearchRunSummary, "manifest" | "result">
     mode,
     conflict,
     frequency: conflict
-      ? "配置冲突"
+      ? (lang === "zh" ? "配置冲突" : "Conflicting schedules")
       : validSchedule
         ? String(s.kind)
         : legacy
           ? String(p.rebalance_frequency)
-          : "未记录",
+          : (lang === "zh" ? "未记录" : "Not recorded"),
     count: s.kind === "custom" && validDates && !conflict ? dates.length : null,
     first: s.kind === "custom" && validDates && !conflict ? dates[0] : null,
     last: s.kind === "custom" && validDates && !conflict ? dates.at(-1) : null,

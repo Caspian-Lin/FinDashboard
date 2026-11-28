@@ -267,11 +267,19 @@ export function BackfillRequestCard({ topicId }: { topicId: string | null }) {
                   {item.publish_preview && <span className="block break-all">{item.publish_preview.release_id}</span>}
                 </li>
               ))}</ul>
+              {blocked && <p className="font-medium text-destructive">
+                {tl({ zh: "补数计划受阻", en: "Backfill plan blocked" })}
+              </p>}
               {plan.blockers.map((blocker, index) => <p role="alert" className="break-words text-destructive" key={`${blocker.code}:${index}`}>{blocker.message}</p>)}
               {plan.warnings.map((warning) => <p className="break-words text-warning" key={warning}>{warning}</p>)}
             </div>
           )}
-          {matching && preview.error && <p role="alert" className="break-words text-sm text-destructive">{preview.error.message}</p>}
+          {matching && preview.error && (
+            <div role="alert" className="break-words text-sm text-destructive">
+              <p className="font-medium">{tl({ zh: "补数预检失败", en: "Backfill preflight failed" })}</p>
+              <p>{preview.error.message}</p>
+            </div>
+          )}
           {startRequest.error && <p role="alert" className="break-words text-sm text-destructive">{expired
             ? tl({ zh: "补数计划已变化，请重新预检。", en: "The backfill plan changed. Preview it again." }) : startRequest.error.message}</p>}
           <div className="flex flex-wrap gap-2">
