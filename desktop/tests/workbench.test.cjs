@@ -21,7 +21,7 @@ function element(id) {
 
 async function loadWorkbench({
   storage = new Map(), running = true, clipboardDenied = false, sourceDiagnostic, connection,
-  profiles = [], clients = [],
+  profiles = [], clients = [], docker = 'linux', repair,
 } = {}) {
   const nodes = new Map(Array.from(page.matchAll(/\bid="([^"]+)"/g), ([, id]) => [id, element(id)]));
   nodes.get('workbench-target').value = 'in_app';
@@ -31,6 +31,9 @@ async function loadWorkbench({
   const copies = [];
   let port = 8376;
   let launchError;
+  let language = 'zh';
+  let onLanguageChange;
+  let statusGate;
   vm.runInNewContext(source, {
     document: {
       querySelectorAll(selector) { return selector === '[id]' ? Array.from(nodes.values()) : []; },
@@ -38,7 +41,11 @@ async function loadWorkbench({
     },
     window: {
       addEventListener() {},
-      finboardDesktopPreferences: { text: (copy) => copy.zh, refreshCopy() {} },
+      finboardDesktopPreferences: {
+        text: (copy) => typeof copy === 'string' ? copy : copy?.[language],
+        appearance: () => ({ theme: 'dark', language }),
+        refreshCopy(listener) { onLanguageChange = listener; },
+      },
       __TAURI__: { core: {
         Channel: class {},
         invoke: async (command, args) => {
@@ -53,9 +60,10 @@ async function loadWorkbench({
           if (args.operation.kind === 'client_issue') {
             return { exit_code: 0, elapsed_seconds: 0, command: 'desktop-client-issue', connection };
           }
+          await statusGate;
           return {
             exit_code: 0, elapsed_seconds: 0, command: 'status',
-            status: { running, installed: true, docker: 'linux', port, scopes: [], dsh_profiles: profiles, clients },
+            status: { running, installed: true, docker, repair, port, scopes: [], dsh_profiles: profiles, clients },
           };
         },
       } },
@@ -76,6 +84,12 @@ async function loadWorkbench({
   return {
     calls, copies, nodes,
     setPort(value) { port = value; },
+    setLanguage(value) { language = value; onLanguageChange(); },
+    pauseStatus() {
+      let release;
+      statusGate = new Promise((resolve) => { release = resolve; });
+      return release;
+    },
     rejectLaunch(message) { launchError = message; },
     click(id) {
       const element = nodes.get(id);
@@ -89,12 +103,15 @@ test('defaults to in-app opening and keeps the saved browser preference on reloa
   const session = await loadWorkbench({ storage });
   await session.click('open-workbench');
   assert.equal(session.calls.at(-1)[1].action, 'in_app');
+  assert.equal(session.calls.at(-1)[1].appearance.theme, 'dark');
+  assert.equal(session.calls.at(-1)[1].appearance.language, 'zh');
 
   session.nodes.get('workbench-target').value = 'browser';
   session.nodes.get('workbench-target').handlers.change();
   const reloaded = await loadWorkbench({ storage });
   await reloaded.click('open-workbench');
   assert.equal(reloaded.calls.at(-1)[1].action, 'browser');
+  assert.equal(reloaded.calls.at(-1)[1].appearance, undefined);
   await reloaded.click('open-workbench-alternate');
   assert.equal(reloaded.calls.at(-1)[1].action, 'in_app');
 });
@@ -119,6 +136,31 @@ test('stopped services disable the workbench and native launch errors stay actio
   await ready.click('open-workbench-alternate');
   assert.match(ready.nodes.get('workbench-status').textContent, /复制工作台地址/);
   assert.equal(ready.nodes.get('workbench-status').dataset.error, 'true');
+});
+
+test('a blocked engine keeps its specific hint after switching languages without refreshing the host', async () => {
+  const repair = 'Start Docker Desktop in Linux containers mode and check access to the local engine.';
+  const session = await loadWorkbench({ running: false, docker: 'wrong_engine', repair });
+  assert.match(session.nodes.get('service-detail').textContent, /切换到 Linux 容器/);
+  session.setLanguage('en');
+  assert.match(session.nodes.get('service-detail').textContent, /Switch Docker Desktop to Linux containers/);
+  assert.match(session.nodes.get('log').textContent, /check access to the local engine/);
+  assert.equal(session.nodes.get('start').disabled, true);
+  assert.equal(session.calls.length, 1);
+});
+
+test('changing languages while an operation is pending does not restore old result metadata', async () => {
+  const session = await loadWorkbench();
+  const metadata = session.nodes.get('result-meta');
+  assert.match(metadata.textContent, /退出码 0/);
+  const release = session.pauseStatus();
+  const refresh = session.click('refresh');
+  assert.equal(metadata.textContent, '');
+  session.setLanguage('en');
+  assert.equal(metadata.textContent, '');
+  release();
+  await refresh;
+  assert.match(metadata.textContent, /Exit code 0/);
 });
 
 test('Tushare permission probe displays named outcomes without exposing credentials', async () => {
@@ -192,7 +234,7 @@ test('bundle control opens the native fixed destination only when ready', async 
   await running.click('open-release-bundles');
   assert.equal(running.calls.at(-1)[0], 'desktop_open_workbench');
   assert.equal(running.calls.at(-1)[1].action, 'release_bundles');
-  assert.deepEqual(Object.keys(running.calls.at(-1)[1]), ['action']);
+  assert.deepEqual(Object.keys(running.calls.at(-1)[1]), ['action', 'appearance']);
 
   const stopped = await loadWorkbench({ running: false });
   await stopped.click('open-release-bundles');

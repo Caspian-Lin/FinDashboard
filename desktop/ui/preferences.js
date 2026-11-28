@@ -92,8 +92,9 @@
     try { localStorage.setItem(key, value); } catch { /* apply for this session */ }
   }
 
-  let theme = load(themeKey) === 'light' ? 'light' : 'dark';
-  let language = load(localeKey) === 'en' ? 'en' : 'zh';
+  const recoveryAppearance = window.finboardDesktopRecoveryAppearance;
+  let theme = (recoveryAppearance?.theme ?? load(themeKey)) === 'light' ? 'light' : 'dark';
+  let language = (recoveryAppearance?.language ?? load(localeKey)) === 'en' ? 'en' : 'zh';
 
   function text(message) {
     return typeof message === 'string' ? message : message?.[language] ?? '';
@@ -132,6 +133,7 @@
   applyRoot();
   window.finboardDesktopPreferences = {
     text,
+    appearance() { return { theme, language }; },
     refreshCopy(listener) { listeners.add(listener); },
   };
   document.addEventListener('DOMContentLoaded', () => {

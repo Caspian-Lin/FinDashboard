@@ -1,10 +1,13 @@
-function mountWindowFrame({ window: kind, origin, recovery, stylesheet }) {
+function mountWindowFrame({ window: kind, origin, recovery, recoveryAppearance, stylesheet }) {
   if (window.top !== window) return;
   if (recovery && location.href === "chrome-error://chromewebdata/") {
     location.replace(recovery);
     return;
   }
   if (location.origin !== origin && location.href !== recovery) return;
+  if (location.href === recovery && recoveryAppearance) {
+    window.finboardDesktopRecoveryAppearance = recoveryAppearance;
+  }
 
   function mount() {
     const core = window.__TAURI__?.core;

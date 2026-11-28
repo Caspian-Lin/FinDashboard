@@ -323,6 +323,7 @@ function startRecord() {
   ui.command.hidden = true;
   ui['diagnostic-details'].hidden = true;
   ui['diagnostic-details'].open = false;
+  currentCopy.delete(ui['result-meta']);
   ui['result-meta'].textContent = '';
 }
 
@@ -570,7 +571,8 @@ async function performWorkbench(action) {
     : copy('正在打开研究工作台…', 'Opening the research workspace…'));
   reconcile();
   try {
-    const address = await core.invoke('desktop_open_workbench', { action });
+    const appearance = action === 'in_app' || action === 'release_bundles' ? preferences.appearance() : undefined;
+    const address = await core.invoke('desktop_open_workbench', { action, appearance });
     if (action !== 'address') {
       setWorkbenchStatus(action === 'browser' ? copy('已在系统浏览器中打开工作台。', 'Opened the workspace in the system browser.')
         : copy('已在应用内打开工作台。', 'Opened the workspace in the app.'));
